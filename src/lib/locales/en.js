@@ -129,6 +129,7 @@ export const strings = {
   show_account_menu: 'Show Account Menu',
   account: 'Account',
   live_site: 'Live Site',
+  subscribers: 'Newsletter-Subscribers',
   git_repository: 'Git Repository',
   settings: 'Settings',
   site_config: 'Site Configuration',
