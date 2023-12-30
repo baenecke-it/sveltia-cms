@@ -1,12 +1,14 @@
 <script>
   import { Divider, Icon, Menu, MenuButton, MenuItem } from '@sveltia/ui';
   import { _ } from 'svelte-i18n';
+  import {get} from "svelte/store";
   import PublishMenuItem from '$lib/components/global/global-toolbar/items/publish-menu-item.svelte';
   import ShortcutsDialog from '$lib/components/keyboard-shortcuts/shortcuts-dialog.svelte';
   import PrefsDialog from '$lib/components/prefs/prefs-dialog.svelte';
   import { backend, backendName } from '$lib/services/backends';
   import { openProductionSite } from '$lib/services/navigation';
   import { user } from '$lib/services/user';
+  import {siteConfig} from '$lib/services/config';
 
   /** @type {MenuButton} */
   let menuButton;
@@ -15,6 +17,9 @@
 
   $: hasAvatar = !!$user?.avatar_url;
   $: isLocal = $backendName === 'local';
+
+  /** @type {{url: string, label: string}[]} */
+  const additionalLinks = get(siteConfig).links ?? [];
 </script>
 
 <div role="none" class="wrapper">
@@ -54,12 +59,14 @@
           openProductionSite();
         }}
       />
-      <MenuItem
-              label={$_('subscribers')}
-              on:click={() => {
-          window.open('https://api.singtonic.net/subscribers', '_blank');
-        }}
-      />
+        {#each additionalLinks as additionalLink}
+            <MenuItem
+                    label={additionalLink.label}
+                    on:click={() => {
+                      window.open(additionalLink.url, '_blank');
+                    }}
+            />
+        {/each}
       <MenuItem
         label={$_('git_repository')}
         disabled={isLocal}
