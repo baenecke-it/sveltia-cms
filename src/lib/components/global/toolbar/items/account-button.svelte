@@ -3,11 +3,16 @@
   import { _ } from 'svelte-i18n';
   import AccountMenu from '$lib/components/global/toolbar/items/account-menu.svelte';
   import { user } from '$lib/services/user';
+  import { siteConfig } from '$lib/services/config';
 
   /** @type {MenuButton | undefined} */
   let menuButton = $state();
 
   const hasAvatar = $derived(!!$user?.avatarURL);
+  $: isLocal = $backendName === 'local';
+
+  /** @type {{url: string, label: string}[]} */
+  const additionalLinks = get(siteConfig)?.links ?? [];
 </script>
 
 <div role="none" class="wrapper">
