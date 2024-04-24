@@ -302,7 +302,15 @@
  * Default: `true`.
  * @property {'simple' | 'editorial_workflow'} [publish_mode] - Enable Editorial Workflow.
  * @property {boolean} [show_preview_links] - Whether to show preview links in Editorial Workflow.
+ * @property {LinkCollection[]} [links] - Link list to be shown when the Account Button is clicked.
  * @see https://decapcms.org/docs/configuration-options/
+ */
+
+/**
+ * LinkCollection.
+ * @typedef {object} LinkCollection
+ * @property {string} label - The label of this element which is shown in the UI.
+ * @property {string} url - The url this Element links to when clicked.
  */
 
 /**

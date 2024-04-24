@@ -1,7 +1,7 @@
 <script>
   import { Divider, Icon, Menu, MenuButton, MenuItem } from '@sveltia/ui';
   import { _ } from 'svelte-i18n';
-  import {get} from "svelte/store";
+  import { get } from 'svelte/store';
   import PublishMenuItem from '$lib/components/global/toolbar/items/publish-menu-item.svelte';
   import ShortcutsDialog from '$lib/components/keyboard-shortcuts/shortcuts-dialog.svelte';
   import PrefsDialog from '$lib/components/prefs/prefs-dialog.svelte';
@@ -10,7 +10,7 @@
   import { backend, backendName } from '$lib/services/backends';
   import { prefs } from '$lib/services/prefs';
   import { user } from '$lib/services/user';
-  import {siteConfig} from '$lib/services/config';
+  import { siteConfig } from '$lib/services/config';
 
   /** @type {MenuButton} */
   let menuButton;
@@ -21,7 +21,7 @@
   $: isLocal = $backendName === 'local';
 
   /** @type {{url: string, label: string}[]} */
-  const additionalLinks = get(siteConfig).links ?? [];
+  const additionalLinks = get(siteConfig)?.links ?? [];
 </script>
 
 <div role="none" class="wrapper">
@@ -61,14 +61,14 @@
           openProductionSite();
         }}
       />
-        {#each additionalLinks as additionalLink}
-            <MenuItem
-                    label={additionalLink.label}
-                    on:click={() => {
-                      window.open(additionalLink.url, '_blank');
-                    }}
-            />
-        {/each}
+      {#each additionalLinks as additionalLink}
+        <MenuItem
+          label={additionalLink.label}
+          on:click={() => {
+            window.open(additionalLink.url, '_blank');
+          }}
+        />
+      {/each}
       <MenuItem
         label={$_('git_repository')}
         disabled={isLocal}
