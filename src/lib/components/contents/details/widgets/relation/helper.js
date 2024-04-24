@@ -1,7 +1,7 @@
+import { escapeRegExp } from '@sveltia/utils/string';
 import { flatten, unflatten } from 'flat';
 import { getEntriesByCollection } from '$lib/services/contents';
 import { getFieldConfig } from '$lib/services/contents/entry';
-import { escapeRegExp } from '$lib/services/utils/strings';
 
 /**
  * Enclose the given field name in brackets if it doesn’t contain any brackets.
@@ -12,6 +12,11 @@ const normalizeFieldName = (fieldName) =>
   fieldName.match(/{{.+?}}/) ? fieldName : `{{${fieldName}}}`;
 
 /**
+ * @type {Map<string, { label: string, value: any }[]>}
+ */
+const optionCache = new Map();
+
+/**
  * Get options for a Relation field.
  * @param {LocaleCode} locale - Current locale.
  * @param {RelationField} fieldConfig - Field configuration.
@@ -19,6 +24,13 @@ const normalizeFieldName = (fieldName) =>
  * @returns {{ label: string, value: any }[]} Options.
  */
 export const getOptions = (locale, fieldConfig, refEntries) => {
+  const cacheKey = JSON.stringify({ locale, fieldConfig, refEntries });
+  const cache = optionCache.get(cacheKey);
+
+  if (cache) {
+    return cache;
+  }
+
   /**
    * @example 'userId'
    * @example 'name.first'
@@ -34,7 +46,11 @@ export const getOptions = (locale, fieldConfig, refEntries) => {
    * @example ['cities.*.id', 'cities.*.name'] (with wildcard, multiple)
    * @example ['{{twitterHandle}} - {{followerCount}}'] (template)
    */
-  const displayFields = fieldConfig.display_fields;
+  const displayFields = fieldConfig.display_fields ?? [valueField];
+  /**
+   * The format is the same as {@link displayFields}.
+   */
+  const searchFields = fieldConfig.search_fields ?? displayFields;
   /**
    * Canonical, templatized value field.
    * @example '{{name.first}}'
@@ -47,21 +63,33 @@ export const getOptions = (locale, fieldConfig, refEntries) => {
    * @example '{{sections.*.name}}'
    * @example '{{route}}: {{sections.*.name}} ({{sections.*.id}})'
    */
-  const _displayField = (displayFields ?? [valueField]).map(normalizeFieldName).join(' ');
+  const _displayField = displayFields.map(normalizeFieldName).join(' ');
+  /**
+   * Canonical, templatized search field.
+   */
+  const _searchField = searchFields.map(normalizeFieldName).join(' ');
+  /**
+   * Entry filters.
+   */
+  const entryFilters = fieldConfig.filters ?? [];
 
-  return refEntries
+  const options = refEntries
     .map((refEntry) => {
-      const { content } = refEntry?.locales[locale] ?? {};
+      // Fall back to the default locale if needed
+      const { content } = refEntry?.locales[locale] ?? refEntry?.locales._default ?? {};
 
-      if (!content) {
-        return undefined;
-      }
-
-      /**
-       * @type {FlattenedEntryContent}
-       */
-      const flattenContent = flatten(content);
-
+      return {
+        refEntry,
+        hasContent: !!content,
+        flattenedContent: /** @type {FlattenedEntryContent} */ (content ? flatten(content) : {}),
+      };
+    })
+    .filter(
+      ({ hasContent, flattenedContent }) =>
+        hasContent &&
+        entryFilters.every(({ field, values }) => values.includes(flattenedContent[field])),
+    )
+    .map(({ refEntry, flattenedContent }) => {
       /**
        * Map of replacing values. For a list widget, the key is a _partial_ key path like `cities.*`
        * instead of `cities.*.id` or `cities.*.name`, and the value is a key-value map, so that
@@ -75,6 +103,7 @@ export const getOptions = (locale, fieldConfig, refEntries) => {
             [
               ...[..._displayField.matchAll(/{{(.+?)}}/g)].map((m) => m[1]),
               ...[..._valueField.matchAll(/{{(.+?)}}/g)].map((m) => m[1]),
+              ...[..._searchField.matchAll(/{{(.+?)}}/g)].map((m) => m[1]),
             ].map((fieldName) =>
               fieldName.includes('.')
                 ? fieldName.replace(/^([^.]+)+\.\*\.[^.]+$/, '$1.*')
@@ -89,7 +118,7 @@ export const getOptions = (locale, fieldConfig, refEntries) => {
 
             const valueMap = unflatten(
               Object.fromEntries(
-                Object.entries(flattenContent).filter(([keyPath]) => !!keyPath.match(regex)),
+                Object.entries(flattenedContent).filter(([keyPath]) => !!keyPath.match(regex)),
               ),
             );
 
@@ -106,7 +135,7 @@ export const getOptions = (locale, fieldConfig, refEntries) => {
           });
 
           const keyPath = fieldName.replace(/^fields\./, '');
-          const value = flattenContent[keyPath];
+          const value = flattenedContent[keyPath];
 
           // Resolve the displayed value for a nested relation field
           if (_fieldConfig?.widget === 'relation') {
@@ -115,7 +144,7 @@ export const getOptions = (locale, fieldConfig, refEntries) => {
               // eslint-disable-next-line no-use-before-define
               getReferencedOptionLabel({
                 fieldConfig: /** @type {RelationField} */ (_fieldConfig),
-                valueMap: flattenContent,
+                valueMap: flattenedContent,
                 keyPath,
                 locale,
               }) ?? '',
@@ -135,15 +164,17 @@ export const getOptions = (locale, fieldConfig, refEntries) => {
 
       let labels = new Array(count).fill(_displayField);
       let values = new Array(count).fill(_valueField);
+      let searchValues = new Array(count).fill(_searchField);
 
       Object.entries(replacers).forEach(([key, value]) => {
         if (Array.isArray(value)) {
-          value.forEach((valueMap, valueIndex) => {
+          value.forEach((valueMap, index) => {
             Object.entries(valueMap).forEach(([k, v]) => {
               labels.forEach((_label, labelIndex) => {
-                if (valueIndex % labelIndex === 0) {
-                  labels[valueIndex] = labels[valueIndex].replaceAll(`{{${key}.${k}}}`, v);
-                  values[valueIndex] = values[valueIndex].replaceAll(`{{${key}.${k}}}`, v);
+                if (index % labelIndex === 0) {
+                  labels[index] = labels[index].replaceAll(`{{${key}.${k}}}`, v);
+                  values[index] = values[index].replaceAll(`{{${key}.${k}}}`, v);
+                  searchValues[index] = searchValues[index].replaceAll(`{{${key}.${k}}}`, v);
                 }
               });
             });
@@ -151,14 +182,22 @@ export const getOptions = (locale, fieldConfig, refEntries) => {
         } else {
           labels = labels.map((l) => l.replaceAll(`{{${key}}}`, value));
           values = values.map((v) => v.replaceAll(`{{${key}}}`, value));
+          searchValues = searchValues.map((v) => v.replaceAll(`{{${key}}}`, value));
         }
       });
 
-      return labels.map((label, index) => ({ label, value: values[index] }));
+      return labels.map((label, index) => ({
+        label,
+        value: values[index],
+        searchValue: searchValues[index],
+      }));
     })
     .flat(1)
-    .filter(Boolean)
     .sort((a, b) => a.label.localeCompare(b.label));
+
+  optionCache.set(cacheKey, options);
+
+  return options;
 };
 
 /**

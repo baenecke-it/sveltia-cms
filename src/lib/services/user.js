@@ -1,9 +1,9 @@
+import { isObject } from '@sveltia/utils/object';
+import { LocalStorage } from '@sveltia/utils/storage';
 import { _ } from 'svelte-i18n';
 import { get, writable } from 'svelte/store';
-import { backend, backendName } from '$lib/services/backends';
 import { siteConfig } from '$lib/services/config';
-import LocalStorage from '$lib/services/utils/local-storage';
-import { isObject } from '$lib/services/utils/misc';
+import { backend, backendName } from '$lib/services/backends';
 
 /**
  * @type {import('svelte/store').Writable<User | null | undefined>}
@@ -25,9 +25,9 @@ user.subscribe((_user) => {
 });
 
 /**
- * @type {import('svelte/store').Writable<string>}
+ * @type {import('svelte/store').Writable<{ message: string, canRetry: boolean }>}
  */
-export const authError = writable('');
+export const signInError = writable({ message: '', canRetry: false });
 
 /**
  * @type {import('svelte/store').Writable<boolean>}
@@ -39,9 +39,26 @@ export const unauthenticated = writable(false);
  * @param {Error} ex - Exception.
  */
 const logError = (ex) => {
-  authError.set(
-    /** @type {{ message: string }} */ (ex.cause)?.message || get(_)('unexpected_error'),
-  );
+  let message =
+    /** @type {{ message: string }} */ (ex.cause)?.message || get(_)('unexpected_error');
+
+  let canRetry = false;
+
+  if (ex.name === 'NotFoundError') {
+    message = get(_)('sign_in_error.not_project_root');
+    canRetry = true;
+  }
+
+  if (ex.name === 'AbortError') {
+    message = get(_)(
+      get(backendName) === 'local'
+        ? 'sign_in_error.picker_dismissed'
+        : 'sign_in_error.authentication_aborted',
+    );
+    canRetry = true;
+  }
+
+  signInError.set({ message, canRetry });
   // eslint-disable-next-line no-console
   console.error(ex.message, ex.cause);
 };
@@ -57,7 +74,7 @@ export const signInAutomatically = async () => {
     (await LocalStorage.get('decap-cms-user')) ||
     (await LocalStorage.get('netlify-cms-user'));
 
-  const _user = isObject(userCache) && !!userCache.backendName ? userCache : {};
+  let _user = isObject(userCache) && !!userCache.backendName ? userCache : undefined;
   // Local editing needs a secure context, either `http://localhost` or `http://*.localhost`
   // https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts
   const isLocal = !!window.location.hostname.match(/^(?:.+\.)?localhost$/);
@@ -65,57 +82,73 @@ export const signInAutomatically = async () => {
   // Netlify/Decap CMS uses `proxy` as the backend name when running the local proxy server and
   // leaves it in local storage. Sveltia CMS uses `local` instead.
   const _backendName =
-    _user.backendName?.replace('proxy', 'local') ??
-    (isLocal ? 'local' : get(siteConfig).backend?.name);
+    _user?.backendName?.replace('proxy', 'local') ??
+    (isLocal ? 'local' : get(siteConfig)?.backend?.name);
 
   backendName.set(_backendName);
 
-  // Don’t try to sign in automatically if the local backend is being used, because it requires user
-  // interaction to acquire file/directory handles.
-  if (_backendName === 'local') {
+  const _backend = get(backend);
+
+  if (!_user || !_backend) {
+    return;
+  }
+
+  try {
+    _user = await _backend.signIn({ token: _user.token, auto: true });
+  } catch {
+    unauthenticated.set(true);
+  }
+
+  if (!_user || get(unauthenticated)) {
     return;
   }
 
   // Use the cached user to start fetching files
-  if (get(backend) && _user.token && !get(unauthenticated)) {
-    user.set(_user);
+  user.set(_user);
 
-    try {
-      await get(backend).fetchFiles();
-    } catch (/** @type {any} */ error) {
-      // The API request may fail if the cached token has been expired or revoked. Then let the user
-      // sign in again. 404 Not Found is also considered an authentication error.
-      // https://docs.github.com/en/rest/overview/troubleshooting-the-rest-api#404-not-found-for-an-existing-resource
-      if ([401, 403, 404].includes(error.cause?.status)) {
-        unauthenticated.set(true);
-      } else {
-        logError(error);
-      }
+  try {
+    await _backend.fetchFiles();
+    // Reset error
+    signInError.set({ message: '', canRetry: false });
+  } catch (/** @type {any} */ ex) {
+    // The API request may fail if the cached token has been expired or revoked. Then let the user
+    // sign in again. 404 Not Found is also considered an authentication error.
+    // https://docs.github.com/en/rest/overview/troubleshooting-the-rest-api#404-not-found-for-an-existing-resource
+    if ([401, 403, 404].includes(ex.cause?.status)) {
+      unauthenticated.set(true);
+    } else {
+      logError(ex);
     }
   }
 };
 
 /**
  * Sign in with the given backend.
- * @param {string} [savedToken] - User’s auth token. Can be empty for the local backend or when a
- * token is not saved in the local storage.
+ * @param {string} [token] - User’s auth token. Can be empty for the local backend or when a token
+ * is not saved in the local storage.
  */
-export const signInManually = async (savedToken = '') => {
+export const signInManually = async (token = '') => {
   let _user;
 
   try {
-    _user = await get(backend).signIn(savedToken);
-  } catch (/** @type {any} */ error) {
-    logError(error);
+    _user = await get(backend)?.signIn({ token, auto: false });
+  } catch (/** @type {any} */ ex) {
+    logError(ex);
 
+    return;
+  }
+
+  if (!_user) {
     return;
   }
 
   user.set(_user);
 
   try {
-    await get(backend).fetchFiles();
-  } catch (/** @type {any} */ error) {
-    logError(error);
+    await get(backend)?.fetchFiles();
+    // Reset error
+    signInError.set({ message: '', canRetry: false });
+  } catch (/** @type {any} */ ex) {
+    logError(ex);
   }
 };

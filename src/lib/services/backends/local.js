@@ -2,16 +2,21 @@
 /* eslint-disable no-await-in-loop */
 /* eslint-disable no-restricted-syntax */
 
+import { getHash } from '@sveltia/utils/crypto';
+import { readAsText } from '@sveltia/utils/file';
+import { IndexedDB } from '@sveltia/utils/storage';
+import { escapeRegExp, stripSlashes } from '@sveltia/utils/string';
 import { get, writable } from 'svelte/store';
 import { allAssetFolders, allAssets } from '$lib/services/assets';
+import { repositoryProps } from '$lib/services/backends/shared/data';
 import { siteConfig } from '$lib/services/config';
 import { allEntries, allEntryFolders, dataLoaded } from '$lib/services/contents';
 import { createFileList, parseAssetFiles, parseEntryFiles } from '$lib/services/parser';
-import { getHash, readAsText } from '$lib/services/utils/files';
-import IndexedDB from '$lib/services/utils/indexeddb';
-import { escapeRegExp, stripSlashes } from '$lib/services/utils/strings';
 
+const backendName = 'local';
 const label = 'Local Repository';
+/** @type {RepositoryInfo} */
+const repository = { ...repositoryProps };
 /**
  * @type {import('svelte/store').Writable<?FileSystemDirectoryHandle>}
  */
@@ -24,43 +29,54 @@ let rootDirHandleDB;
 
 /**
  * Get the project’s root directory handle so the app can read all the files under the directory.
- * The handle will be cached in IndexedDB for later use. Note that we need to request permission
- * each time the app is loaded.
+ * The handle will be cached in IndexedDB for later use.
  * @param {object} [options] - Options.
  * @param {boolean} [options.forceReload] - Whether to force getting the handle.
- * @returns {Promise<FileSystemDirectoryHandle>} Directory handle.
- * @throws {Error} When the File System Access API is not supported by the user’s browser.
+ * @param {boolean} [options.showPicker] - Whether to show the directory picker.
+ * @returns {Promise<FileSystemDirectoryHandle | null>} Directory handle.
+ * @throws {Error | AbortError | NotFoundError} When the File System Access API is not supported by
+ * the user’s browser, when the directory picker was dismissed, or when the selected directory is
+ * not a project root directory. There might be other reasons to throw.
  * @see https://developer.chrome.com/articles/file-system-access/#stored-file-or-directory-handles-and-permissions
  */
-const getRootDirHandle = async ({ forceReload = false } = {}) => {
+const getRootDirHandle = async ({ forceReload = false, showPicker = true } = {}) => {
   if (!('showDirectoryPicker' in window)) {
     throw new Error('unsupported');
   }
 
   /**
-   * @type {FileSystemDirectoryHandle & { requestPermission: Function, entries: Function }}
+   * @type {FileSystemDirectoryHandle & { requestPermission: Function, entries: Function } | null}
    */
-  let handle = forceReload ? undefined : await rootDirHandleDB.get(rootDirHandleKey);
+  let handle = forceReload ? null : (await rootDirHandleDB.get(rootDirHandleKey)) ?? null;
 
   if (handle) {
     if ((await handle.requestPermission({ mode: 'readwrite' })) !== 'granted') {
-      handle = undefined;
+      handle = null;
     } else {
       try {
         await handle.entries().next();
-      } catch {
-        // The directory may have been (re)moved
-        handle = undefined;
+      } catch (/** @type {any} */ ex) {
+        // The directory may have been (re)moved. Let the user pick the directory again
+        handle = null;
+        // eslint-disable-next-line no-console
+        console.error(ex);
       }
     }
   }
 
-  if (!handle) {
+  if (!handle && showPicker) {
+    // This wil throw `AbortError` when the user dismissed the picker
     handle = await window.showDirectoryPicker();
-    await rootDirHandleDB.set(rootDirHandleKey, handle);
+
+    if (handle) {
+      // This will throw `NotFoundError` when it’s not a project root directory
+      await handle.getDirectoryHandle('.git');
+      // If it looks fine, cache the directory handle
+      await rootDirHandleDB.set(rootDirHandleKey, handle);
+    }
   }
 
-  return handle;
+  return /** @type {FileSystemDirectoryHandle | null} */ (handle);
 };
 
 /**
@@ -74,20 +90,39 @@ const discardDirHandle = async () => {
  * Initialize the backend.
  */
 const init = () => {
-  const { backend } = get(siteConfig);
+  const {
+    name: service,
+    repo: projectPath,
+    branch,
+  } = /** @type {SiteConfig} */ (get(siteConfig)).backend;
 
-  rootDirHandleDB = new IndexedDB(`${backend.name}:${backend.repo}`, 'file-system-handles');
+  const [owner, repo] = /** @type {string} */ (projectPath).split('/');
+
+  if (!repository.owner) {
+    Object.assign(repository, { service, owner, repo, branch });
+  }
+
+  rootDirHandleDB = new IndexedDB(`${service}:${projectPath}`, 'file-system-handles');
 };
 
 /**
  * Sign in with the local Git repository. There is no actual sign-in; just show the directory picker
  * to get the handle, so we can read/write files.
- * @returns {Promise<User>} User info.
+ * @param {SignInOptions} options - Options.
+ * @returns {Promise<User>} User info. Since we don’t have any details for the local user, just
+ * return the backend name.
+ * @throws {Error} When the directory handle could not be acquired.
  */
-const signIn = async () => {
-  rootDirHandle.set(await getRootDirHandle());
+const signIn = async ({ auto = false }) => {
+  const handle = await getRootDirHandle({ showPicker: !auto });
 
-  return { backendName: 'local' };
+  if (handle) {
+    rootDirHandle.set(handle);
+  } else {
+    throw new Error('Directory handle could not be acquired');
+  }
+
+  return { backendName };
 };
 
 /**
@@ -101,15 +136,12 @@ const signOut = async () => {
 /**
  * Get a file or directory handle at the given path.
  * @param {string} path - Path to the file/directory.
- * @returns {Promise<(FileSystemFileHandle|FileSystemDirectoryHandle)>} Handle.
+ * @returns {Promise<FileSystemFileHandle | FileSystemDirectoryHandle>} Handle.
  */
 const getHandleByPath = async (path) => {
   const pathParts = stripSlashes(path).split('/');
   const create = true;
-  /**
-   * @type {FileSystemFileHandle | FileSystemDirectoryHandle}
-   */
-  let handle = get(rootDirHandle);
+  let handle = /** @type {FileSystemFileHandle | FileSystemDirectoryHandle} */ (get(rootDirHandle));
 
   for (const name of pathParts) {
     handle = await (name.includes('.')
@@ -126,13 +158,13 @@ const getHandleByPath = async (path) => {
  */
 const getAllFiles = async () => {
   const _rootDirHandle = get(rootDirHandle);
-  /** @type {BaseFileListItem[]} */
-  const allFiles = [];
+  /** @type {{ file: File, path: string }[]} */
+  const availableFileList = [];
 
   const scanningPaths = [
     ...get(allEntryFolders).map(({ filePath, folderPath }) => filePath || folderPath),
     ...get(allAssetFolders).map(({ internalPath }) => internalPath),
-  ].map((path) => stripSlashes(path));
+  ].map((path) => stripSlashes(path ?? ''));
 
   /**
    * Get a regular expression to match the given path.
@@ -152,7 +184,7 @@ const getAllFiles = async () => {
         continue;
       }
 
-      const path = (await _rootDirHandle.resolve(handle)).join('/');
+      const path = (await _rootDirHandle?.resolve(handle))?.join('/') ?? '';
       const hasMatchingPath = scanningPathsRegEx.some((re) => path.match(re));
 
       if (handle.kind === 'file') {
@@ -161,19 +193,10 @@ const getAllFiles = async () => {
         }
 
         try {
-          const file = await handle.getFile();
-
-          allFiles.push({
-            file,
-            path,
-            name,
-            sha: await getHash(file),
-            size: file.size,
-            text: name.match(/\.(?:json|markdown|md|toml|ya?ml)$/i) ? await readAsText(file) : null,
-          });
-        } catch (/** @type {any} */ error) {
+          availableFileList.push({ file: await handle.getFile(), path });
+        } catch (/** @type {any} */ ex) {
           // eslint-disable-next-line no-console
-          console.error(error);
+          console.error(ex);
         }
       }
 
@@ -191,7 +214,18 @@ const getAllFiles = async () => {
 
   await iterate(_rootDirHandle);
 
-  return allFiles;
+  return Promise.all(
+    availableFileList.map(async ({ file, path }) => {
+      const { name, size } = file;
+
+      const [sha, text] = await Promise.all([
+        getHash(file),
+        name.match(/\.(?:json|markdown|md|toml|ya?ml)$/i) ? readAsText(file) : undefined,
+      ]);
+
+      return { file, path, name, sha, size, text };
+    }),
+  );
 };
 
 /**
@@ -216,7 +250,7 @@ const commitChanges = async (changes) => {
   await Promise.all(
     changes.map(async ({ action, path, data }) => {
       try {
-        if (['create', 'update'].includes(action)) {
+        if (['create', 'update'].includes(action) && data) {
           const handle = /** @type {FileSystemFileHandle} */ (await getHandleByPath(path));
           const writer = await handle.createWritable();
 
@@ -225,14 +259,14 @@ const commitChanges = async (changes) => {
         }
 
         if (action === 'delete') {
-          const [, dirPath, fileName] = stripSlashes(path).match(/(.+)\/([^/]+)$/);
+          const [, dirPath, fileName] = stripSlashes(path).match(/(.+)\/([^/]+)$/) ?? [];
           const handle = /** @type {FileSystemDirectoryHandle} */ (await getHandleByPath(dirPath));
 
           await handle.removeEntry(fileName);
         }
-      } catch (/** @type {any} */ error) {
+      } catch (/** @type {any} */ ex) {
         // eslint-disable-next-line no-console
-        console.error(error);
+        console.error(ex);
       }
     }),
   );
@@ -242,7 +276,9 @@ const commitChanges = async (changes) => {
  * @type {BackendService}
  */
 export default {
+  name: backendName,
   label,
+  repository,
   init,
   signIn,
   signOut,

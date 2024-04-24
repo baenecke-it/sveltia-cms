@@ -8,15 +8,14 @@
   import DOMPurify from 'isomorphic-dompurify';
   import { createEventDispatcher, onMount } from 'svelte';
   import { _ } from 'svelte-i18n';
+  import AssetPreview from '$lib/components/assets/shared/asset-preview.svelte';
   import SimpleImageGrid from '$lib/components/assets/shared/simple-image-grid.svelte';
   import EmptyState from '$lib/components/common/empty-state.svelte';
-  import Image from '$lib/components/common/image.svelte';
-  import Video from '$lib/components/common/video.svelte';
   import { selectAssetsView } from '$lib/services/contents/editor';
   import { prefs } from '$lib/services/prefs';
 
   /**
-   * @type {'image' | 'any'}
+   * @type {AssetKind}
    */
   export let kind = 'image';
   /**
@@ -29,7 +28,7 @@
   export let serviceProps;
   /**
    * The `id` attribute of the inner listbox.
-   * @type {string}
+   * @type {string | undefined}
    */
   export let gridId = undefined;
 
@@ -60,11 +59,11 @@
    */
   let authState = 'initial';
   /**
-   * @type {?ExternalAsset[]}
+   * @type {ExternalAsset[] | null}
    */
   let searchResults = null;
   /**
-   * @type {string}
+   * @type {string | undefined}
    */
   let error;
 
@@ -77,8 +76,10 @@
 
     try {
       searchResults = await search(query, { kind, apiKey, userName, password });
-    } catch {
+    } catch (/** @type {any} */ ex) {
       error = 'search_fetch_failed';
+      // eslint-disable-next-line no-console
+      console.error(ex);
     }
   };
 
@@ -99,16 +100,20 @@
 
     try {
       const response = await fetch(downloadURL);
+      const { ok, status } = response;
 
-      if (!response.ok) {
-        throw new Error();
+      if (!ok) {
+        throw new Error(`The response returned with HTTP status ${status}.`);
       }
 
-      const file = new File([await response.blob()], fileName, { type: 'image/jpeg' });
+      const blob = await response.blob();
+      const file = new File([blob], fileName, { type: blob.type });
 
       dispatch('select', { file, credit });
-    } catch {
+    } catch (/** @type {any} */ ex) {
       error = 'image_fetch_failed';
+      // eslint-disable-next-line no-console
+      console.error(ex);
     }
   };
 
@@ -163,19 +168,17 @@
       {gridId}
       viewType={$selectAssetsView?.type}
       on:change={(event) => {
-        selectAsset(
-          searchResults.find(({ id }) => id === /** @type {CustomEvent} */ (event).detail.value),
-        );
+        const { value } = /** @type {CustomEvent} */ (event).detail;
+        const asset = searchResults?.find(({ id }) => id === value);
+
+        if (asset) {
+          selectAsset(asset);
+        }
       }}
     >
       {#each searchResults as { id, previewURL, description, kind: _kind } (id)}
-        <Option value={id}>
-          {#if _kind === 'image'}
-            <Image src={previewURL} variant="tile" crossorigin="anonymous" />
-          {/if}
-          {#if _kind === 'video'}
-            <Video src={previewURL} variant="tile" crossorigin="anonymous" />
-          {/if}
+        <Option label="" value={id}>
+          <AssetPreview kind={_kind} src={previewURL} variant="tile" crossorigin="anonymous" />
           <span role="none" class="name">{description}</span>
         </Option>
       {/each}
@@ -256,7 +259,7 @@
             input.userName = input.userName.trim();
             input.password = input.password.trim();
 
-            if (await signIn(input.userName, input.password)) {
+            if (await signIn?.(input.userName, input.password)) {
               authState = 'success';
               userName = input.userName;
               password = input.password;

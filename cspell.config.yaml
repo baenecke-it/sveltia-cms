@@ -20,31 +20,39 @@ ignorePaths:
 words:
   - astros
   - camelcase
+  - Cloudinary
   - danurbanowicz
   - Decap
   - DeepL
+  - deepmerge
   - dompurify
   - Gitea
   - gzipped
   - hotlinking
   - iarna
+  - IIFE
   - indexeddb
+  - infobars
   - jsdoc
   - kyoshino
   - pexels
   - Photoshop
   - Pixabay
+  - PKCE
   - plusplus
   - pnpm
   - postcss
   - prefs
+  - previewable
   - privatemaker
   - proxify
   - proxyfied
+  - Ragdoll
   - reimagined
   - Roadmap
   - safesearch
   - singleline
+  - smol
   - stylelint
   - Sveitia
   - sveltejs
@@ -54,10 +62,14 @@ words:
   - unadded
   - uncategorized
   - unflatten
+  - unlinkable
   - unproxify
+  - Uploadcare
+  - Vite
   - WCAG
   - weba
   - webformat
+  - whitespaces
   - xslx
   - zanhk
 overrides:

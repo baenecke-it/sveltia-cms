@@ -1,8 +1,10 @@
 <script>
   import { Alert, Group, Toast } from '@sveltia/ui';
+  import { sleep } from '@sveltia/utils/misc';
   import { onMount } from 'svelte';
   import { _ } from 'svelte-i18n';
   import AssetDetailsOverlay from '$lib/components/assets/details/asset-details-overlay.svelte';
+  import EditAssetDialog from '$lib/components/assets/details/edit-asset-dialog.svelte';
   import AssetList from '$lib/components/assets/list/asset-list.svelte';
   import PrimarySidebar from '$lib/components/assets/list/primary-sidebar.svelte';
   import PrimaryToolbar from '$lib/components/assets/list/primary-toolbar.svelte';
@@ -10,6 +12,7 @@
   import SecondaryToolbar from '$lib/components/assets/list/secondary-toolbar.svelte';
   import PageContainerMainArea from '$lib/components/common/page-container-main-area.svelte';
   import PageContainer from '$lib/components/common/page-container.svelte';
+  import { announcedPageStatus, parseLocation } from '$lib/services/app/navigation';
   import {
     allAssetFolders,
     allAssets,
@@ -18,19 +21,20 @@
   } from '$lib/services/assets';
   import { assetUpdatesToast } from '$lib/services/assets/data';
   import { getFolderLabelByPath, listedAssets } from '$lib/services/assets/view';
-  import { announcedPageStatus, parseLocation } from '$lib/services/navigation';
 
   let path = '';
+
+  $: selectedAssetFolderLabel = getFolderLabelByPath($selectedAssetFolder?.internalPath);
 
   /**
    * Navigate to the asset list or asset details page given the URL hash.
    * @todo Show Not Found page.
    */
-  const navigate = () => {
+  const navigate = async () => {
     ({ path } = parseLocation());
 
     const [match, folderPath, fileName] =
-      path.match(/^\/assets(?:\/([/\-\w]+))?(?:\/([^/]+.\w{3,4}))?$/) ?? [];
+      path.match(/^\/assets(?:\/([/\-\w]+))?(?:\/([^/]+.\w{2,4}))?$/) ?? [];
 
     if (!match) {
       return;
@@ -51,23 +55,26 @@
     if (!fileName) {
       const count = $listedAssets.length;
 
-      $overlaidAsset = null;
+      // Wait for `selectedAssetFolderLabel` to be updated
+      await sleep(100);
+
+      $overlaidAsset = undefined;
       $announcedPageStatus = $_(
         // eslint-disable-next-line no-nested-ternary
         count > 1
           ? 'viewing_x_asset_folder_many_assets'
           : count === 1
             ? 'viewing_x_asset_folder_one_asset'
-            : 'viewing_x_asset_folder_no_asset',
-        { values: { folder: getFolderLabelByPath($selectedAssetFolder?.internalPath), count } },
+            : 'viewing_x_asset_folder_no_assets',
+        { values: { folder: selectedAssetFolderLabel, count } },
       );
 
       return;
     }
 
     $overlaidAsset = path.match(/^\/assets\/(.+?)\.[a-zA-Z0-9]+$/)
-      ? $allAssets.find((asset) => asset.path === `${folderPath}/${fileName}`) ?? null
-      : null;
+      ? $allAssets.find((asset) => asset.path === `${folderPath}/${fileName}`)
+      : undefined;
     $announcedPageStatus = $overlaidAsset
       ? $_('viewing_x_asset_details', { values: { name: $overlaidAsset.name } })
       : $_('file_not_found');
@@ -91,7 +98,7 @@
     id="assets-container"
     class="main"
     aria-label={$_('x_asset_folder', {
-      values: { folder: getFolderLabelByPath($selectedAssetFolder?.internalPath) },
+      values: { folder: selectedAssetFolderLabel },
     })}
   >
     <PageContainerMainArea>
@@ -106,6 +113,8 @@
 {#if $overlaidAsset}
   <AssetDetailsOverlay />
 {/if}
+
+<EditAssetDialog />
 
 <Toast bind:show={$assetUpdatesToast.saved}>
   <Alert status="success">

@@ -1,7 +1,7 @@
+import { isObject } from '@sveltia/utils/object';
 import { locale as appLocale } from 'svelte-i18n';
 import { get } from 'svelte/store';
 import { siteConfig } from '$lib/services/config';
-import { isObject } from '$lib/services/utils/misc';
 
 /**
  * The default, normalized i18n configuration with no locales defined.
@@ -20,15 +20,15 @@ export const defaultI18nConfig = {
  * @param {RawCollection} collection - Collection.
  * @param {RawCollectionFile} [file] - Collection file.
  * @returns {I18nConfig} Config.
- * @see https://decapcms.org/docs/beta-features/#i18n-support
+ * @see https://decapcms.org/docs/i18n/
  */
 export const getI18nConfig = (collection, file) => {
-  const _siteConfig = get(siteConfig);
+  const _siteConfig = /** @type {SiteConfig} */ (get(siteConfig));
   /** @type {RawI18nConfig | undefined} */
   let config;
 
   if (isObject(_siteConfig?.i18n)) {
-    config = _siteConfig.i18n;
+    config = /** @type {RawI18nConfig} */ (_siteConfig.i18n);
 
     if (collection?.i18n) {
       if (isObject(collection.i18n)) {
@@ -86,8 +86,9 @@ export const getCanonicalLocale = (locale) => {
   if (locale !== '_default') {
     try {
       [canonicalLocale] = Intl.getCanonicalLocales(locale);
-    } catch {
-      //
+    } catch (/** @type {any} */ ex) {
+      // eslint-disable-next-line no-console
+      console.error(ex);
     }
   }
 
@@ -103,9 +104,20 @@ export const getCanonicalLocale = (locale) => {
 export const getLocaleLabel = (locale) => {
   const canonicalLocale = getCanonicalLocale(locale);
 
+  if (!canonicalLocale) {
+    return locale;
+  }
+
+  const formatter = new Intl.DisplayNames(/** @type {string} */ (get(appLocale)), {
+    type: 'language',
+  });
+
   try {
-    return new Intl.DisplayNames(get(appLocale), { type: 'language' }).of(canonicalLocale);
-  } catch {
+    return formatter.of(canonicalLocale) ?? locale;
+  } catch (/** @type {any} */ ex) {
+    // eslint-disable-next-line no-console
+    console.error(ex);
+
     return locale;
   }
 };

@@ -3,7 +3,7 @@
   import { _ } from 'svelte-i18n';
   import PageContainer from '$lib/components/common/page-container.svelte';
   import SearchResults from '$lib/components/search/search-results.svelte';
-  import { announcedPageStatus, parseLocation } from '$lib/services/navigation';
+  import { announcedPageStatus, parseLocation } from '$lib/services/app/navigation';
   import { searchResults, searchTerms } from '$lib/services/search';
 
   /**
@@ -30,14 +30,14 @@
             ? $_('many_entries', { values: { count: entryCount } })
             : entryCount === 1
               ? $_('one_entry')
-              : $_('no_entry'),
+              : $_('no_entries'),
         assets:
           // eslint-disable-next-line no-nested-ternary
           assetCount > 1
             ? $_('many_assets', { values: { count: assetCount } })
             : assetCount === 1
               ? $_('one_asset')
-              : $_('no_asset'),
+              : $_('no_assets'),
       },
     });
   };

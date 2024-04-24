@@ -1,10 +1,16 @@
 interface Window {
   CMS: Proxy;
+  CMS_MANUAL_INIT?: boolean;
+  initCMS: Function;
   showDirectoryPicker: Function;
 }
 
 interface Navigator {
   userAgentData: { platform: string };
+}
+
+interface Element {
+  scrollIntoViewIfNeeded?: Function;
 }
 
 interface FileSystemFileHandle {

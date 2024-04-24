@@ -1,5 +1,6 @@
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import path from 'path';
+import { visualizer } from 'rollup-plugin-visualizer';
 import sveltePreprocess from 'svelte-preprocess';
 import { defineConfig } from 'vite';
 
@@ -17,15 +18,29 @@ export default defineConfig({
     rollupOptions: {
       // Output JavaScript only
       input: 'src/main.js',
-      output: {
-        entryFileNames: 'sveltia-cms.js',
-      },
+      output: [
+        {
+          entryFileNames: 'sveltia-cms.js',
+          format: 'iife',
+        },
+        {
+          entryFileNames: 'sveltia-cms.mjs',
+          format: 'es',
+        },
+      ],
+      // Keep exports in the ES module
+      // https://stackoverflow.com/q/71500190
+      preserveEntrySignatures: 'strict',
     },
   },
   plugins: [
     svelte({
       emitCss: false,
       preprocess: sveltePreprocess(),
+    }),
+    // https://www.npmjs.com/package/rollup-plugin-visualizer
+    visualizer({
+      filename: '.vite/stats.html',
     }),
   ],
 });

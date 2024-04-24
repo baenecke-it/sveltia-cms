@@ -1,5 +1,6 @@
 <script>
-  import { Button, Dialog, Listbox, Option, OptionGroup, SearchBar, TextInput } from '@sveltia/ui';
+  import { Dialog, Listbox, Option, OptionGroup, SearchBar, TextInput } from '@sveltia/ui';
+  import { generateUUID } from '@sveltia/utils/crypto';
   import { createEventDispatcher, onMount } from 'svelte';
   import { _ } from 'svelte-i18n';
   import AssetsPanel from '$lib/components/assets/shared/assets-panel.svelte';
@@ -15,37 +16,37 @@
     allStockPhotoServices,
   } from '$lib/services/integrations/media-libraries';
   import { prefs } from '$lib/services/prefs';
-  import { generateUUID } from '$lib/services/utils/strings';
 
   export let open = false;
   /**
-   * @type {'image' | 'any'}
+   * @type {AssetKind | undefined}
    */
-  export let kind = 'image';
+  export let kind;
   export let canEnterURL = true;
 
   const dispatch = createEventDispatcher();
   const title = kind === 'image' ? $_('assets_dialog.title.image') : $_('assets_dialog.title.file');
+  let libraryName = 'upload';
   /**
-   * @type {import('svelte').SvelteComponent}
+   * @type {DropZone}
    */
   let collectionAssetsDropZone;
   /**
-   * @type {import('svelte').SvelteComponent}
+   * @type {DropZone}
    */
   let allAssetsDropZone;
   let elementIdPrefix = '';
   /**
-   * @type {?SelectedAsset}
+   * @type {SelectedAsset | null}
    */
   let selectedAsset = null;
   let enteredURL = '';
   let searchTerms = '';
 
-  $: ({ internalPath, entryRelative } =
-    $selectedCollection._assetFolder ?? /** @type {CollectionAssetFolder} */ ({}));
+  $: ({ internalPath = '', entryRelative = false } =
+    $selectedCollection?._assetFolder ?? /** @type {any} */ ({}));
+  $: showUploader = libraryName === 'upload';
   $: showCollectionAssets = !!internalPath && !entryRelative;
-  $: libraryName = showCollectionAssets ? 'collection-files' : 'all-files';
   $: isLocalLibrary = ['collection-files', 'all-files'].includes(libraryName);
   $: isEnabledMediaService =
     (Object.keys(allStockPhotoServices).includes(libraryName) && $prefs?.apiKeys?.[libraryName]) ||
@@ -59,7 +60,7 @@
   }
 
   onMount(() => {
-    elementIdPrefix = `library-${generateUUID().split('-').pop()}`;
+    elementIdPrefix = `library-${generateUUID('short')}`;
   });
 </script>
 
@@ -74,25 +75,12 @@
   }}
 >
   <svelte:fragment slot="header-extra">
-    {#if isLocalLibrary}
-      <Button
-        variant="secondary"
-        label={$_('upload')}
-        on:click={() => {
-          if (libraryName === 'collection-files') {
-            collectionAssetsDropZone.openFilePicker();
-          } else {
-            allAssetsDropZone.openFilePicker();
-          }
-        }}
-      />
-    {/if}
     {#if isLocalLibrary || isEnabledMediaService}
       <ViewSwitcher currentView={selectAssetsView} aria-controls="select-assets-grid" />
       <SearchBar
         bind:value={searchTerms}
         disabled={!!selectedAsset?.file}
-        aria-label={$_(`assets_dialog.search_for_${kind}`)}
+        aria-label={$_(`assets_dialog.search_for_${kind ?? 'file'}`)}
       />
     {/if}
   </svelte:fragment>
@@ -115,9 +103,14 @@
       on:change={(event) => {
         libraryName = /** @type {CustomEvent} */ (event).detail.name;
         selectedAsset = null;
+        collectionAssetsDropZone?.reset();
+        allAssetsDropZone?.reset();
       }}
     >
-      <OptionGroup label={$_('assets_dialog.location.this_repository')}>
+      <OptionGroup label={$_('assets_dialog.location.local')}>
+        <Option name="upload" label={$_('upload')} selected={showUploader} />
+      </OptionGroup>
+      <OptionGroup label={$_('assets_dialog.location.repository')}>
         {#if showCollectionAssets}
           <Option
             name="collection-files"
@@ -127,70 +120,78 @@
         {/if}
         <Option name="all-files" label={$_('all_assets')} selected={libraryName === 'all-files'} />
       </OptionGroup>
-      <OptionGroup label={$_('assets_dialog.location.external_locations')}>
-        {#if canEnterURL}
-          <Option name="enter-url" label={$_('assets_dialog.enter_url')} />
-        {/if}
-        {#each Object.values(allCloudStorageServices) as { serviceId, serviceLabel } (serviceId)}
-          <Option name={serviceId} label={serviceLabel} />
-        {/each}
-      </OptionGroup>
+      {#if canEnterURL || !!Object.keys(allCloudStorageServices).length}
+        <OptionGroup label={$_('assets_dialog.location.external_locations')}>
+          {#if canEnterURL}
+            <Option name="enter-url" label={$_('assets_dialog.enter_url')} />
+          {/if}
+          {#each Object.values(allCloudStorageServices) as { serviceId, serviceLabel } (serviceId)}
+            <Option name={serviceId} label={serviceLabel} />
+          {/each}
+        </OptionGroup>
+      {/if}
       <OptionGroup label={$_('assets_dialog.location.stock_photos')}>
         {#each Object.values(allStockPhotoServices) as { serviceId, serviceLabel } (serviceId)}
           <Option name={serviceId} label={serviceLabel} />
         {/each}
       </OptionGroup>
     </Listbox>
-    <div id="{elementIdPrefix}-content-pane" class="content-pane">
-      {#if showCollectionAssets && libraryName === 'collection-files'}
+    <div role="none" id="{elementIdPrefix}-content-pane" class="content-pane">
+      {#if showCollectionAssets && (libraryName === 'collection-files' || showUploader)}
         <DropZone
           bind:this={collectionAssetsDropZone}
           accept={kind === 'image' ? 'image/*' : undefined}
+          showUploadButton={showUploader}
           showFilePreview={true}
           on:select={({ detail: { files } }) => {
             selectedAsset = files.length ? { file: files[0] } : null;
           }}
         >
-          <AssetsPanel
-            assets={$allAssets.filter(
-              (asset) => (!kind || kind === asset.kind) && internalPath === asset.folder,
-            )}
-            viewType={$selectAssetsView?.type}
-            {searchTerms}
-            gridId="select-assets-grid"
-            checkerboard={true}
-            on:select={({ detail }) => {
-              selectedAsset = detail;
-            }}
-          />
+          {#if !showUploader}
+            <AssetsPanel
+              assets={$allAssets.filter(
+                (asset) => (!kind || kind === asset.kind) && internalPath === asset.folder,
+              )}
+              viewType={$selectAssetsView?.type}
+              {searchTerms}
+              gridId="select-assets-grid"
+              checkerboard={true}
+              on:select={({ detail }) => {
+                selectedAsset = detail;
+              }}
+            />
+          {/if}
         </DropZone>
       {/if}
-      {#if libraryName === 'all-files'}
+      {#if libraryName === 'all-files' || (!showCollectionAssets && showUploader)}
         <DropZone
           bind:this={allAssetsDropZone}
           accept={kind === 'image' ? 'image/*' : undefined}
+          showUploadButton={showUploader}
           showFilePreview={true}
           on:select={({ detail: { files } }) => {
             selectedAsset = files.length ? { file: files[0] } : null;
           }}
         >
-          <AssetsPanel
-            assets={$allAssets.filter(
-              (asset) =>
-                (!kind || kind === asset.kind) &&
-                // Hide assets stored in an entry-relative path, since these files are only used for
-                // the associated entry
-                !$allAssetFolders.find((folder) => folder.collectionName === asset.collectionName)
-                  ?.entryRelative,
-            )}
-            viewType={$selectAssetsView?.type}
-            {searchTerms}
-            gridId="select-assets-grid"
-            checkerboard={true}
-            on:select={({ detail }) => {
-              selectedAsset = detail;
-            }}
-          />
+          {#if !showUploader}
+            <AssetsPanel
+              assets={$allAssets.filter(
+                (asset) =>
+                  (!kind || kind === asset.kind) &&
+                  // Hide assets stored in an entry-relative path, since these files are only used
+                  // for the associated entry
+                  !$allAssetFolders.find((folder) => folder.collectionName === asset.collectionName)
+                    ?.entryRelative,
+              )}
+              viewType={$selectAssetsView?.type}
+              {searchTerms}
+              gridId="select-assets-grid"
+              checkerboard={true}
+              on:select={({ detail }) => {
+                selectedAsset = detail;
+              }}
+            />
+          {/if}
         </DropZone>
       {/if}
       {#if canEnterURL && libraryName === 'enter-url'}

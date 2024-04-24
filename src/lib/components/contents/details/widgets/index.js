@@ -2,6 +2,7 @@ import BooleanEditor from '$lib/components/contents/details/widgets/boolean/bool
 import BooleanPreview from '$lib/components/contents/details/widgets/boolean/boolean-preview.svelte';
 import ColorEditor from '$lib/components/contents/details/widgets/color/color-editor.svelte';
 import ColorPreview from '$lib/components/contents/details/widgets/color/color-preview.svelte';
+import ComputeEditor from '$lib/components/contents/details/widgets/compute/compute-editor.svelte';
 import DateTimeEditor from '$lib/components/contents/details/widgets/date-time/date-time-editor.svelte';
 import DateTimePreview from '$lib/components/contents/details/widgets/date-time/date-time-preview.svelte';
 import FileEditor from '$lib/components/contents/details/widgets/file/file-editor.svelte';
@@ -22,6 +23,8 @@ import StringEditor from '$lib/components/contents/details/widgets/string/string
 import StringPreview from '$lib/components/contents/details/widgets/string/string-preview.svelte';
 import TextEditor from '$lib/components/contents/details/widgets/text/text-editor.svelte';
 import TextPreview from '$lib/components/contents/details/widgets/text/text-preview.svelte';
+import UuidEditor from '$lib/components/contents/details/widgets/uuid/uuid-editor.svelte';
+import UuidPreview from '$lib/components/contents/details/widgets/uuid/uuid-preview.svelte';
 
 /**
  * @type {{ [key: string]: any }}
@@ -29,7 +32,7 @@ import TextPreview from '$lib/components/contents/details/widgets/text/text-prev
 export const editors = {
   boolean: BooleanEditor,
   color: ColorEditor,
-  date: DateTimeEditor, // alias
+  compute: ComputeEditor,
   datetime: DateTimeEditor,
   file: FileEditor,
   image: FileEditor, // alias
@@ -41,6 +44,7 @@ export const editors = {
   select: SelectEditor,
   string: StringEditor,
   text: TextEditor,
+  uuid: UuidEditor,
 };
 
 /**
@@ -49,7 +53,7 @@ export const editors = {
 export const previews = {
   boolean: BooleanPreview,
   color: ColorPreview,
-  date: DateTimePreview, // alias
+  compute: StringPreview, // alias
   datetime: DateTimePreview,
   file: FilePreview,
   image: FilePreview, // alias
@@ -61,4 +65,5 @@ export const previews = {
   select: SelectPreview,
   string: StringPreview,
   text: TextPreview,
+  uuid: UuidPreview,
 };

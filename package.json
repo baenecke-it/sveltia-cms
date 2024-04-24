@@ -1,6 +1,6 @@
 {
   "name": "@sveltia/cms",
-  "version": "0.9.5",
+  "version": "0.21.0",
   "license": "MIT",
   "type": "module",
   "publishConfig": {
@@ -22,42 +22,53 @@
     "test": "vitest"
   },
   "devDependencies": {
-    "@sveltejs/vite-plugin-svelte": "^3.0.1",
-    "cspell": "^8.2.3",
-    "eslint": "^8.56.0",
+    "@sveltejs/vite-plugin-svelte": "^3.1.0",
+    "@types/node": "^20.12.7",
+    "cspell": "^8.7.0",
+    "eslint": "^8.57.0",
     "eslint-config-airbnb-base": "^15.0.0",
     "eslint-config-prettier": "^9.1.0",
     "eslint-plugin-import": "^2.29.1",
-    "eslint-plugin-jsdoc": "^46.9.1",
-    "eslint-plugin-svelte": "^2.35.1",
+    "eslint-plugin-jsdoc": "^48.2.3",
+    "eslint-plugin-svelte": "^2.37.0",
     "npm-run-all": "^4.1.5",
-    "postcss": "^8.4.32",
-    "postcss-html": "^1.5.0",
-    "prettier": "^3.1.1",
-    "prettier-plugin-svelte": "^3.1.2",
-    "sass": "^1.69.5",
-    "stylelint": "^16.0.2",
+    "postcss": "^8.4.38",
+    "postcss-html": "^1.6.0",
+    "prettier": "^3.2.5",
+    "prettier-plugin-svelte": "^3.2.3",
+    "rollup-plugin-visualizer": "^5.12.0",
+    "sass": "^1.75.0",
+    "stylelint": "^16.3.1",
     "stylelint-config-recommended-scss": "^14.0.0",
-    "stylelint-scss": "^6.0.0",
-    "svelte": "^4.2.8",
-    "svelte-check": "^3.6.2",
+    "stylelint-scss": "^6.2.1",
+    "svelte": "^4.2.15",
+    "svelte-check": "^3.6.9",
     "svelte-i18n": "^4.0.0",
-    "svelte-preprocess": "^5.1.3",
-    "vite": "^5.0.10",
-    "vitest": "^1.1.0"
+    "svelte-preprocess": "^5.1.4",
+    "vite": "^5.2.10",
+    "vitest": "^1.5.0"
   },
   "dependencies": {
-    "@ltd/j-toml": "^1.38.0",
-    "@sveltia/ui": "^0.9.0",
+    "@sveltia/ui": "^0.12.1",
+    "@sveltia/utils": "^0.1.1",
+    "deepmerge": "^4.3.1",
     "fast-deep-equal": "^3.1.3",
     "flat": "^6.0.1",
-    "isomorphic-dompurify": "^2.0.0",
-    "marked": "^11.1.0",
+    "isomorphic-dompurify": "^2.7.0",
+    "marked": "^12.0.2",
     "mime": "^4.0.1",
-    "moment": "^2.29.4",
-    "yaml": "^2.3.4"
+    "moment": "^2.30.1",
+    "smol-toml": "^1.1.4",
+    "yaml": "^2.4.1"
   },
   "files": [
     "dist"
-  ]
+  ],
+  "main": "./dist/sveltia-cms.mjs",
+  "module": "./dist/sveltia-cms.mjs",
+  "exports": {
+    ".": {
+      "import": "./dist/sveltia-cms.mjs"
+    }
+  }
 }

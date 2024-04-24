@@ -1,15 +1,42 @@
 /* eslint-disable no-await-in-loop */
 
+import { sleep } from '@sveltia/utils/misc';
 import { locale as appLocale } from 'svelte-i18n';
 import { get } from 'svelte/store';
-import { sleep } from '$lib/services/utils/misc';
 
+/**
+ * @see https://www.pexels.com/api/documentation/#photos-search__parameters__locale
+ */
 const supportedLocales = [
-  'en-US,pt-BR,es-ES,ca-ES,de-DE,it-IT,fr-FR,sv-SE,id-ID,pl-PL,ja-JP,zh-TW,zh-CN,ko-KR,th-TH,nl-NL',
-  'hu-HU,vi-VN,cs-CZ,da-DK,fi-FI,uk-UA,el-GR,ro-RO,nb-NO,sk-SK,tr-TR,ru-RU',
-]
-  .join(',')
-  .split(',');
+  'en-US',
+  'pt-BR',
+  'es-ES',
+  'ca-ES',
+  'de-DE',
+  'it-IT',
+  'fr-FR',
+  'sv-SE',
+  'id-ID',
+  'pl-PL',
+  'ja-JP',
+  'zh-TW',
+  'zh-CN',
+  'ko-KR',
+  'th-TH',
+  'nl-NL',
+  'hu-HU',
+  'vi-VN',
+  'cs-CZ',
+  'da-DK',
+  'fi-FI',
+  'uk-UA',
+  'el-GR',
+  'ro-RO',
+  'nb-NO',
+  'sk-SK',
+  'tr-TR',
+  'ru-RU',
+];
 
 const endpoint = 'https://api.pexels.com/v1';
 
@@ -24,7 +51,7 @@ const endpoint = 'https://api.pexels.com/v1';
  */
 const search = async (query, { apiKey }) => {
   const headers = { Authorization: apiKey };
-  const [locale] = get(appLocale).toLowerCase().split('-');
+  const [locale] = /** @type {string} */ (get(appLocale)).toLowerCase().split('-');
   /**
    * @type {{
    * id: number,

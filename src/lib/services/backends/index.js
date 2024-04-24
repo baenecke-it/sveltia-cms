@@ -1,5 +1,6 @@
 import { derived, writable } from 'svelte/store';
 import github from '$lib/services/backends/github';
+import gitlab from '$lib/services/backends/gitlab';
 import local from '$lib/services/backends/local';
 
 /**
@@ -9,6 +10,7 @@ import local from '$lib/services/backends/local';
  */
 export const allBackendServices = {
   github,
+  gitlab,
   local,
 };
 
@@ -18,11 +20,16 @@ export const allBackendServices = {
 export const backendName = writable();
 
 /**
- * @type {import('svelte/store').Readable<BackendService>}
+ * @type {import('svelte/store').Readable<BackendService | undefined>}
  */
-export const backend = derived([backendName], ([name], set) => {
-  const service = allBackendServices[name];
+export const backend = derived([backendName], ([name], _set, update) => {
+  update((currentService) => {
+    const newService = name ? allBackendServices[name] : undefined;
 
-  service?.init();
-  set(service);
+    if (newService && newService !== currentService) {
+      newService?.init();
+    }
+
+    return newService;
+  });
 });

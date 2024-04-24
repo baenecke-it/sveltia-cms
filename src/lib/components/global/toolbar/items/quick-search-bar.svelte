@@ -1,8 +1,8 @@
 <script>
   import { SearchBar } from '@sveltia/ui';
   import { _ } from 'svelte-i18n';
+  import { goBack, goto, parseLocation } from '$lib/services/app/navigation';
   import { selectedCollection } from '$lib/services/contents';
-  import { goBack, goto, parseLocation } from '$lib/services/navigation';
   import { searchTerms } from '$lib/services/search';
 
   /**
@@ -19,7 +19,7 @@
     if (terms) {
       goto(`/search/${terms}`, { replaceState: searching });
     } else if (hadTerms && searching) {
-      goBack(`/collections/${$selectedCollection.name}`);
+      goBack(`/collections/${$selectedCollection?.name}`);
     }
   };
 
@@ -28,7 +28,7 @@
    */
   let wrapper;
   /**
-   * @type {import('svelte').SvelteComponent}
+   * @type {SearchBar}
    */
   let searchBar;
 
@@ -46,7 +46,7 @@
     keyShortcuts="Accel+F"
     showInlineLabel={true}
     aria-label={$_('search_placeholder')}
-    --sui-textbox-label-align="center"
+    --sui-textbox-placeholder-text-align="center"
     on:input={({ target }) => {
       // @todo Implement quick search dropdown.
       navigate(/** @type {HTMLInputElement} */ (target).value.trim());

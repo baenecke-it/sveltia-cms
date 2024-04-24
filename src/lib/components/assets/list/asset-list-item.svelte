@@ -1,9 +1,9 @@
 <script>
   import { Checkbox, GridCell, GridRow } from '@sveltia/ui';
-  import Image from '$lib/components/common/image.svelte';
-  import Video from '$lib/components/common/video.svelte';
-  import { selectedAsset, selectedAssets } from '$lib/services/assets';
-  import { currentView, listedAssets } from '$lib/services/assets/view';
+  import AssetPreview from '$lib/components/assets/shared/asset-preview.svelte';
+  import { goto } from '$lib/services/app/navigation';
+  import { canPreviewAsset, focusedAsset, selectedAssets } from '$lib/services/assets';
+  import { listedAssets } from '$lib/services/assets/view';
 
   /**
    * @type {Asset}
@@ -44,14 +44,12 @@
   on:change={(event) => {
     updateSelection(/** @type {CustomEvent} */ (event).detail.selected);
   }}
-  on:click={() => {
-    $selectedAsset = asset;
-
-    if (!$currentView?.showInfo) {
-      currentView.update((view) => ({
-        ...view,
-        showInfo: !$currentView?.showInfo,
-      }));
+  on:focus={() => {
+    $focusedAsset = asset;
+  }}
+  on:dblclick={() => {
+    if ($focusedAsset && canPreviewAsset($focusedAsset)) {
+      goto(`/assets/${$focusedAsset?.path}`);
     }
   }}
 >
@@ -66,12 +64,12 @@
     />
   </GridCell>
   <GridCell class="image">
-    {#if kind === 'image'}
-      <Image {asset} variant={viewType === 'list' ? 'icon' : 'tile'} checkerboard={true} />
-    {/if}
-    {#if kind === 'video'}
-      <Video {asset} variant={viewType === 'list' ? 'icon' : 'tile'} />
-    {/if}
+    <AssetPreview
+      {kind}
+      {asset}
+      variant={viewType === 'list' ? 'icon' : 'tile'}
+      checkerboard={kind === 'image'}
+    />
   </GridCell>
   <GridCell class="title">
     <span role="none">{name}</span>

@@ -1,13 +1,15 @@
 <script>
-  import { Divider, Icon, Menu, MenuButton, MenuItem, Spacer, getRandomId } from '@sveltia/ui';
+  import { Divider, Icon, Menu, MenuButton, MenuItem, Spacer } from '@sveltia/ui';
+  import { generateElementId } from '@sveltia/utils/element';
+  import { escapeRegExp } from '@sveltia/utils/string';
   import equal from 'fast-deep-equal';
+  import DOMPurify from 'isomorphic-dompurify';
   import { marked } from 'marked';
   import { _ } from 'svelte-i18n';
-  import CopyMenuItems from '$lib/components/contents/details/editor/copy-menu-items.svelte';
-  import { editors } from '$lib/components/contents/details/widgets';
-  import { entryDraft, revertChanges } from '$lib/services/contents/editor';
   import { defaultI18nConfig } from '$lib/services/contents/i18n';
-  import { escapeRegExp } from '$lib/services/utils/strings';
+  import { entryDraft, revertChanges } from '$lib/services/contents/editor';
+  import { editors } from '$lib/components/contents/details/widgets';
+  import CopyMenuItems from '$lib/components/contents/details/editor/copy-menu-items.svelte';
 
   /**
    * @type {LocaleCode}
@@ -22,7 +24,18 @@
    */
   export let fieldConfig;
 
-  const fieldId = getRandomId('field');
+  const fieldId = generateElementId('field');
+
+  /**
+   * Parse the given string as Markdown and sanitize the result to only allow certain tags.
+   * @param {string} str - Original string.
+   * @returns {string} Sanitized string.
+   */
+  const sanitize = (str) =>
+    DOMPurify.sanitize(/** @type {string} */ (marked.parseInline(str.replaceAll('\\n', '<br>'))), {
+      ALLOWED_TAGS: ['strong', 'em', 'del', 'code', 'a', 'br'],
+      ALLOWED_ATTR: ['href'],
+    });
 
   /** @type {MenuButton} */
   let menuButton;
@@ -32,6 +45,7 @@
   $: ({
     name: fieldName,
     label = '',
+    comment = '',
     hint = '',
     widget: widgetName = 'string',
     required = true,
@@ -45,17 +59,32 @@
   $: ({ min, max } = /** @type {ListField | NumberField | RelationField | SelectField} */ (
     fieldConfig
   ));
+  $: type =
+    widgetName === 'string' ? /** @type {StringField} */ (fieldConfig).type ?? 'text' : undefined;
+  $: allowPrefix = ['string'].includes(widgetName);
+  $: prefix = allowPrefix ? /** @type {StringField} */ (fieldConfig).prefix : undefined;
+  $: suffix = allowPrefix ? /** @type {StringField} */ (fieldConfig).suffix : undefined;
+  $: allowExtraLabels = ['boolean', 'number', 'string'].includes(widgetName);
+  $: beforeInputLabel = allowExtraLabels
+    ? /** @type {BooleanField | NumberField | StringField} */ (fieldConfig).before_input
+    : undefined;
+  $: afterInputLabel = allowExtraLabels
+    ? /** @type {BooleanField | NumberField | StringField} */ (fieldConfig).after_input
+    : undefined;
+  $: hasExtraLabels = !!(prefix || suffix || beforeInputLabel || afterInputLabel);
   $: hasMultiple = ['relation', 'select'].includes(widgetName);
   $: multiple = hasMultiple
     ? /** @type {RelationField | SelectField} */ (fieldConfig).multiple
     : undefined;
   $: isList = widgetName === 'list' || (hasMultiple && multiple);
-  $: ({ collection, collectionFile, originalValues, currentValues, validities } = $entryDraft);
+  $: ({ collection, collectionFile, originalValues, currentValues, validities } =
+    $entryDraft ?? /** @type {EntryDraft} */ ({}));
   $: ({ i18nEnabled, locales, defaultLocale } =
     (collectionFile ?? collection)?._i18n ?? defaultI18nConfig);
   $: otherLocales = i18nEnabled ? locales.filter((l) => l !== locale) : [];
   $: canTranslate = i18nEnabled && (i18n === true || i18n === 'translate');
   $: canDuplicate = i18nEnabled && i18n === 'duplicate';
+  $: canEdit = locale === defaultLocale || canTranslate || canDuplicate;
   $: keyPathRegex = new RegExp(`^${escapeRegExp(keyPath)}\\.\\d+$`);
 
   // Multiple values are flattened in the value map object
@@ -74,18 +103,20 @@
   $: validity = validities[locale][keyPath];
 
   $: fieldLabel = label || fieldName;
-  $: readonly = i18n === 'duplicate' && locale !== defaultLocale;
+  $: readonly = (i18n === 'duplicate' && locale !== defaultLocale) || widgetName === 'compute';
   $: invalid = validity?.valid === false;
 </script>
 
-{#if widgetName !== 'hidden' && (locale === defaultLocale || canTranslate || canDuplicate)}
+{#if $entryDraft && canEdit && widgetName !== 'hidden'}
   {@const canCopy = canTranslate && otherLocales.length}
   {@const canRevert = !(canDuplicate && locale !== defaultLocale)}
   <section
     role="group"
+    class="field"
     aria-label={$_('x_field', { values: { field: fieldLabel } })}
     data-widget={widgetName}
     data-key-path={keyPath}
+    hidden={widgetName === 'compute'}
   >
     <header role="none">
       {#if !readonly && required}
@@ -129,7 +160,10 @@
         </MenuButton>
       {/if}
     </header>
-    <div id="{fieldId}-error" class="validation" aria-live="assertive">
+    {#if !readonly && comment}
+      <p class="comment">{@html sanitize(comment)}</p>
+    {/if}
+    <div role="alert" id="{fieldId}-error" class="validation" aria-live="polite">
       {#if validity?.valid === false}
         {#if validity.valueMissing}
           <div role="none">
@@ -171,9 +205,15 @@
             {pattern?.[1] ?? ''}
           </div>
         {/if}
+        {#if validity.typeMismatch}
+          <div role="none">
+            <Icon name="error" />
+            {$_(`validation.type_mismatch.${type}`)}
+          </div>
+        {/if}
       {/if}
     </div>
-    <div role="none">
+    <div role="none" class="widget-wrapper" class:has-extra-labels={hasExtraLabels}>
       {#if !(widgetName in editors)}
         <div role="none">{$_('unsupported_widget_x', { values: { name: widgetName } })}</div>
       {:else if isList}
@@ -190,6 +230,12 @@
           {invalid}
         />
       {:else}
+        {#if beforeInputLabel}
+          <div role="none" class="before-input">{@html sanitize(beforeInputLabel)}</div>
+        {/if}
+        {#if prefix}
+          <div role="none" class="prefix">{prefix}</div>
+        {/if}
         <svelte:component
           this={editors[widgetName]}
           {locale}
@@ -202,15 +248,27 @@
           {required}
           {invalid}
         />
+        {#if suffix}
+          <div role="none" class="suffix">{suffix}</div>
+        {/if}
+        {#if afterInputLabel}
+          <div role="none" class="after-input">{@html sanitize(afterInputLabel)}</div>
+        {/if}
       {/if}
     </div>
     {#if !readonly && hint}
-      <div role="none" class="hint">{@html marked.parse(hint)}</div>
+      <p class="hint">{@html sanitize(hint)}</p>
     {/if}
   </section>
 {/if}
 
 <style lang="scss">
+  @keyframes highlight {
+    50% {
+      opacity: 0.2;
+    }
+  }
+
   section {
     padding: 16px;
 
@@ -223,6 +281,10 @@
       margin-right: auto;
       margin-left: auto;
       max-width: 768px;
+    }
+
+    &:global(.highlight > *) {
+      animation: highlight 750ms 2;
     }
   }
 
@@ -246,69 +308,87 @@
       background-color: var(--sui-error-background-color);
       font-size: var(--sui-font-size-x-small);
     }
-
-    & + div {
-      :global(input[type='color']),
-      :global(input[type='date']),
-      :global(input[type='datetime-local']),
-      :global(input[type='time']),
-      :global(input[type='number']) {
-        outline: 0;
-        border: 0;
-        color: inherit;
-      }
-
-      :global(input[type='text']),
-      :global(textarea) {
-        width: 100%;
-      }
-
-      :global(input[type='color']),
-      :global(input[type='number']) {
-        background-color: var(--sui-textbox-background-color);
-        border-width: 1px;
-        border-color: var(--sui-primary-border-color);
-        border-radius: var(--sui-control-medium-border-radius);
-      }
-
-      :global(input[type='file']),
-      :global(input[type='checkbox']),
-      & > :global(div) {
-        color: inherit;
-      }
-
-      :global(input[type='date']),
-      :global(input[type='datetime-local']),
-      :global(input[type='time']) {
-        width: auto;
-        text-transform: uppercase;
-        background-color: transparent;
-      }
-    }
   }
 
   .validation {
     color: var(--sui-error-foreground-color);
+    font-size: var(--sui-font-size-small);
 
     div {
       display: flex;
       gap: 4px;
-      margin: 8px 0;
+      margin: 4px 0;
 
       :global(.icon) {
         flex: none;
-        font-size: 20px; /* !hardcoded */
+        font-size: 16px; /* !hardcoded */
       }
     }
   }
 
-  .hint {
-    margin-top: 8px;
-    font-size: var(--sui-font-size-small);
-    opacity: 0.75;
-
-    :global(p) {
-      margin: 0;
+  .widget-wrapper {
+    &.has-extra-labels {
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+      gap: 4px;
     }
+
+    :global(input[type='color']),
+    :global(input[type='date']),
+    :global(input[type='datetime-local']),
+    :global(input[type='time']),
+    :global(input[type='number']) {
+      outline: 0;
+      border: 0;
+      color: inherit;
+    }
+
+    :global(input[type='text']),
+    :global(textarea) {
+      width: 100%;
+    }
+
+    :global(input[type='color']),
+    :global(input[type='number']) {
+      background-color: var(--sui-textbox-background-color);
+      border-width: 1px;
+      border-color: var(--sui-primary-border-color);
+      border-radius: var(--sui-control-medium-border-radius);
+    }
+
+    :global(input[type='file']),
+    :global(input[type='checkbox']),
+    & > :global(div) {
+      color: inherit;
+    }
+
+    :global(input[type='date']),
+    :global(input[type='datetime-local']),
+    :global(input[type='time']) {
+      width: auto;
+      text-transform: uppercase;
+      background-color: transparent;
+    }
+  }
+
+  .before-input,
+  .after-input,
+  .prefix,
+  .suffix {
+    color: var(--sui-secondary-foreground-color);
+    white-space: nowrap;
+  }
+
+  .comment {
+    margin: 4px;
+    line-height: var(--sui-line-height-compact);
+  }
+
+  .hint {
+    margin: 4px 4px 0;
+    font-size: var(--sui-font-size-small);
+    line-height: var(--sui-line-height-compact);
+    opacity: 0.75;
   }
 </style>

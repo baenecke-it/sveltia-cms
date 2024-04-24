@@ -28,5 +28,7 @@
 </script>
 
 {#if typeof currentValue === 'boolean'}
-  <p>{$_(`boolean.${currentValue}`)}</p>
+  <p>
+    {$_(`boolean.${currentValue}`)}
+  </p>
 {/if}

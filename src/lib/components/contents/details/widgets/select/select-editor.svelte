@@ -4,10 +4,10 @@
   @see https://decapcms.org/docs/widgets/#select
 -->
 <script>
-  import { Button, Combobox, Icon, Option, Select } from '@sveltia/ui';
+  import { Button, Icon, Option, Select } from '@sveltia/ui';
+  import { isObject } from '@sveltia/utils/object';
   import { _ } from 'svelte-i18n';
   import { entryDraft, updateListField } from '$lib/services/contents/editor';
-  import { isObject } from '$lib/services/utils/misc';
 
   /**
    * @type {LocaleCode}
@@ -51,6 +51,11 @@
    */
   export let invalid = false;
 
+  /**
+   * @type {string | undefined}
+   */
+  let selectValue = undefined;
+
   $: ({
     i18n,
     // Widget-specific options
@@ -61,17 +66,15 @@
   } = fieldConfig);
 
   /**
-   * @type {{ label: string, value: string }[]}
+   * @type {{ label: string, value: string, searchValue?: string }[]}
    */
   $: options = (() => {
-    const _options = fieldOptions.map((option) => ({
-      label: isObject(option)
-        ? /** @type {{ label: string, value: string }} */ (option).label
-        : /** @type {string} */ (option),
-      value: isObject(option)
-        ? /** @type {{ label: string, value: string }} */ (option).value
-        : /** @type {string} */ (option),
-    }));
+    const _options =
+      /** @type {{ label: string, value: string, searchValue?: string }[] | string[]} */ (
+        fieldOptions
+      ).map((option) =>
+        isObject(option) ? /** @type {any} */ (option) : { label: option, value: option },
+      );
 
     if (sortOptions) {
       _options.sort((a, b) => a.label.localeCompare(b.label));
@@ -82,11 +85,11 @@
 
   /**
    * Update the value for the list.
-   * @param {(arg: { valueList: any[], viewList: any[] }) => void} manipulate -
+   * @param {(arg: { valueList: any[], expanderStateList: any[] }) => void} manipulate -
    * See {@link updateListField}.
    */
   const updateList = (manipulate) => {
-    Object.keys($entryDraft.currentValues).forEach((_locale) => {
+    Object.keys($entryDraft?.currentValues ?? {}).forEach((_locale) => {
       if (!(i18n !== 'duplicate' && _locale !== locale)) {
         updateListField(_locale, keyPath, manipulate);
       }
@@ -136,31 +139,27 @@
       {/if}
     {/each}
     {#if (typeof max !== 'number' || currentValue.length < max) && currentValue.length < options.length}
-      <Combobox
+      <Select
         disabled={readonly}
         {readonly}
         {required}
         {invalid}
-        on:change={({ detail: { target, value } }) => {
+        bind:value={selectValue}
+        on:change={() => {
           // Avoid an error while navigating pages
-          if (!$entryDraft) {
-            return;
+          if ($entryDraft && selectValue) {
+            addValue(selectValue);
+            // Reset the combobox
+            selectValue = undefined;
           }
-
-          addValue(value);
-
-          // Make the textbox empty
-          window.requestAnimationFrame(() => {
-            target.value = '';
-          });
         }}
       >
-        {#each options as { label, value } (value)}
+        {#each options as { label, value, searchValue } (value)}
           {#if !currentValue.includes(value)}
-            <Option {label} {value} />
+            <Option {label} {value} {searchValue} />
           {/if}
         {/each}
-      </Combobox>
+      </Select>
     {/if}
   </div>
 {:else}
@@ -172,8 +171,8 @@
     aria-labelledby="{fieldId}-label"
     aria-errormessage="{fieldId}-error"
   >
-    {#each options as { label, value } (value)}
-      <Option {label} {value} selected={value === currentValue} />
+    {#each options as { label, value, searchValue } (value)}
+      <Option {label} {value} {searchValue} selected={value === currentValue} />
     {/each}
   </Select>
 {/if}

@@ -1,8 +1,37 @@
 import { locale as appLocale } from 'svelte-i18n';
 import { get } from 'svelte/store';
 
-const supportedLocales =
-  'cs,da,de,en,es,fr,id,it,hu,nl,no,pl,pt,ro,sk,fi,sv,tr,vi,th,bg,ru,el,ja,ko,zh'.split(',');
+/**
+ * @see https://pixabay.com/api/docs/#api_search_images
+ */
+const supportedLocales = [
+  'cs',
+  'da',
+  'de',
+  'en',
+  'es',
+  'fr',
+  'id',
+  'it',
+  'hu',
+  'nl',
+  'no',
+  'pl',
+  'pt',
+  'ro',
+  'sk',
+  'fi',
+  'sv',
+  'tr',
+  'vi',
+  'th',
+  'bg',
+  'ru',
+  'el',
+  'ja',
+  'ko',
+  'zh',
+];
 
 const endpoint = 'https://pixabay.com/api';
 
@@ -16,7 +45,7 @@ const endpoint = 'https://pixabay.com/api';
  * @todo Support video files.
  */
 const search = async (query, { apiKey }) => {
-  const [locale] = get(appLocale).toLowerCase().split('-');
+  const [locale] = /** @type {string} */ (get(appLocale)).toLowerCase().split('-');
 
   const params = new URLSearchParams(
     /** @type {Record<string, any>} */ ({
@@ -68,7 +97,7 @@ const search = async (query, { apiKey }) => {
       description: tags,
       previewURL: webformatURL.replace('_640.', imageWidth > imageHeight ? '_180.' : '_340.'),
       downloadURL: largeImageURL,
-      fileName: previewURL.split('/').pop().replace('_150.', '_1280.'),
+      fileName: /** @type {string} */ (previewURL.split('/').pop()).replace('_150.', '_1280.'),
       kind: 'image',
       credit: `<a href="${pageURL}">Photo by ${user} on Pixabay`,
     }),

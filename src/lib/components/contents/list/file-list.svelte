@@ -4,12 +4,12 @@
   import EmptyState from '$lib/components/common/empty-state.svelte';
   import ListContainer from '$lib/components/common/list-container.svelte';
   import ListingGrid from '$lib/components/common/listing-grid.svelte';
+  import { goto } from '$lib/services/app/navigation';
   import { selectedCollection } from '$lib/services/contents';
-  import { goto } from '$lib/services/navigation';
 </script>
 
 <ListContainer aria-label={$_('file_list')}>
-  {#if $selectedCollection.files?.length}
+  {#if $selectedCollection?.files?.length}
     <ListingGrid
       viewType="list"
       aria-label={$_('files')}
@@ -18,7 +18,7 @@
       {#each $selectedCollection.files as { name, label } (name)}
         <GridRow
           on:click={() => {
-            goto(`/collections/${$selectedCollection.name}/entries/${name}`);
+            goto(`/collections/${$selectedCollection?.name}/entries/${name}`);
           }}
         >
           <GridCell class="title">

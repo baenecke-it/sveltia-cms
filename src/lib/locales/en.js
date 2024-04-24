@@ -18,6 +18,7 @@ export const strings = {
     keyboard_shortcuts: 'Keyboard Shortcuts',
     documentation: 'Documentation',
     release_notes: 'Release Notes',
+    release_notes_version_x: 'Release Notes (v{version})',
     issue: 'Report Issue',
     feedback: 'Share Feedback',
   },
@@ -26,9 +27,7 @@ export const strings = {
   user_name: 'User Name',
   password: 'Password',
   sign_in: 'Sign In',
-  sign_in_with_x: 'Sign In with {service}',
   signed_in_as_x: 'Signed In as {name}',
-  work_with_local_repo: 'Work with Local Repository',
   working_with_local_repo: 'Working with Local Repository',
   sign_out: 'Sign Out',
 
@@ -40,6 +39,7 @@ export const strings = {
   upload: 'Upload',
   copy: 'Copy',
   download: 'Download',
+  duplicate: 'Duplicate',
   delete: 'Delete',
   save: 'Save',
   saving: 'Saving…',
@@ -57,25 +57,65 @@ export const strings = {
   collection: 'Collection',
   folder: 'Folder',
   api_key: 'API Key',
+  details: 'Details',
+
+  // Common errors
+  clipboard_error: 'There was an error while copying data.',
 
   // Entrance
   welcome_to_sveltia_cms: 'Welcome to Sveltia CMS',
   loading_site_config: 'Loading Site Configuration…',
   loading_site_data: 'Loading Site Data…',
   loading_site_data_error: 'There was an error while loading site data.',
+  sign_in_with_x: 'Sign In with {service}',
+  authorizing: 'Authorizing…',
+  work_with_local_repo: 'Work with Local Repository',
+  work_with_local_repo_description:
+    'Click the button to select the root directory of the “{repo}” repository.',
+  work_with_local_repo_description_no_repo:
+    'Click the button to select the root directory of your Git repository.',
+  sign_in_error: {
+    not_project_root:
+      'The folder you have selected is not a repository root directory. Please try again.',
+    picker_dismissed: 'A repository root directory could not be selected. Please try again.',
+    authentication_aborted: 'Authentication aborted. Please try again.',
+    // Errors defined in Sveltia CMS Authenticator
+    // https://github.com/sveltia/sveltia-cms-auth/blob/main/src/index.js
+    UNSUPPORTED_BACKEND: 'Your Git backend is not supported by the authenticator.',
+    UNSUPPORTED_DOMAIN: 'Your domain is not allowed to use the authenticator.',
+    MISCONFIGURED_CLIENT: 'OAuth app client ID or secret is not configured.',
+    AUTH_CODE_REQUEST_FAILED: 'Failed to receive an authorization code. Please try again later.',
+    CSRF_DETECTED: 'Potential CSRF attack detected. Authentication flow aborted.',
+    TOKEN_REQUEST_FAILED: 'Failed to request an access token. Please try again later.',
+    MALFORMED_RESPONSE: 'Server responded with malformed data. Please try again later.',
+  },
+  repository_not_found: 'The “{repo}” repository doesn’t exist.',
+  repository_empty: 'The “{repo}” repository has no branches.',
+  branch_not_found: 'The “{repo}” repository doesn’t have the “{branch}” branch.',
   unexpected_error: 'Unexpected Error',
 
   // Global toolbar
   visit_live_site: 'Visit Live Site',
   switch_page: 'Switch Page',
   search_placeholder: 'Search for entries and assets…',
-  create_entry_or_asset: 'Create Entry or Asset',
-  asset: 'Asset',
+  create_entry_or_assets: 'Create Entry or Assets',
   publish_changes: 'Publish Changes',
   publishing_changes: 'Publishing Changes…',
   publishing_changes_failed: 'Changes could not be published. Please try again later.',
   show_notifications: 'Show Notifications',
   show_account_menu: 'Show Account Menu',
+
+  // Update notification
+  update_available: 'The latest version of Sveltia CMS is available.',
+  update_now: 'Update Now',
+
+  // Backend status indicator
+  backend_status: {
+    minor_incident:
+      '{service} is experiencing a minor incident. Your workflow may be potentially affected.',
+    major_incident:
+      '{service} is experiencing a major incident. You may want to wait until the situation has improved.',
+  },
 
   // Library
   content_library: 'Content Library',
@@ -90,14 +130,14 @@ export const strings = {
     'You’re now viewing the “{collection}” collection, which has {count} entries.',
   viewing_x_collection_one_entry:
     'You’re now viewing the “{collection}” collection, which has one entry.',
-  viewing_x_collection_no_entry:
-    'You’re now viewing the “{collection}” collection, which has no entry yet.',
+  viewing_x_collection_no_entries:
+    'You’re now viewing the “{collection}” collection, which has no entries yet.',
   viewing_x_asset_folder_many_assets:
     'You’re now viewing the “{folder}” asset folder, which has {count} assets.',
   viewing_x_asset_folder_one_asset:
     'You’re now viewing the “{folder}” asset folder, which has one asset.',
-  viewing_x_asset_folder_no_asset:
-    'You’re now viewing the “{folder}” asset folder, which has no asset yet.',
+  viewing_x_asset_folder_no_assets:
+    'You’re now viewing the “{folder}” asset folder, which has no assets yet.',
   collection_not_found: 'Collection not found',
   file_not_found: 'File not found.',
   switch_view: 'Switch View',
@@ -138,14 +178,26 @@ export const strings = {
     'You’re now viewing search results for “{terms}”. We’ve found {entries} and {assets}.',
   many_entries: '{count} entries',
   one_entry: 'one entry',
-  no_entry: 'no entry',
+  no_entries: 'no entries',
   many_assets: '{count} assets',
   one_asset: 'one asset',
-  no_asset: 'no asset',
+  no_assets: 'no assets',
   no_files_found: 'No files found.',
   no_entries_found: 'No entries found.',
-  drop_files_or_browse: 'Drop a file here or click to browse:',
+  upload_assets: 'Upload New Assets',
+  edit_options: 'Edit Options',
+  show_edit_options: 'Show Edit Options',
+  edit_asset: 'Edit Asset',
+  edit_x: 'Edit {name}',
+  wrap_long_lines: 'Wrap Long Lines',
+  replace_asset: 'Replace Asset',
+  replace_x: 'Replace {name}',
+  drop_file_or_browse: 'Drop a file here or click to browse:',
+  drop_files_or_browse: 'Drop files here or click to browse:',
   drop_files_here: 'Drop files here',
+  drop_files_type_mismatch: 'The dropped file is not the “{type}” type. Please try again.',
+  choose_file: 'Choose File',
+  choose_files: 'Choose Files',
   delete_asset: 'Delete Asset',
   delete_assets: 'Delete Assets',
   delete_selected_asset: 'Delete Selected Asset',
@@ -170,7 +222,7 @@ export const strings = {
   confirm_deleting_all_entries: 'Are you sure to delete all the entries?',
   confirm_deleting_all_entries_with_assets:
     'Are you sure to delete all the entries and associated assets?',
-  upload_files: 'Upload New Files',
+  confirm_replacing_file: 'Are you sure to replace “{name}” with the following file?',
   confirm_uploading_file: 'Are you sure to save the following file to the “{folder}” folder?',
   confirm_uploading_files:
     'Are you sure to save the following {count} files to the “{folder}” folder?',
@@ -191,6 +243,13 @@ export const strings = {
   asset_saved_and_published: 'Asset has been saved and published.',
   assets_saved: '{count} assets have been saved.',
   assets_saved_and_published: '{count} assets have been saved and published.',
+  asset_url_copied: 'Asset URL has been copied to clipboard.',
+  asset_urls_copied: 'Asset URLs have been copied to clipboard.',
+  asset_path_copied: 'Asset file path has been copied to clipboard.',
+  asset_paths_copied: 'Asset file paths have been copied to clipboard.',
+  asset_data_copied: 'Asset file has been copied to clipboard.',
+  asset_downloaded: 'Asset file has been downloaded.',
+  assets_downloaded: 'Asset files have been downloaded.',
   asset_deleted: 'Asset has been deleted.',
   assets_deleted: '{count} assets have been deleted.',
 
@@ -257,16 +316,20 @@ export const strings = {
   validation: {
     value_missing: 'This field is required.',
     range_underflow: {
-      select_many: 'You have to select at least {min} item.',
-      select_one: 'You have to select at least {min} items.',
-      add_many: 'You have to add at least {min} item.',
-      add_one: 'You have to add at least {min} items.',
+      select_many: 'You have to select at least {min} items.',
+      select_one: 'You have to select at least {min} item.',
+      add_many: 'You have to add at least {min} items.',
+      add_one: 'You have to add at least {min} item.',
     },
     range_overflow: {
-      select_many: 'You cannot select more than {max} item.',
-      select_one: 'You cannot select more than {max} items.',
-      add_many: 'You cannot add more than {max} item.',
-      add_one: 'You cannot add more than {max} items.',
+      select_many: 'You cannot select more than {max} items.',
+      select_one: 'You cannot select more than {max} item.',
+      add_many: 'You cannot add more than {max} items.',
+      add_one: 'You cannot add more than {max} item.',
+    },
+    type_mismatch: {
+      email: 'Please enter a valid email.',
+      url: 'Please enter a valid URL.',
     },
   },
   saving_entry: {
@@ -279,9 +342,12 @@ export const strings = {
   // Media details
   viewing_x_asset_details: 'You’re viewing the details of the “{name}” asset.',
   asset_editor: 'Asset Editor',
-  no_preview_available: 'No Preview Available.',
+  preview_unavailable: 'Preview Unavailable.',
   public_url: 'Public URL',
+  public_urls: 'Public URLs',
   file_path: 'File Path',
+  file_paths: 'File Paths',
+  file_data: 'File Data',
   kind: 'Kind',
   size: 'Size',
   dimensions: 'Dimensions',
@@ -300,6 +366,7 @@ export const strings = {
   move_down: 'Move Down',
   add_x: 'Add {name}',
   select_list_type: 'Select List Type',
+  opacity: 'Opacity',
   assets_dialog: {
     title: {
       file: 'Select File',
@@ -309,7 +376,8 @@ export const strings = {
     search_for_image: 'Search for Images',
     locations: 'Locations',
     location: {
-      this_repository: 'This Repository',
+      local: 'Your Computer',
+      repository: 'This Repository',
       external_locations: 'External Locations',
       stock_photos: 'Stock Photos',
     },
@@ -353,10 +421,15 @@ export const strings = {
   config: {
     error: {
       fetch_failed: 'The configuration file could not be retrieved.',
+      fetch_failed_not_ok: 'HTTP response returned with status {status}.',
       parse_failed: 'The configuration file could not be parsed.',
+      parse_failed_invalid_object: 'The configuration file is not a valid JavaScript object.',
       no_collection: 'Collections are not defined in the configuration file.',
       no_backend: 'The backend is not defined in the configuration file.',
       unsupported_backend: 'The configured “{name}” backend is not supported.',
+      no_repository: 'The repository is not defined in the configuration file.',
+      oauth_implicit_flow: 'The configured authentication method (implicit flow) is not supported.',
+      oauth_no_app_id: 'OAuth application ID is not defined in the configuration file.',
       no_media_folder: 'The media folder is not defined in the configuration file.',
       unexpected: 'There was an unexpected error while validating the configuration file.',
       try_again: 'Please solve the issue and try again.',
@@ -441,6 +514,8 @@ export const strings = {
 
   // Keyboard shortcuts
   keyboard_shortcuts: {
+    view_content_library: 'View Content Library',
+    view_asset_library: 'View Asset Library',
     search: 'Search for entries and assets',
     create_entry: 'Create a new entry',
     save_entry: 'Save an entry',
@@ -486,5 +561,14 @@ export const strings = {
     rtf: 'Rich text document',
     xls: 'Excel spreadsheet',
     xlsx: 'Excel spreadsheet',
+  },
+
+  // file size units
+  file_size_units: {
+    b: '{size} bytes',
+    kb: '{size} KB',
+    mb: '{size} MB',
+    gb: '{size} GB',
+    tb: '{size} TB',
   },
 };

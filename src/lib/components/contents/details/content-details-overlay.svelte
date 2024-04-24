@@ -5,6 +5,7 @@
   import PaneBody from '$lib/components/contents/details/pane-body.svelte';
   import PaneHeader from '$lib/components/contents/details/pane-header.svelte';
   import Toolbar from '$lib/components/contents/details/toolbar.svelte';
+  import { siteConfig } from '$lib/services/config';
   import {
     editorLeftPane,
     editorRightPane,
@@ -24,12 +25,13 @@
 
   let panesRestored = false;
 
+  $: ({ editor: { preview: showPreviewPane = true } = {} } =
+    $siteConfig ?? /** @type {SiteConfig} */ ({}));
   $: ({ collection, collectionFile } = $entryDraft ?? /** @type {EntryDraft} */ ({}));
   $: ({ showPreview, paneStates } = $entryEditorSettings);
   $: ({ i18nEnabled, locales, defaultLocale } =
     (collectionFile ?? collection)?._i18n ?? defaultI18nConfig);
-  $: canPreview =
-    collection?.editor?.preview !== false && collectionFile?.editor?.preview !== false;
+  $: canPreview = (collectionFile ?? collection)?.editor?.preview ?? showPreviewPane;
 
   /**
    * Restore the pane state from local storage.
@@ -65,8 +67,9 @@
       try {
         restorePanes();
         return;
-      } catch {
-        //
+      } catch (/** @type {any} */ ex) {
+        // eslint-disable-next-line no-console
+        console.error(ex);
       } finally {
         panesRestored = true;
       }
@@ -121,8 +124,7 @@
   onMount(() => {
     switchPanes();
 
-    /** @type {HTMLElement} */
-    const group = wrapper.closest('[role="group"]');
+    const group = /** @type {HTMLElement} */ (wrapper.closest('[role="group"]'));
 
     // Move the focus once the overlay is loaded
     group.tabIndex = 0;
@@ -135,7 +137,7 @@
   });
 </script>
 
-<Group aria-label={$_('content_editor')}>
+<Group class="content-editor" aria-label={$_('content_editor')}>
   <div role="none" class="wrapper" bind:this={wrapper}>
     <Toolbar />
     <div role="none" class="cols">
@@ -143,6 +145,7 @@
         {#if $editorLeftPane}
           {@const { locale, mode } = $editorLeftPane}
           <Group
+            class="pane"
             aria-label={$_(mode === 'edit' ? 'edit_x_locale' : 'preview_x_locale', {
               values: { locale: getLocaleLabel(locale) },
             })}

@@ -4,19 +4,22 @@
   @see https://decapcms.org/docs/widgets/#object
 -->
 <script>
-  import { Button, Group, Icon, Spacer } from '@sveltia/ui';
-  import { onMount } from 'svelte';
-  import { _ } from 'svelte-i18n';
+  import { Group } from '@sveltia/ui';
+  import { generateUUID } from '@sveltia/utils/crypto';
+  import { waitForVisibility } from '@sveltia/utils/element';
+  import { onMount, tick } from 'svelte';
   import FieldEditor from '$lib/components/contents/details/editor/field-editor.svelte';
+  import AddItemButton from '$lib/components/contents/details/widgets/object/add-item-button.svelte';
+  import ObjectHeader from '$lib/components/contents/details/widgets/object/object-header.svelte';
   import {
     copyDefaultLocaleValues,
     createProxy,
     entryDraft,
     getDefaultValues,
+    syncExpanderStates,
   } from '$lib/services/contents/editor';
   import { getFieldDisplayValue } from '$lib/services/contents/entry';
   import { defaultI18nConfig, getCanonicalLocale } from '$lib/services/contents/i18n';
-  import { escapeRegExp, generateUUID } from '$lib/services/utils/strings';
 
   /**
    * @type {LocaleCode}
@@ -61,52 +64,84 @@
   export let invalid = false;
 
   $: ({
-    name,
-    label,
     i18n = false,
     // Widget-specific options
     collapsed = false,
     summary,
     fields,
+    types,
+    typeKey = 'type',
   } = fieldConfig);
 
-  $: ({ collectionName, fileName, collection, collectionFile, currentValues } =
+  $: ({ collectionName, fileName, collection, collectionFile, currentValues, expanderStates } =
     $entryDraft ?? /** @type {EntryDraft} */ ({}));
   $: ({ defaultLocale } = (collectionFile ?? collection)?._i18n ?? defaultI18nConfig);
   $: valueMap = currentValues[locale];
-  $: keyPathRegex = new RegExp(`^${escapeRegExp(keyPath)}\\b`);
-  $: hasValues = Object.keys(valueMap).some((_keyPath) => _keyPath.match(keyPathRegex));
+  $: hasValues = Object.entries(valueMap).some(
+    ([_keyPath, value]) => !!_keyPath.startsWith(`${keyPath}.`) && value !== null,
+  );
   $: canEdit = locale === defaultLocale || i18n !== false;
   $: canonicalLocale = getCanonicalLocale(locale);
   $: listFormatter = new Intl.ListFormat(canonicalLocale, { style: 'narrow', type: 'conjunction' });
-  $: parentExpanded = !collapsed;
+  $: parentExpandedKeyPath = `${keyPath}#`;
+  $: parentExpanded = !!expanderStates?._[parentExpandedKeyPath];
+  $: hasVariableTypes = Array.isArray(types);
+  $: typeKeyPath = `${keyPath}.${typeKey}`;
+  $: typeConfig = hasVariableTypes
+    ? types?.find(({ name }) => name === valueMap[typeKeyPath])
+    : undefined;
+  $: subFields = (hasVariableTypes ? typeConfig?.fields : fields) ?? [];
+  $: summaryTemplate = hasVariableTypes ? typeConfig?.summary || summary : summary;
+  $: addButtonVisible = !required || hasVariableTypes;
+  $: addButtonDisabled = locale !== defaultLocale && i18n === 'duplicate';
 
   let widgetId = '';
+  /** @type {HTMLElement | undefined} */
+  let wrapper;
 
   onMount(() => {
-    widgetId = generateUUID().split('-').pop();
+    widgetId = generateUUID('short');
+
+    // Initialize the expander state
+    syncExpanderStates({ [parentExpandedKeyPath]: !collapsed });
   });
 
   /**
    * Add the object’s subfields to the entry draft with the default values populated.
+   * @param {string} [typeName] - Variable type name. If the field doesn’t have variable types, it
+   * will be `undefined`.
    */
-  const addFields = () => {
+  const addFields = async (typeName) => {
+    if (typeName) {
+      Object.keys($entryDraft?.currentValues ?? {}).forEach((_locale) => {
+        if (_locale === locale || i18n === 'duplicate') {
+          /** @type {EntryDraft} */ ($entryDraft).currentValues[_locale][typeKeyPath] = typeName;
+        }
+      });
+
+      // Wait until `subFields` is updated
+      await tick();
+    }
+
     const newValueMap = copyDefaultLocaleValues(
       Object.fromEntries(
-        Object.entries(getDefaultValues(fields)) //
+        Object.entries(getDefaultValues(subFields)) //
           .map(([_keyPath, value]) => [`${keyPath}.${_keyPath}`, value]),
       ),
     );
 
-    Object.keys($entryDraft.currentValues).forEach((_locale) => {
+    Object.keys($entryDraft?.currentValues ?? {}).forEach((_locale) => {
       if (_locale === locale || i18n === 'duplicate') {
         // Since we don’t want to trigger the Proxy’s i18n duplication strategy for descendant
         // fields, manually update the locale’s content and proxify the object again
-        $entryDraft.currentValues[_locale] = createProxy({
+        /** @type {EntryDraft} */ ($entryDraft).currentValues[_locale] = createProxy({
           draft: $entryDraft,
           locale: _locale,
-          target: { ...newValueMap, ...$entryDraft.currentValues[_locale] },
+          target: { ...newValueMap, ...$entryDraft?.currentValues[_locale] },
         });
+
+        // Disable validation
+        delete (/** @type {EntryDraft} */ ($entryDraft).currentValues[_locale][keyPath]);
       }
     });
   };
@@ -115,14 +150,19 @@
    * Remove the object’s subfields from the entry draft.
    */
   const removeFields = () => {
-    Object.entries($entryDraft.currentValues).forEach(([_locale, _valueMap]) => {
+    Object.entries($entryDraft?.currentValues ?? {}).forEach(([_locale, _valueMap]) => {
       if (_locale === locale || i18n === 'duplicate') {
         Object.keys(_valueMap).forEach((_keyPath) => {
-          if (_keyPath.match(keyPathRegex)) {
-            $entryDraft.currentValues[_locale][_keyPath] = null;
-            delete $entryDraft.currentValues[_locale][_keyPath];
+          if (_keyPath.startsWith(`${keyPath}.`)) {
+            /** @type {EntryDraft} */ ($entryDraft).currentValues[_locale][_keyPath] = null;
+            delete $entryDraft?.currentValues[_locale][_keyPath];
           }
         });
+
+        if (required) {
+          // Enable validation
+          /** @type {EntryDraft} */ ($entryDraft).currentValues[_locale][keyPath] = null;
+        }
       }
     });
   };
@@ -132,11 +172,11 @@
    * @returns {string} Formatted summary.
    */
   const formatSummary = () => {
-    if (!summary) {
+    if (!summaryTemplate) {
       return valueMap[`${keyPath}.title`] ?? valueMap[`${keyPath}.name`] ?? '';
     }
 
-    return summary.replaceAll(/{{fields\.(.+?)}}/g, (_match, _fieldName) => {
+    return summaryTemplate.replaceAll(/{{fields\.(.+?)}}/g, (_match, _fieldName) => {
       const value = getFieldDisplayValue({
         collectionName,
         fileName,
@@ -150,67 +190,45 @@
   };
 </script>
 
-{#if (required || hasValues) && canEdit}
+{#if (!addButtonVisible || hasValues) && canEdit}
   <div role="none" class="wrapper">
     <Group aria-labelledby={parentExpanded ? undefined : `object-${widgetId}-summary`}>
-      <div role="none" class="header">
-        <Button
-          size="small"
-          iconic
-          aria-label={parentExpanded ? $_('collapse') : $_('expand')}
-          aria-expanded={parentExpanded}
-          aria-controls="object-{widgetId}-item-list"
-          on:click={() => {
-            parentExpanded = !parentExpanded;
-          }}
-        >
-          <Icon slot="start-icon" name={parentExpanded ? 'expand_more' : 'chevron_right'} />
-        </Button>
-        <Spacer flex />
-        {#if !required}
-          <Button
-            size="small"
-            iconic
-            disabled={locale !== defaultLocale && i18n === 'duplicate'}
-            aria-label={$_('remove_this_item')}
-            on:click={() => {
-              removeFields();
-            }}
-          >
-            <Icon slot="start-icon" name="close" />
-          </Button>
-        {/if}
-      </div>
-      <div role="none" class="item-list" id="object-{widgetId}-item-list">
-        {#if parentExpanded}
-          {#each fields as subField (subField.name)}
-            <FieldEditor
-              keyPath={[keyPath, subField.name].join('.')}
-              {locale}
-              fieldConfig={subField}
-            />
-          {/each}
-        {:else}
-          <div role="none" class="summary" id="object-{widgetId}-summary">
-            {formatSummary()}
-          </div>
-        {/if}
+      <ObjectHeader
+        label={hasVariableTypes ? typeConfig?.label || typeConfig?.name : ''}
+        controlId="object-{widgetId}-item-list"
+        expanded={parentExpanded}
+        toggleExpanded={() => {
+          syncExpanderStates({ [parentExpandedKeyPath]: !parentExpanded });
+        }}
+        removeButtonVisible={addButtonVisible}
+        removeButtonDisabled={addButtonDisabled}
+        remove={() => {
+          removeFields();
+        }}
+      />
+      <div role="none" class="item-list" id="object-{widgetId}-item-list" bind:this={wrapper}>
+        {#await waitForVisibility(wrapper) then}
+          {#if parentExpanded}
+            {#each subFields as subField (subField.name)}
+              <FieldEditor
+                keyPath={[keyPath, subField.name].join('.')}
+                {locale}
+                fieldConfig={subField}
+              />
+            {/each}
+          {:else}
+            <div role="none" class="summary" id="object-{widgetId}-summary">
+              {formatSummary()}
+            </div>
+          {/if}
+        {/await}
       </div>
     </Group>
   </div>
 {/if}
 
-{#if !required && !hasValues && canEdit}
-  <Button
-    variant="tertiary"
-    label={$_('add_x', { values: { name: label || name } })}
-    disabled={locale !== defaultLocale && i18n === 'duplicate'}
-    on:click={() => {
-      addFields();
-    }}
-  >
-    <Icon slot="start-icon" name="add" />
-  </Button>
+{#if addButtonVisible && !hasValues && canEdit}
+  <AddItemButton disabled={addButtonDisabled} {fieldConfig} addItem={addFields} />
 {/if}
 
 <style lang="scss">
@@ -221,17 +239,6 @@
       border-width: 2px;
       border-color: var(--sui-secondary-border-color);
       border-radius: var(--sui-control-medium-border-radius);
-    }
-  }
-
-  .header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    background-color: var(--sui-secondary-border-color);
-
-    :global(button) {
-      height: 16px;
     }
   }
 

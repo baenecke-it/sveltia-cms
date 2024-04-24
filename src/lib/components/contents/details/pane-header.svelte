@@ -13,14 +13,15 @@
   import equal from 'fast-deep-equal';
   import { _ } from 'svelte-i18n';
   import { writable } from 'svelte/store';
-  import { defaultI18nConfig, getLocaleLabel } from '$lib/services/contents/i18n';
+  import CopyMenuItems from '$lib/components/contents/details/editor/copy-menu-items.svelte';
+  import { siteConfig } from '$lib/services/config';
   import {
     entryDraft,
     entryEditorSettings,
     revertChanges,
     toggleLocale,
   } from '$lib/services/contents/editor';
-  import CopyMenuItems from '$lib/components/contents/details/editor/copy-menu-items.svelte';
+  import { defaultI18nConfig, getLocaleLabel } from '$lib/services/contents/i18n';
 
   /**
    * The wrapper element’s `id` attribute.
@@ -29,7 +30,7 @@
   export let id;
   /**
    * This pane’s locale and mode.
-   * @type {import('svelte/store').Writable<EntryEditorPane>}
+   * @type {import('svelte/store').Writable<?EntryEditorPane>}
    */
   export let thisPane;
   /**
@@ -40,17 +41,20 @@
   /** @type {MenuButton} */
   let menuButton;
 
+  $: ({ editor: { preview: showPreviewPane = true } = {} } =
+    $siteConfig ?? /** @type {SiteConfig} */ ({}));
   $: ({ collection, collectionFile, currentLocales, currentValues, originalValues, validities } =
     $entryDraft ?? /** @type {EntryDraft} */ ({}));
   $: ({ i18nEnabled, saveAllLocales, locales, defaultLocale } =
     (collectionFile ?? collection)?._i18n ?? defaultI18nConfig);
-  $: isLocaleEnabled = currentLocales[$thisPane?.locale];
+  $: isLocaleEnabled = currentLocales[$thisPane?.locale ?? ''];
   $: isOnlyLocale = Object.values(currentLocales).filter((enabled) => enabled).length === 1;
   $: otherLocales = i18nEnabled ? locales.filter((l) => l !== $thisPane?.locale) : [];
-  $: canPreview =
-    collection?.editor?.preview !== false && collectionFile?.editor?.preview !== false;
+  $: canPreview = (collectionFile ?? collection)?.editor?.preview ?? showPreviewPane;
   $: canCopy = !!otherLocales.length;
-  $: canRevert = !equal(currentValues[$thisPane?.locale], originalValues[$thisPane?.locale]);
+  $: canRevert =
+    $thisPane?.locale &&
+    !equal(currentValues[$thisPane?.locale], originalValues[$thisPane?.locale]);
 </script>
 
 <div role="none" {id} class="header">
@@ -92,7 +96,7 @@
             size="small"
             label={$_('preview')}
             on:select={() => {
-              $thisPane = { mode: 'preview', locale: $thatPane?.locale };
+              $thisPane = { mode: 'preview', locale: $thatPane?.locale ?? '' };
             }}
           />
         {/if}
@@ -144,7 +148,7 @@
               )}
               disabled={isLocaleEnabled && isOnlyLocale}
               on:click={() => {
-                toggleLocale($thisPane?.locale);
+                toggleLocale($thisPane?.locale ?? '');
               }}
             />
           {/if}
