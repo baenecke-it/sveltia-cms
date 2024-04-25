@@ -5,11 +5,12 @@
   import ListContainer from '$lib/components/common/list-container.svelte';
   import ListingGrid from '$lib/components/common/listing-grid.svelte';
   import EntryListItem from '$lib/components/contents/list/entry-list-item.svelte';
+  import { goto } from '$lib/services/app/navigation';
   import { selectedCollection } from '$lib/services/contents';
   import { currentView, entryGroups, listedEntries } from '$lib/services/contents/view';
-  import { goto } from '$lib/services/navigation';
 
   $: allEntries = $entryGroups.map(({ entries }) => entries).flat(1);
+  $: firstImageField = $selectedCollection?.fields?.find(({ widget }) => widget === 'image');
 </script>
 
 <ListContainer aria-label={$selectedCollection?.files ? $_('file_list') : $_('entry_list')}>
@@ -30,7 +31,13 @@
               {@const locale = defaultLocale in locales ? defaultLocale : Object.keys(locales)[0]}
               {@const { content } = locales[locale]}
               {#if content}
-                <EntryListItem {entry} {content} {locale} viewType={$currentView.type} />
+                <EntryListItem
+                  {entry}
+                  {content}
+                  {locale}
+                  viewType={$currentView.type}
+                  {firstImageField}
+                />
               {/if}
             {/each}
           </GridBody>
@@ -48,7 +55,7 @@
           disabled={!$selectedCollection.create}
           label={$_('create_new_entry')}
           on:click={() => {
-            goto(`/collections/${$selectedCollection.name}/new`);
+            goto(`/collections/${$selectedCollection?.name}/new`);
           }}
         >
           <Icon slot="start-icon" name="edit" />

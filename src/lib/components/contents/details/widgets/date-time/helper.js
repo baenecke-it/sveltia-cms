@@ -1,11 +1,11 @@
+import { getDateTimeParts } from '@sveltia/utils/datetime';
 import moment from 'moment';
-import { getDateTimeParts } from '$lib/services/utils/datetime';
 
 /**
  * Get the current value given the input value.
- * @param {(string | undefined)} inputValue - Value on the date/time input widget.
+ * @param {string | undefined} inputValue - Value on the date/time input widget.
  * @param {DateTimeField} fieldConfig - Field configuration.
- * @returns {(string | undefined)} New value.
+ * @returns {string | undefined} New value.
  * @todo Write tests for this.
  */
 export const getCurrentValue = (inputValue, fieldConfig) => {
@@ -30,16 +30,19 @@ export const getCurrentValue = (inputValue, fieldConfig) => {
     }
 
     return new Date(inputValue).toISOString();
-  } catch {
+  } catch (/** @type {any} */ ex) {
+    // eslint-disable-next-line no-console
+    console.error(ex);
+
     return undefined;
   }
 };
 
 /**
  * Get the input value given the current value.
- * @param {(string | undefined)} currentValue - Value in the entry draft datastore.
+ * @param {string | undefined} currentValue - Value in the entry draft datastore.
  * @param {DateTimeField} fieldConfig - Field configuration.
- * @returns {(string | undefined)} New value.
+ * @returns {string | undefined} New value.
  * @todo Write tests for this.
  */
 export const getInputValue = (currentValue, fieldConfig) => {
@@ -86,16 +89,19 @@ export const getInputValue = (currentValue, fieldConfig) => {
     }
 
     return `${dateStr}T${timeStr}`;
-  } catch {
+  } catch (/** @type {any} */ ex) {
+    // eslint-disable-next-line no-console
+    console.error(ex);
+
     return undefined;
   }
 };
 
 /**
  * Get a `Date` object given the current value.
- * @param {(string | undefined)} currentValue - Value in the entry draft datastore.
+ * @param {string | undefined} currentValue - Value in the entry draft datastore.
  * @param {DateTimeField} fieldConfig - Field configuration.
- * @returns {(Date | undefined)} Date.
+ * @returns {Date | undefined} Date.
  * @todo Write tests for this.
  */
 export const getDate = (currentValue, fieldConfig) => {
@@ -120,7 +126,10 @@ export const getDate = (currentValue, fieldConfig) => {
     }
 
     return new Date(currentValue);
-  } catch {
+  } catch (/** @type {any} */ ex) {
+    // eslint-disable-next-line no-console
+    console.error(ex);
+
     return undefined;
   }
 };

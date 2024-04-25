@@ -4,7 +4,7 @@ import { user } from '$lib/services/user';
 
 /**
  * Default commit message templates.
- * @see https://decapcms.org/docs/beta-features/#commit-message-templates
+ * @see https://decapcms.org/docs/configuration-options/#commit-message-templates
  */
 const defaultCommitMessages = {
   create: 'Create {{collection}} “{{slug}}”',
@@ -30,9 +30,9 @@ export const createCommitMessage = (
       commit_messages: customCommitMessages = {},
       automatic_deployments: autoDeployEnabled,
     },
-  } = get(siteConfig);
+  } = /** @type {SiteConfig} */ (get(siteConfig));
 
-  const { login = '', name = '' } = get(user);
+  const { login = '', name = '' } = /** @type {User} */ (get(user));
   const [firstSlug = ''] = changes.map((item) => item.slug).filter(Boolean);
   const [firstPath, ...remainingPaths] = changes.map(({ path }) => path);
   const collectionLabel = collection?.label_singular || collection?.label || collection?.name || '';

@@ -1,8 +1,8 @@
 <script>
   import { Button, Icon } from '@sveltia/ui';
-  import { _ } from 'svelte-i18n';
+  import { _, locale as appLocale } from 'svelte-i18n';
   import Image from '$lib/components/common/image.svelte';
-  import { formatSize } from '$lib/services/utils/files';
+  import { formatSize } from '$lib/services/utils/file';
 
   /**
    * @type {File[]}
@@ -25,7 +25,7 @@
       <div role="none" class="meta">
         <div role="none" class="name">{name}</div>
         <div role="none" class="size">
-          {formatSize(size)}
+          {$appLocale ? formatSize(size) : ''}
           ·
           {$_(`file_type_labels.${extension}`, { default: extension.toUpperCase() })}
         </div>
@@ -34,6 +34,7 @@
         variant="ghost"
         iconic
         aria-label={$_('remove')}
+        hidden={files.length === 1}
         on:click={(event) => {
           event.stopPropagation();
           files.splice(index, 1);

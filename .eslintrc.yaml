@@ -15,7 +15,7 @@ ignorePatterns:
   - "*.cjs"
 env:
   browser: true
-  es2017: true
+  es2022: true
   node: true
 rules:
   class-methods-use-this: off
@@ -45,7 +45,11 @@ rules:
   jsdoc/require-asterisk-prefix: 1
   jsdoc/require-description: 1
   jsdoc/require-description-complete-sentence: 1
-  jsdoc/require-hyphen-before-param-description: 1
+  jsdoc/require-hyphen-before-param-description:
+    - error
+    - always
+    - tags:
+        property: always
   jsdoc/require-throws: 1
   jsdoc/sort-tags: 1
   max-len:
@@ -104,3 +108,7 @@ rules:
       next:
         - export
         - import
+  quotes:
+    - error
+    - single
+    - avoidEscape: true

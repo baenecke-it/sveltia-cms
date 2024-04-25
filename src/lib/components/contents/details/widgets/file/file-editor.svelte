@@ -6,13 +6,15 @@
 -->
 <script>
   import { AlertDialog, Button, ConfirmationDialog, TextArea } from '@sveltia/ui';
+  import { getDataURL } from '@sveltia/utils/file';
   import DOMPurify from 'isomorphic-dompurify';
   import { _ } from 'svelte-i18n';
+  import AssetPreview from '$lib/components/assets/shared/asset-preview.svelte';
   import SelectAssetsDialog from '$lib/components/assets/shared/select-assets-dialog.svelte';
   import Image from '$lib/components/common/image.svelte';
-  import { getAssetURL, getMediaFieldURL } from '$lib/services/assets';
+  import { getAssetPublicURL, getMediaFieldURL } from '$lib/services/assets';
   import { entryDraft } from '$lib/services/contents/editor';
-  import { formatSize, getDataURL } from '$lib/services/utils/files';
+  import { formatSize } from '$lib/services/utils/file';
 
   /**
    * @type {LocaleCode}
@@ -53,23 +55,23 @@
   export let invalid = false;
 
   /**
-   * @type {Asset}
+   * @type {Asset | undefined}
    */
   let asset;
   /**
-   * @type {File}
+   * @type {File | undefined}
    */
   let file;
   /**
-   * @type {string}
+   * @type {string | undefined}
    */
   let url;
   /**
-   * @type {string}
+   * @type {string | undefined}
    */
   let src;
   /**
-   * @type {string}
+   * @type {string | undefined}
    */
   let credit;
   let showSelectAssetsDialog = false;
@@ -88,27 +90,45 @@
   $: isImageWidget = widgetName === 'image';
 
   /**
+   * Reset the current selection.
+   */
+  const resetSelection = () => {
+    currentValue = '';
+    asset = undefined;
+    file = undefined;
+    url = undefined;
+    credit = undefined;
+  };
+
+  /**
    * Handle selected asset.
    * @param {SelectedAsset} selectedAsset - Selected asset details.
    */
   const onAssetSelect = async (selectedAsset) => {
+    resetSelection();
+
     ({ asset, file, url, credit } = selectedAsset);
 
     if (asset) {
-      currentValue = await getAssetURL(asset, { pathOnly: true });
+      currentValue = getAssetPublicURL(asset, { pathOnly: true, allowSpecial: true });
     }
 
     if (file) {
       // Check the max file size
-      // @see https://decapcms.org/docs/beta-features/#image-widget-file-size-limit
-      if (isImageWidget && Number.isInteger(maxFileSize) && file.size > maxFileSize) {
+      // @see https://decapcms.org/docs/widgets/#image
+      if (
+        isImageWidget &&
+        maxFileSize !== undefined &&
+        Number.isInteger(maxFileSize) &&
+        file.size > maxFileSize
+      ) {
         showSizeLimitDialog = true;
       } else {
         // Use the `data:` URL temporarily, and replace it later; avoid `blob:` here because it will
         // be unavailable event after Vite HMR
         currentValue = await getDataURL(file);
         // Cache the file itself for later upload
-        $entryDraft.files[locale][keyPath] = file;
+        /** @type {EntryDraft} */ ($entryDraft).files[locale][keyPath] = file;
       }
     }
 
@@ -125,22 +145,24 @@
   $: (async () => {
     src =
       isImageWidget && currentValue
-        ? await getMediaFieldURL(currentValue, $entryDraft.originalEntry)
+        ? await getMediaFieldURL(currentValue, $entryDraft?.originalEntry, { thumbnail: true })
         : undefined;
   })();
 </script>
 
 <div role="none" class="image-widget">
-  {#if src}
+  {#if asset}
+    <AssetPreview kind={asset.kind} {asset} variant="tile" checkerboard={true} />
+  {:else if src}
     <Image {src} variant="tile" checkerboard={true} />
   {/if}
   <div role="none">
     {#if typeof currentValue === 'string'}
       <div
+        role="textbox"
         id="{fieldId}-value"
         tabindex="0"
         class="filename"
-        role="textbox"
         aria-readonly={readonly}
         aria-invalid={invalid}
         aria-required={required}
@@ -173,11 +195,7 @@
           aria-label={$_(`remove_${widgetName}`)}
           aria-controls="{fieldId}-value"
           on:click={() => {
-            currentValue = '';
-            asset = undefined;
-            file = undefined;
-            url = undefined;
-            credit = undefined;
+            resetSelection();
           }}
         />
       {/if}
@@ -186,7 +204,7 @@
 </div>
 
 <SelectAssetsDialog
-  kind={isImageWidget ? 'image' : 'any'}
+  kind={isImageWidget ? 'image' : undefined}
   {canEnterURL}
   bind:open={showSelectAssetsDialog}
   on:select={({ detail }) => {
@@ -195,7 +213,9 @@
 />
 
 <AlertDialog bind:open={showSizeLimitDialog} title={$_('assets_dialog.large_file.title')}>
-  {$_('assets_dialog.large_file.description', { values: { size: formatSize(maxFileSize) } })}
+  {$_('assets_dialog.large_file.description', {
+    values: { size: formatSize(/** @type {number} */ (maxFileSize)) },
+  })}
 </AlertDialog>
 
 <ConfirmationDialog

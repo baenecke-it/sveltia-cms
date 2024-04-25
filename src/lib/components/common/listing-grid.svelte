@@ -4,24 +4,28 @@
 -->
 <script>
   import { Grid } from '@sveltia/ui';
+  import { waitForVisibility } from '@sveltia/utils/element';
 
   /**
    * View type.
    * @type {ViewType}
    */
   export let viewType;
+
+  /** @type {HTMLElement | undefined} */
+  let wrapper;
 </script>
 
-<div role="none" class="{viewType}-view">
-  <Grid multiple {...$$restProps}>
-    <slot />
-  </Grid>
+<div role="none" class="{viewType}-view" bind:this={wrapper}>
+  {#await waitForVisibility(wrapper) then}
+    <Grid multiple {...$$restProps}>
+      <slot />
+    </Grid>
+  {/await}
 </div>
 
 <style lang="scss">
   .grid-view {
-    display: contents;
-
     :global(.row-group-caption) {
       display: block;
       grid-column: 1 / -1; // span the entire row
@@ -51,12 +55,12 @@
       text-align: left;
       cursor: pointer;
 
-      &:focus-visible {
+      &:focus {
         outline-color: transparent;
 
         :global(.preview) {
           outline-offset: -2px;
-          outline-width: 2px;
+          outline-width: 2px !important;
           outline-style: solid;
           outline-color: var(--sui-primary-accent-color-light);
         }
@@ -93,8 +97,6 @@
   }
 
   .list-view {
-    display: contents;
-
     :global([role='grid']) {
       :global(.row-group) {
         :global(.row-group-caption ~ .grid-row:first-of-type) {
@@ -111,8 +113,17 @@
       }
 
       :global([role='row']) {
+        outline-offset: -2px;
+        outline-width: 2px !important;
+        outline-style: solid;
+        outline-color: transparent;
         cursor: pointer;
-        transition: all 200ms;
+        transition-property: background-color, outline-color;
+        transition-duration: 200ms;
+
+        &:focus {
+          outline-color: var(--sui-primary-accent-color-light);
+        }
       }
 
       :global([role='row']:hover) {

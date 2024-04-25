@@ -1,103 +1,89 @@
+import { getBase64 } from '@sveltia/utils/file';
+import { stripSlashes } from '@sveltia/utils/string';
 import mime from 'mime';
+import { _ } from 'svelte-i18n';
 import { get } from 'svelte/store';
-import { allAssets } from '$lib/services/assets';
-import { authorize } from '$lib/services/backends/shared/auth';
+import { initServerSideAuth } from '$lib/services/backends/shared/auth';
 import { createCommitMessage } from '$lib/services/backends/shared/commits';
+import { fetchAndParseFiles, repositoryProps } from '$lib/services/backends/shared/data';
 import { siteConfig } from '$lib/services/config';
-import { allEntries, dataLoaded } from '$lib/services/contents';
-import { createFileList, parseAssetFiles, parseEntryFiles } from '$lib/services/parser';
 import { user } from '$lib/services/user';
-import { getBase64 } from '$lib/services/utils/files';
-import IndexedDB from '$lib/services/utils/indexeddb';
-import { isObject } from '$lib/services/utils/misc';
+import { sendRequest } from '$lib/services/utils/networking';
 
+const backendName = 'github';
 const label = 'GitHub';
+/** @type {RepositoryInfo} */
+const repository = { ...repositoryProps };
+const statusDashboardURL = 'https://www.githubstatus.com/';
+const statusCheckURL = 'https://www.githubstatus.com/api/v2/status.json';
+
 /**
- * @type {RepositoryInfo}
+ * Check the GitHub service status.
+ * @returns {Promise<BackendServiceStatus>} Current status.
+ * @see https://www.githubstatus.com/api
  */
-const repository = { owner: '', repo: '', branch: '', url: '' };
+const checkStatus = async () => {
+  try {
+    const {
+      status: { indicator },
+    } = /** @type {{ status: { indicator: string }}} */ (await sendRequest(statusCheckURL));
+
+    if (indicator === 'none') {
+      return 'none';
+    }
+
+    if (indicator === 'minor') {
+      return 'minor';
+    }
+
+    if (indicator === 'major' || indicator === 'critical') {
+      return 'major';
+    }
+  } catch {
+    //
+  }
+
+  return 'unknown';
+};
 
 /**
  * Send a request to GitHub REST/GraphQL API.
  * @param {string} path - Endpoint.
- * @param {object} [options] - Options.
- * @param {'GET' | 'POST' | 'PUT' | 'DELETE'} [options.method] - Request method.
- * @param {object} [options.headers] - Request headers.
- * @param {string} [options.body] - Request body for POST.
+ * @param {{ method?: string, headers?: any, body?: any }} [init] - Request options.
+ * @param {object} [options] - Other options.
  * @param {string} [options.token] - OAuth token.
- * @param {('json' | 'text' | 'blob' | 'raw')} [options.responseType] - Response type. The default
- * is `json`, while `raw` returns a `Response` object as is.
- * @returns {Promise<(object | string | Blob | Response)>} Response data or `Response` itself,
+ * @param {'json' | 'text' | 'blob' | 'raw'} [options.responseType] - Response type. The default is
+ *`json`, while `raw` returns a `Response` object as is.
+ * @returns {Promise<object | string | Blob | Response>} Response data or `Response` itself,
  * depending on the `responseType` option.
  * @throws {Error} When there was an error in the API request, e.g. OAuth App access restrictions.
+ * @see https://docs.github.com/en/rest
+ * @see https://docs.github.com/en/graphql
  */
 const fetchAPI = async (
   path,
-  {
-    method = 'GET',
-    headers = {},
-    body = null,
-    token = get(user).token,
-    responseType = 'json',
-  } = {},
+  init = {},
+  { token = /** @type {User} */ (get(user)).token, responseType = 'json' } = {},
 ) => {
-  let { api_root: apiRoot } = get(siteConfig).backend;
+  let { api_root: apiRoot } = /** @type {SiteConfig} */ (get(siteConfig)).backend;
 
   if (apiRoot) {
-    // Enterprise Server
-    apiRoot = apiRoot.replace(/\/$/, '');
+    // Enterprise Server (self-hosted)
+    apiRoot = `${new URL(apiRoot).origin}/api`;
 
-    if (path === '/graphql') {
-      // Modify the root URL for GraphQL: the REST API root is `https://HOSTNAME/api/v3` while the
-      // GraphQL endpoint is `https://HOSTNAME/api/graphql`, meaning `/v3` should be stripped.
-      // https://docs.github.com/en/enterprise-server@3.10/rest/overview/resources-in-the-rest-api
-      // https://docs.github.com/en/enterprise-server@3.10/graphql/guides/forming-calls-with-graphql
-      apiRoot = apiRoot.replace(/\/v\d+$/, '');
+    if (path !== '/graphql') {
+      // REST API v3
+      apiRoot = `${apiRoot}/v3`;
     }
   } else {
     // Enterprise Cloud or regular GitHub
     apiRoot = 'https://api.github.com';
   }
 
-  const response = await fetch(`${apiRoot}${path}`, {
-    method,
-    headers: { Authorization: `token ${token}`, ...headers },
-    body,
-  });
+  init.headers = new Headers(init.headers);
+  init.headers.set('Authorization', `token ${token}`);
 
-  const { ok, status } = response;
-
-  if (!ok) {
-    let message;
-
-    try {
-      const result = await response.json();
-
-      if (isObject(result)) {
-        message =
-          result.message ?? // REST
-          result.errors?.[0]?.message; // GraphQL
-      }
-    } catch {
-      //
-    }
-
-    throw new Error('Invalid API request', { cause: { status, message } });
-  }
-
-  if (responseType === 'raw') {
-    return response;
-  }
-
-  if (responseType === 'blob') {
-    return response.blob();
-  }
-
-  if (responseType === 'text') {
-    return response.text();
-  }
-
-  return response.json();
+  return sendRequest(`${apiRoot}${path}`, init, { responseType });
 };
 
 /**
@@ -110,7 +96,12 @@ const fetchGraphQL = async (query, variables = {}) => {
   const { data } = /** @type {{ data: object }} */ (
     await fetchAPI('/graphql', {
       method: 'POST',
-      body: JSON.stringify({ query, variables }),
+      body: {
+        // Remove line breaks and subsequent space characters; we must be careful as file paths may
+        // contain spaces
+        query: query.replace(/\n\s*/g, ' '),
+        variables,
+      },
     })
   );
 
@@ -118,43 +109,72 @@ const fetchGraphQL = async (query, variables = {}) => {
 };
 
 /**
- * Initialize the backend.
+ * Initialize the GitHub backend.
  * @throws {Error} When the backend is not configured properly.
  */
 const init = () => {
-  const { backend: { repo: repoPath = '', branch = 'master' } = {} } = get(siteConfig) ?? {};
-  const [owner, repo] = typeof repoPath === 'string' ? repoPath.split('/') : [];
-
-  if (!owner || !repo || !branch) {
-    throw new Error('Backend is not defined');
-  }
-
-  Object.assign(repository, {
-    owner,
-    repo,
+  const {
+    repo: projectPath,
     branch,
-    url: `https://github.com/${owner}/${repo}/tree/${branch}`,
-  });
+    api_root: apiRoot, // GitHub Enterprise only; API server = web server
+  } = /** @type {SiteConfig} */ (get(siteConfig)).backend;
+
+  const [owner, repo] = /** @type {string} */ (projectPath).split('/');
+
+  if (!repository.owner) {
+    const origin = apiRoot ? new URL(apiRoot).origin : 'https://github.com';
+    const baseURL = `${origin}/${owner}/${repo}`;
+    const branchURL = branch ? `${baseURL}/tree/${branch}` : baseURL;
+
+    Object.assign(repository, { service: backendName, owner, repo, branch, baseURL, branchURL });
+  }
 };
 
 /**
  * Retrieve the repository configuration and sign in with GitHub REST API.
- * @param {string} [savedToken] - OAuth token. Can be empty when a token is not saved in the local
- * storage. Then, open the sign-in dialog.
- * @returns {Promise<User>} User info.
+ * @param {SignInOptions} options - Options.
+ * @returns {Promise<User | void>} User info, or nothing when the sign-in flow cannot be started.
  * @throws {Error} When there was an authentication error.
+ * @see https://docs.github.com/en/rest/users/users#get-the-authenticated-user
  */
-const signIn = async (savedToken) => {
-  const token = savedToken || (await authorize('github'));
-
-  if (!token) {
-    throw new Error('Authentication failed');
+const signIn = async ({ token: cachedToken, auto = false }) => {
+  if (auto && !cachedToken) {
+    return void 0;
   }
 
+  const { hostname } = window.location;
+
+  const {
+    site_domain: siteDomain = hostname,
+    base_url: baseURL = 'https://api.netlify.com',
+    auth_endpoint: path = 'auth',
+  } = /** @type {SiteConfig} */ (get(siteConfig)).backend;
+
+  const token =
+    cachedToken ||
+    (await initServerSideAuth({
+      backendName,
+      siteDomain,
+      authURL: `${stripSlashes(baseURL)}/${stripSlashes(path)}`,
+      scope: 'repo,user',
+    }));
+
+  const {
+    name,
+    login,
+    email,
+    avatar_url: avatarURL,
+    html_url: profileURL,
+  } = /** @type {any} */ (await fetchAPI('/user', {}, { token }));
+
   return {
-    .../** @type {object} */ (await fetchAPI('/user', { token })),
-    backendName: 'github',
+    backendName,
     token,
+    name,
+    login,
+    email,
+    avatarURL,
+    profileURL,
   };
 };
 
@@ -162,135 +182,161 @@ const signIn = async (savedToken) => {
  * Sign out from GitHub. Nothing to do here.
  * @returns {Promise<void>}
  */
-const signOut = async () => undefined;
+const signOut = async () => void 0;
+
+/**
+ * Fetch the repository’s default branch name, which is typically `master` or `main`.
+ * @returns {Promise<string>} Branch name.
+ * @throws {Error} When the repository could not be found, or when the repository is empty.
+ */
+const fetchDefaultBranchName = async () => {
+  const { owner, repo } = repository;
+
+  const result = /** @type {{ repository: { defaultBranchRef: { name: string } } }} */ (
+    await fetchGraphQL(`
+      query {
+        repository(owner: "${owner}", name: "${repo}") {
+          defaultBranchRef {
+            name
+          }
+        }
+      }
+    `)
+  );
+
+  if (!result.repository) {
+    throw new Error('Failed to retrieve the default branch name.', {
+      cause: new Error(get(_)('repository_not_found', { values: { repo } })),
+    });
+  }
+
+  if (!result.repository.defaultBranchRef) {
+    throw new Error('Failed to retrieve the default branch name.', {
+      cause: new Error(get(_)('repository_empty', { values: { repo } })),
+    });
+  }
+
+  return result.repository.defaultBranchRef.name;
+};
 
 /**
  * Fetch the latest commit’s SHA-1 hash.
  * @returns {Promise<string>} Hash.
+ * @throws {Error} When the branch could not be found.
  */
 const fetchLastCommitHash = async () => {
   const { owner, repo, branch } = repository;
 
-  const { repository: result } =
-    /** @type {{ repository: { ref: { target: { oid: string } } } }} */ (
-      await fetchGraphQL(`query {
+  const result = /** @type {{ repository: { ref: { target: { oid: string } } } }} */ (
+    await fetchGraphQL(`
+      query {
         repository(owner: "${owner}", name: "${repo}") {
-          ref(qualifiedName: "${branch}") { target { oid } }
+          ref(qualifiedName: "${branch}") {
+            target {
+              oid
+            }
+          }
         }
-      }`)
-    );
+      }
+    `)
+  );
 
-  return result.ref.target.oid;
+  if (!result.repository.ref) {
+    throw new Error('Failed to retrieve the last commit hash.', {
+      cause: new Error(get(_)('branch_not_found', { values: { repo, branch } })),
+    });
+  }
+
+  return result.repository.ref.target.oid;
 };
 
 /**
- * Fetch file list and all the entry files, then cache them in the {@link allEntries} and
- * {@link allAssets} stores.
+ * Fetch the repository’s complete file list, and return it in the canonical format.
+ * @returns {Promise<BaseFileListItem[]>} File list.
  */
-const fetchFiles = async () => {
+const fetchFileList = async () => {
   const { owner, repo, branch } = repository;
-  const metaDB = new IndexedDB(`github:${owner}/${repo}`, 'meta');
-  const cacheDB = new IndexedDB(`github:${owner}/${repo}`, 'file-cache');
-  const cachedHash = await metaDB.get('last_commit_hash');
-  const cachedFileEntries = await cacheDB.entries();
-  let fileList;
 
-  if (cachedHash && cachedHash === (await fetchLastCommitHash())) {
-    // Skip fetching file list
-    fileList = createFileList(
-      cachedFileEntries.map(([path, data]) => ({
-        ...data,
-        path,
-        url: `https://api.github.com/repos/${owner}/${repo}/git/blobs/${data.sha}`,
-      })),
+  const result =
+    /** @type {{ tree: { type: string, path: string, sha: string, size: number }[] }} */ (
+      await fetchAPI(`/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`)
     );
-  } else {
-    // Get a complete file list first with the REST API
-    const {
-      sha,
-      tree,
-    } = //
-      /**
-       * @type {{
-       * sha: string,
-       * tree: { type: string, path: string, sha: string, size: number }[]
-       * }}
-       */ (await fetchAPI(`/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`));
 
-    // Then filter what’s managed in CMS
-    fileList = createFileList(tree.filter(({ type }) => type === 'blob'));
-    metaDB.set('last_commit_hash', sha);
-  }
+  return result.tree
+    .filter(({ type }) => type === 'blob')
+    .map(({ path, sha, size }) => ({ path, sha, size }));
+};
 
-  // Skip fetching files if no files found
-  if (!fileList.count) {
-    allEntries.set([]);
-    allAssets.set([]);
-    dataLoaded.set(true);
+/**
+ * Fetch the metadata of entry/asset files as well as text file contents.
+ * @param {(BaseEntryListItem | BaseAssetListItem)[]} fetchingFiles - Base entry/asset list items.
+ * @returns {Promise<RepositoryContentsMap>} Fetched contents map.
+ */
+const fetchFileContents = async (fetchingFiles) => {
+  const { owner, repo, branch, baseURL } = repository;
 
-    return;
-  }
-
-  const { entryFiles, assetFiles, allFiles } = fileList;
-  const cachedFiles = Object.fromEntries(cachedFileEntries);
-
-  // Restore cached text and commit info
-  allFiles.forEach(({ sha, path }, index) => {
-    if (cachedFiles[path]?.sha === sha) {
-      Object.assign(allFiles[index], cachedFiles[path]);
-    }
-  });
-
-  const query = allFiles
-    .filter(({ meta }) => !meta)
-    .map(({ type, sha, path }, index) => {
+  const query = fetchingFiles
+    .map(({ type, path, sha }, index) => {
       const str = [];
 
       if (type === 'entry') {
-        str.push(`content_${index}: object(oid: "${sha}") {
-          ... on Blob { text }
-        }`);
+        str.push(`
+          content_${index}: object(oid: "${sha}") {
+            ... on Blob { text }
+          }
+        `);
       }
 
-      str.push(`commit_${index}: ref(qualifiedName: "${branch}") {
-        target {
-          ... on Commit {
-            history(first: 1, path: "${path}") {
-              nodes {
-                author { name, email, user { id: databaseId, login } }
-                committedDate
+      str.push(`
+        commit_${index}: ref(qualifiedName: "${branch}") {
+          target {
+            ... on Commit {
+              history(first: 1, path: "${path}") {
+                nodes {
+                  author {
+                    name
+                    email
+                    user {
+                      id: databaseId
+                      login
+                    }
+                  }
+                  committedDate
+                }
               }
             }
           }
         }
-      }`);
+      `);
 
       return str.join('');
     })
-    .join('')
-    .replace(/\s{2,}/g, ' ');
+    .join('');
 
   // Fetch all the text contents with the GraphQL API
-  const { repository: result } = query
-    ? /** @type {{ repository: { [key: string]: any } }} */ (
-        await fetchGraphQL(`query { repository(owner: "${owner}", name: "${repo}") { ${query} } }`)
-      )
-    : { repository: {} };
+  const result = /** @type {{ repository: { [key: string]: any } }} */ (
+    await fetchGraphQL(`
+      query {
+        repository(owner: "${owner}", name: "${repo}") {
+          ${query}
+        }
+      }
+    `)
+  );
 
-  /** @type {[string, { sha: string, text: string, meta: object }][]} */
-  const downloadedFileList = allFiles
-    .filter(({ meta }) => !meta)
-    .map(({ sha, size, path }, index) => {
+  return Object.fromEntries(
+    fetchingFiles.map(({ path, sha, size }, index) => {
       const {
         author: { name, email, user: _user },
         committedDate,
-      } = result[`commit_${index}`].target.history.nodes[0];
+      } = result.repository[`commit_${index}`].target.history.nodes[0];
 
       const data = {
         sha,
         size,
-        text: result[`content_${index}`]?.text,
+        text: result.repository[`content_${index}`]?.text,
         meta: {
+          repoFileURL: `${baseURL}/blob/${branch}/${path}`,
           commitAuthor: {
             name,
             email,
@@ -302,49 +348,22 @@ const fetchFiles = async () => {
       };
 
       return [path, data];
-    });
-
-  const downloadedFileMap = Object.fromEntries(downloadedFileList);
-
-  allEntries.set(
-    parseEntryFiles(
-      entryFiles.map((file) => ({
-        ...file,
-        text: file.text ?? downloadedFileMap[file.path].text,
-        meta: file.meta ?? downloadedFileMap[file.path].meta,
-      })),
-    ),
+    }),
   );
+};
 
-  allAssets.set(
-    parseAssetFiles(
-      assetFiles.map((file) => ({
-        ...file,
-        /** Blob URL to be set later via {@link fetchBlob}. */
-        url: null,
-        /** Starting with `https://api.github.com`, to be used by {@link fetchBlob}. */
-        fetchURL: file.url,
-        repoFileURL: `https://github.com/${owner}/${repo}/blob/${branch}/${file.path}`,
-        name: file.path.split('/').pop(),
-        meta: file.meta ?? downloadedFileMap[file.path].meta,
-      })),
-    ),
-  );
-
-  dataLoaded.set(true);
-
-  const usedPaths = allFiles.map(({ path }) => path);
-  const unusedPaths = Object.keys(cachedFiles).filter((path) => !usedPaths.includes(path));
-
-  // Save new entry caches
-  if (downloadedFileList.length) {
-    await cacheDB.saveEntries(downloadedFileList);
-  }
-
-  // Delete old entry caches
-  if (unusedPaths.length) {
-    cacheDB.deleteEntries(unusedPaths);
-  }
+/**
+ * Fetch file list from the backend service, download/parse all the entry files, then cache them in
+ * the {@link allEntries} and {@link allAssets} stores.
+ */
+const fetchFiles = async () => {
+  await fetchAndParseFiles({
+    repository,
+    fetchDefaultBranchName,
+    fetchLastCommitHash,
+    fetchFileList,
+    fetchFileContents,
+  });
 };
 
 /**
@@ -354,16 +373,20 @@ const fetchFiles = async () => {
  * @see https://docs.github.com/en/rest/git/blobs#get-a-blob
  */
 const fetchBlob = async (asset) => {
+  const { owner, repo } = repository;
+  const { sha, path } = asset;
+
   const response = /** @type {Response} */ (
-    await fetchAPI(asset.fetchURL.replace('https://api.github.com', ''), {
-      headers: { Accept: 'application/vnd.github.raw' },
-      responseType: 'raw',
-    })
+    await fetchAPI(
+      `/repos/${owner}/${repo}/git/blobs/${sha}`,
+      { headers: { Accept: 'application/vnd.github.raw' } },
+      { responseType: 'raw' },
+    )
   );
 
   // Handle SVG and other non-binary files
   if (response.headers.get('Content-Type') !== 'application/octet-stream') {
-    return new Blob([await response.text()], { type: mime.getType(asset.path) });
+    return new Blob([await response.text()], { type: mime.getType(path) ?? 'text/plain' });
   }
 
   return response.blob();
@@ -375,6 +398,7 @@ const fetchBlob = async (asset) => {
  * @param {CommitChangesOptions} options - Commit options.
  * @returns {Promise<string>} Commit URL.
  * @see https://github.blog/changelog/2021-09-13-a-simpler-api-for-authoring-commits/
+ * @see https://docs.github.com/en/graphql/reference/mutations#createcommitonbranch
  */
 const commitChanges = async (changes, options) => {
   const { owner, repo, branch } = repository;
@@ -384,7 +408,7 @@ const commitChanges = async (changes, options) => {
       .filter(({ action }) => ['create', 'update'].includes(action))
       .map(async ({ path, data, base64 }) => ({
         path,
-        contents: base64 ?? (await getBase64(data)),
+        contents: base64 ?? (await getBase64(data ?? '')),
       })),
   );
 
@@ -392,30 +416,32 @@ const commitChanges = async (changes, options) => {
     .filter(({ action }) => action === 'delete')
     .map(({ path }) => ({ path }));
 
-  const {
-    createCommitOnBranch: {
-      commit: { url: commitURL },
-    },
-  } = /** @type {{ createCommitOnBranch: { commit: { url: string }} }} */ (
+  const result = /** @type {{ createCommitOnBranch: { commit: { url: string }} }} */ (
     await fetchGraphQL(
-      `mutation ($input: CreateCommitOnBranchInput!) {
-        createCommitOnBranch(input: $input) { commit { url } }
-      }`,
+      `
+        mutation ($input: CreateCommitOnBranchInput!) {
+          createCommitOnBranch(input: $input) {
+            commit {
+              url
+            }
+          }
+        }
+      `,
       {
         input: {
           branch: {
             repositoryNameWithOwner: `${owner}/${repo}`,
             branchName: branch,
           },
-          message: { headline: createCommitMessage(changes, options) },
-          fileChanges: { additions, deletions },
           expectedHeadOid: await fetchLastCommitHash(),
+          fileChanges: { additions, deletions },
+          message: { headline: createCommitMessage(changes, options) },
         },
       },
     )
   );
 
-  return commitURL;
+  return result.createCommitOnBranch.commit.url;
 };
 
 /**
@@ -427,11 +453,14 @@ const triggerDeployment = async () => {
   const { owner, repo } = repository;
 
   return /** @type {Promise<Response>} */ (
-    fetchAPI(`/repos/${owner}/${repo}/dispatches`, {
-      method: 'POST',
-      body: JSON.stringify({ event_type: 'sveltia-cms-publish' }),
-      responseType: 'raw',
-    })
+    fetchAPI(
+      `/repos/${owner}/${repo}/dispatches`,
+      {
+        method: 'POST',
+        body: { event_type: 'sveltia-cms-publish' },
+      },
+      { responseType: 'raw' },
+    )
   );
 };
 
@@ -439,8 +468,11 @@ const triggerDeployment = async () => {
  * @type {BackendService}
  */
 export default {
+  name: backendName,
   label,
   repository,
+  statusDashboardURL,
+  checkStatus,
   init,
   signIn,
   signOut,

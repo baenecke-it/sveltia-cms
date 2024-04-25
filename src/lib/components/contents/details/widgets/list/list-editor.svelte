@@ -5,15 +5,23 @@
 -->
 <script>
   import { Button, Group, Icon, Spacer, TextInput } from '@sveltia/ui';
+  import { generateUUID } from '@sveltia/utils/crypto';
+  import { waitForVisibility } from '@sveltia/utils/element';
+  import { escapeRegExp } from '@sveltia/utils/string';
   import { unflatten } from 'flat';
   import { onMount } from 'svelte';
   import { _ } from 'svelte-i18n';
-  import FieldEditor from '$lib/components/contents/details/editor/field-editor.svelte';
-  import AddItemButton from '$lib/components/contents/details/widgets/list/add-item-button.svelte';
-  import { entryDraft, getDefaultValues, updateListField } from '$lib/services/contents/editor';
-  import { getFieldDisplayValue } from '$lib/services/contents/entry';
   import { defaultI18nConfig, getCanonicalLocale } from '$lib/services/contents/i18n';
-  import { escapeRegExp, generateUUID } from '$lib/services/utils/strings';
+  import { getFieldDisplayValue } from '$lib/services/contents/entry';
+  import {
+    entryDraft,
+    getDefaultValues,
+    syncExpanderStates,
+    updateListField,
+  } from '$lib/services/contents/editor';
+  import ObjectHeader from '$lib/components/contents/details/widgets/object/object-header.svelte';
+  import AddItemButton from '$lib/components/contents/details/widgets/object/add-item-button.svelte';
+  import FieldEditor from '$lib/components/contents/details/editor/field-editor.svelte';
 
   /**
    * @type {LocaleCode}
@@ -76,13 +84,15 @@
   $: hasVariableTypes = Array.isArray(types);
   $: hasSubFields = hasSingleSubField || hasMultiSubFields || hasVariableTypes;
   $: keyPathRegex = new RegExp(`^${escapeRegExp(keyPath)}\\.(\\d+)(.*)?`);
-  $: ({ collectionName, fileName, collection, collectionFile, currentValues } =
+  $: ({ collectionName, fileName, collection, collectionFile, currentValues, expanderStates } =
     $entryDraft ?? /** @type {EntryDraft} */ ({}));
   $: ({ defaultLocale } = (collectionFile ?? collection)?._i18n ?? defaultI18nConfig);
   $: isDuplicateField = locale !== defaultLocale && i18n === 'duplicate';
   $: valueMap = currentValues[locale];
   $: canonicalLocale = getCanonicalLocale(locale);
   $: listFormatter = new Intl.ListFormat(canonicalLocale, { style: 'narrow', type: 'conjunction' });
+  $: parentExpandedKeyPath = `${keyPath}#`;
+  $: parentExpanded = !!expanderStates?._[parentExpandedKeyPath];
 
   /** @type {{ [key: string]: any }[]} */
   $: items =
@@ -97,28 +107,31 @@
       ),
     )[fieldName] ?? [];
 
-  $: parentExpanded = !minimizeCollapsed;
-
   let mounted = false;
   let widgetId = '';
   let inputValue = '';
+  /** @type {HTMLElement[]} */
+  const wrappers = [];
 
   onMount(() => {
     mounted = true;
-    widgetId = /** @type {string} */ (generateUUID().split('-').pop());
+    widgetId = generateUUID('short');
 
-    items.forEach((__, index) => {
-      $entryDraft.viewStates[locale][`${keyPath}.${index}.expanded`] = !collapsed;
+    // Initialize the expander state
+    syncExpanderStates({
+      [parentExpandedKeyPath]: !minimizeCollapsed,
+      ...Object.fromEntries(items.map((__, index) => [`${keyPath}.${index}`, !collapsed])),
     });
   });
 
   /**
-   * Update the input field value when the {@link currentValue} is reverted. This also cleans up the
-   * input field value by removing extra spaces or commas.
+   * Update {@link inputValue} when {@link currentValue} is reverted. This also cleans up the input
+   * field value by removing extra spaces or commas.
    */
-  const updateInputValue = () => {
+  const setInputValue = () => {
     const currentValueStr = currentValue.join(', ');
 
+    // Avoid a cycle dependency & infinite loop
     if (!inputValue.match(/,\s*$/) && inputValue.trim() !== currentValueStr) {
       inputValue = currentValueStr;
     }
@@ -127,7 +140,7 @@
   /**
    * Update the value for the List widget w/o subfield(s). This has to be called from the `input`
    * event handler on `<TextInput>`, not a `inputValue` reaction, because it causes an infinite loop
-   * due to {@link updateInputValue}.
+   * due to {@link setInputValue}.
    */
   const updateSimpleList = () => {
     const normalizedValue = inputValue
@@ -135,30 +148,30 @@
       .map((val) => val.trim())
       .filter((val) => val !== '');
 
-    Object.keys($entryDraft.currentValues).forEach((_locale) => {
+    Object.keys($entryDraft?.currentValues ?? {}).forEach((_locale) => {
       if (i18n !== 'duplicate' && _locale !== locale) {
         return;
       }
 
-      Object.keys($entryDraft.currentValues[_locale]).forEach((_keyPath) => {
+      Object.keys($entryDraft?.currentValues[_locale] ?? {}).forEach((_keyPath) => {
         if (_keyPath.match(`^${escapeRegExp(keyPath)}\\.\\d+$`)) {
-          delete $entryDraft.currentValues[_locale][_keyPath];
+          delete $entryDraft?.currentValues[_locale][_keyPath];
         }
       });
 
       normalizedValue.forEach((val, index) => {
-        $entryDraft.currentValues[_locale][`${keyPath}.${index}`] = val;
+        /** @type {EntryDraft} */ ($entryDraft).currentValues[_locale][`${keyPath}.${index}`] = val;
       });
     });
   };
 
   /**
    * Update the value for the List widget with subfield(s).
-   * @param {(arg: { valueList: object[], viewList: object[] }) => void} manipulate - See
+   * @param {(arg: { valueList: object[], expanderStateList: boolean[] }) => void} manipulate - See
    * {@link updateListField}.
    */
   const updateComplexList = (manipulate) => {
-    Object.keys($entryDraft.currentValues).forEach((_locale) => {
+    Object.keys($entryDraft?.currentValues ?? {}).forEach((_locale) => {
       if (!(i18n !== 'duplicate' && _locale !== locale)) {
         updateListField(_locale, keyPath, manipulate);
       }
@@ -167,24 +180,25 @@
 
   /**
    * Add a new subfield to the list.
-   * @param {string} [subFieldName] - Sub field name from one of the variable type options.
-   * @see https://decapcms.org/docs/beta-features/#list-widget-variable-types
+   * @param {string} [typeName] - Variable type name. If the field doesn’t have variable types, it
+   * will be `undefined`.
+   * @see https://decapcms.org/docs/variable-type-widgets/
    */
-  const addItem = (subFieldName) => {
-    updateComplexList(({ valueList, viewList }) => {
-      const subFields = subFieldName
-        ? types.find(({ name }) => name === subFieldName)?.fields ?? []
-        : fields ?? [field];
+  const addItem = (typeName) => {
+    updateComplexList(({ valueList, expanderStateList }) => {
+      const subFields = typeName
+        ? types?.find(({ name }) => name === typeName)?.fields ?? []
+        : fields ?? (field ? [field] : []);
 
       const index = addToTop ? 0 : valueList.length;
       const newItem = unflatten(getDefaultValues(subFields));
 
-      if (subFieldName) {
-        newItem[typeKey] = subFieldName;
+      if (typeName) {
+        newItem[typeKey] = typeName;
       }
 
-      valueList.splice(index, 0, hasSingleSubField ? newItem[field.name] : newItem);
-      viewList.splice(index, 0, { expanded: true });
+      valueList.splice(index, 0, hasSingleSubField && field ? newItem[field.name] : newItem);
+      expanderStateList.splice(index, 0, true);
     });
   };
 
@@ -193,9 +207,9 @@
    * @param {number} index - Target index.
    */
   const removeItem = (index) => {
-    updateComplexList(({ valueList, viewList }) => {
+    updateComplexList(({ valueList, expanderStateList }) => {
       valueList.splice(index, 1);
-      viewList.splice(index, 1);
+      expanderStateList.splice(index, 1);
     });
   };
 
@@ -204,9 +218,12 @@
    * @param {number} index - Target index.
    */
   const moveUpItem = (index) => {
-    updateComplexList(({ valueList, viewList }) => {
+    updateComplexList(({ valueList, expanderStateList }) => {
       [valueList[index], valueList[index - 1]] = [valueList[index - 1], valueList[index]];
-      [viewList[index], viewList[index - 1]] = [viewList[index - 1], viewList[index]];
+      [expanderStateList[index], expanderStateList[index - 1]] = [
+        expanderStateList[index - 1],
+        expanderStateList[index],
+      ];
     });
   };
 
@@ -215,16 +232,19 @@
    * @param {number} index - Target index.
    */
   const moveDownItem = (index) => {
-    updateComplexList(({ valueList, viewList }) => {
+    updateComplexList(({ valueList, expanderStateList }) => {
       [valueList[index], valueList[index + 1]] = [valueList[index + 1], valueList[index]];
-      [viewList[index], viewList[index + 1]] = [viewList[index + 1], viewList[index]];
+      [expanderStateList[index], expanderStateList[index + 1]] = [
+        expanderStateList[index + 1],
+        expanderStateList[index],
+      ];
     });
   };
 
   $: {
     if (mounted && !hasSubFields) {
       void currentValue;
-      updateInputValue();
+      setInputValue();
     }
   }
 
@@ -264,7 +284,7 @@
         aria-expanded={parentExpanded}
         aria-controls="list-{widgetId}-item-list"
         on:click={() => {
-          parentExpanded = !parentExpanded;
+          syncExpanderStates({ [parentExpandedKeyPath]: !parentExpanded });
         }}
       >
         <Icon slot="start-icon" name={parentExpanded ? 'expand_more' : 'chevron_right'} />
@@ -285,39 +305,31 @@
       class:collapsed={!parentExpanded}
     >
       {#each items as item, index}
-        {@const expanded = !!$entryDraft.viewStates[locale][`${keyPath}.${index}.expanded`]}
+        {@const expandedKeyPath = `${keyPath}.${index}`}
+        {@const expanded = !!expanderStates?._[expandedKeyPath]}
         {@const typeConfig = hasVariableTypes
-          ? types.find(({ name }) => name === item[typeKey])
+          ? types?.find(({ name }) => name === item[typeKey])
           : undefined}
-        {@const subFields = hasVariableTypes ? typeConfig?.fields ?? [] : fields ?? [field]}
+        {@const subFields = hasVariableTypes
+          ? typeConfig?.fields ?? []
+          : fields ?? (field ? [field] : [])}
         {@const summaryTemplate = hasVariableTypes ? typeConfig?.summary || summary : summary}
         <!-- @todo Support drag sorting. -->
         <div role="none" class="item">
-          <div role="none" class="header">
-            <div role="none">
-              <Button
-                size="small"
-                aria-expanded={expanded}
-                aria-controls="list-{widgetId}-item-{index}-body"
-                on:click={() => {
-                  Object.keys($entryDraft.viewStates).forEach((_locale) => {
-                    $entryDraft.viewStates[_locale][`${keyPath}.${index}.expanded`] = !expanded;
-                  });
-                }}
-              >
-                <Icon
-                  slot="start-icon"
-                  name={expanded ? 'expand_more' : 'chevron_right'}
-                  aria-label={expanded ? $_('collapse') : $_('expand')}
-                />
-                {#if hasVariableTypes}
-                  <span role="none" class="type">
-                    {typeConfig?.label || typeConfig?.name || ''}
-                  </span>
-                {/if}
-              </Button>
-            </div>
-            <div role="none">
+          <ObjectHeader
+            label={hasVariableTypes ? typeConfig?.label || typeConfig?.name : ''}
+            controlId="list-{widgetId}-item-{index}-body"
+            {expanded}
+            toggleExpanded={() => {
+              syncExpanderStates({ [expandedKeyPath]: !expanded });
+            }}
+            removeButtonVisible={true}
+            removeButtonDisabled={isDuplicateField}
+            remove={() => {
+              removeItem(index);
+            }}
+          >
+            <svelte:fragment slot="middle">
               <Button
                 size="small"
                 iconic
@@ -341,37 +353,31 @@
               >
                 <Icon slot="start-icon" name="arrow_downward" />
               </Button>
-            </div>
-            <div role="none">
-              <Button
-                iconic
-                size="small"
-                disabled={isDuplicateField}
-                aria-label={$_('remove_this_item')}
-                on:click={() => {
-                  removeItem(index);
-                }}
-              >
-                <Icon slot="start-icon" name="close" />
-              </Button>
-            </div>
-          </div>
-          <div role="none" class="item-body" id="list-{widgetId}-item-{index}-body">
-            {#if expanded}
-              {#each subFields as subField (subField.name)}
-                <FieldEditor
-                  keyPath={hasSingleSubField
-                    ? `${keyPath}.${index}`
-                    : `${keyPath}.${index}.${subField.name}`}
-                  {locale}
-                  fieldConfig={subField}
-                />
-              {/each}
-            {:else}
-              <div role="none" class="summary">
-                {formatSummary(item, index, summaryTemplate)}
-              </div>
-            {/if}
+            </svelte:fragment>
+          </ObjectHeader>
+          <div
+            role="none"
+            class="item-body"
+            id="list-{widgetId}-item-{index}-body"
+            bind:this={wrappers[index]}
+          >
+            {#await waitForVisibility(wrappers[index]) then}
+              {#if expanded}
+                {#each subFields as subField (subField.name)}
+                  <FieldEditor
+                    keyPath={hasSingleSubField
+                      ? `${keyPath}.${index}`
+                      : `${keyPath}.${index}.${subField.name}`}
+                    {locale}
+                    fieldConfig={subField}
+                  />
+                {/each}
+              {:else}
+                <div role="none" class="summary">
+                  {formatSummary(item, index, summaryTemplate)}
+                </div>
+              {/if}
+            {/await}
           </div>
         </div>
       {/each}
@@ -415,43 +421,6 @@
     border-width: 2px;
     border-color: var(--sui-secondary-border-color);
     border-radius: var(--sui-control-medium-border-radius);
-
-    .header {
-      display: flex;
-      align-items: center;
-      background-color: var(--sui-secondary-border-color);
-
-      & > div {
-        display: flex;
-        align-items: center;
-
-        &:first-child {
-          justify-content: flex-start;
-          width: 40%;
-        }
-
-        &:nth-child(2) {
-          width: 20%;
-          justify-content: center;
-        }
-
-        &:last-child {
-          width: 40%;
-          justify-content: flex-end;
-        }
-      }
-
-      :global(button) {
-        padding: 0;
-        height: 16px;
-      }
-
-      .type {
-        font-size: var(--sui-font-size-small);
-        font-weight: 600;
-        color: var(--sui-secondary-foreground-color);
-      }
-    }
 
     .summary {
       overflow: hidden;

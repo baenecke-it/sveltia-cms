@@ -17,6 +17,7 @@ export const strings = {
     keyboard_shortcuts: 'キーボードショートカット',
     documentation: 'ドキュメンテーション',
     release_notes: 'リリースノート',
+    release_notes_version_x: 'リリースノート (v{version})',
     issue: '問題を報告',
     feedback: 'フィードバックを共有',
   },
@@ -25,9 +26,7 @@ export const strings = {
   user_name: 'ユーザー名',
   password: 'パスワード',
   sign_in: 'ログイン',
-  sign_in_with_x: '{service} でログイン',
   signed_in_as_x: '{name} としてログイン中',
-  work_with_local_repo: 'ローカルレポジトリで作業',
   working_with_local_repo: 'ローカルレポジトリで作業中',
   sign_out: 'ログアウト',
 
@@ -39,10 +38,11 @@ export const strings = {
   upload: 'アップロード',
   copy: 'コピー',
   download: 'ダウンロード',
+  duplicate: '複製',
   delete: '削除',
   save: '保存',
   saving: '保存中…',
-  replace: '置き換え',
+  replace: '差し替え',
   remove: '削除',
   remove_x: '{name} を削除',
   clear: 'クリア',
@@ -56,25 +56,65 @@ export const strings = {
   collection: 'コレクション',
   folder: 'フォルダー',
   api_key: 'API キー',
+  details: '詳細',
+
+  // Common errors
+  clipboard_error: 'データのコピー中に問題が発生しました。',
 
   // Entrance
   welcome_to_sveltia_cms: 'Sveltia CMS へようこそ',
   loading_site_config: 'サイト設定を読み込んでいます…',
   loading_site_data: 'サイトデータを読み込んでいます…',
   loading_site_data_error: 'サイトデータの読み込み中にエラーが発生しました。',
+  sign_in_with_x: '{service} でログイン',
+  authorizing: '認証中…',
+  work_with_local_repo: 'ローカルレポジトリで作業',
+  work_with_local_repo_description:
+    'ボタンをクリックして「{repo}」レポジトリのルートディレクトリを選択してください。',
+  work_with_local_repo_description_no_repo:
+    'ボタンをクリックして Git レポジトリのルートディレクトリを選択してください。',
+  sign_in_error: {
+    not_project_root:
+      '選択されたフォルダーはレポジトリのルートディレクトリではありません。再度お試しください。',
+    picker_dismissed: 'レポジトリのルートディレクトリを選択できませんでした。再度お試しください。',
+    authentication_aborted: '認証が中断されました。再度お試しください。',
+    // Errors defined in Sveltia CMS Authenticator
+    // https://github.com/sveltia/sveltia-cms-auth/blob/main/src/index.js
+    UNSUPPORTED_BACKEND: 'この認証アプリはお使いの Git バックエンドに対応していません。',
+    UNSUPPORTED_DOMAIN: 'この認証アプリではお使いのドメインの使用は許可されていません。',
+    MISCONFIGURED_CLIENT: 'OAuth アプリのクライアント ID またはシークレットが設定されていません。',
+    AUTH_CODE_REQUEST_FAILED: '認証コードを取得できませんでした。後で再度お試しください。',
+    CSRF_DETECTED: 'CSRF 攻撃の可能性が検出されたため、認証フローは中断されました。',
+    TOKEN_REQUEST_FAILED: 'アクセストークンを要求できませんでした。後で再度お試しください。',
+    MALFORMED_RESPONSE: 'サーバーから不正なデータが返されました。後で再度お試しください。',
+  },
+  repository_not_found: '「{repo}」レポジトリは存在しません。',
+  repository_empty: '「{repo}」レポジトリにはブランチがありません。',
+  branch_not_found: '「{repo}」レポジトリに「{branch}」ブランチは存在しません。',
   unexpected_error: '予期せぬエラー',
 
   // Global toolbar
   visit_live_site: '管理対象サイトを開く',
   switch_page: 'ページを切り替え',
   search_placeholder: 'エントリーとアセットを検索…',
-  create_entry_or_asset: 'エントリーまたはアセットを作成',
-  asset: 'アセット',
+  create_entry_or_assets: 'エントリーまたはアセットを作成',
   publish_changes: '変更を公開',
   publishing_changes: '変更を公開しています…',
   publishing_changes_failed: '変更を公開できませんでした。後で再度お試しください。',
   show_notifications: '通知を表示',
   show_account_menu: 'アカウントメニューを表示',
+
+  // Update notification
+  update_available: 'Sveltia CMS の最新版が利用可能です。',
+  update_now: '今すぐ更新',
+
+  // Backend status indicator
+  backend_status: {
+    minor_incident:
+      '{service} で軽微な障害が発生しています。ワークフローに潜在的な影響が及ぶ可能性があります。',
+    major_incident:
+      '{service} で重大な障害が発生しています。状況が改善されるまで待った方が良いでしょう。',
+  },
 
   // Library
   content_library: 'コンテンツライブラリ',
@@ -89,7 +129,7 @@ export const strings = {
     '「{collection}」コレクションを表示しています。ここには {count} 個のエントリーがあります。',
   viewing_x_collection_one_entry:
     '「{collection}」コレクションを表示しています。ここにはひとつのエントリーがあります。',
-  viewing_x_collection_no_entry:
+  viewing_x_collection_no_entries:
     '「{collection}」コレクションを表示しています。ここにはまだエントリーがありません。',
   viewing_x_asset_folder_many_assets:
     '「{folder}」アセットフォルダーを表示しています。ここには {count} 個のアセットがあります。',
@@ -137,14 +177,27 @@ export const strings = {
     '「{terms}」の検索結果を表示しています。{entries} と {assets} が見つかりました。',
   many_entries: '{count} 個のエントリー',
   one_entry: '1 個のエントリー',
-  no_entry: '0 個のエントリー',
+  no_entries: '0 個のエントリー',
   many_assets: '{count} 個のアセット',
   one_asset: '1 個のアセット',
-  no_asset: '0 個のアセット',
+  no_assets: '0 個のアセット',
   no_files_found: 'ファイルは見つかりませんでした。',
   no_entries_found: 'エントリーは見つかりませんでした。',
+  upload_assets: '新しいアセットをアップロード',
+  edit_options: '編集オプション',
+  show_edit_options: '編集オプションを表示',
+  edit_asset: 'アセットを編集',
+  edit_x: '{name} を編集',
+  wrap_long_lines: '長い行を折り返す',
+  replace_asset: 'アセットを差し替え',
+  replace_x: '{name} を差し替え',
+  drop_file_or_browse: 'ここにファイルをドロップするか下のボタンをクリックして参照:',
   drop_files_or_browse: 'ここにファイルをドロップするか下のボタンをクリックして参照:',
   drop_files_here: 'ここにファイルをドロップ',
+  drop_files_type_mismatch:
+    'ドロップされたファイルは「{type}」形式ではありません。再度お試しください。',
+  choose_file: 'ファイルを選択',
+  choose_files: 'ファイルを選択',
   delete_asset: 'アセットを削除',
   delete_assets: 'アセットを削除',
   delete_selected_asset: '選択されたアセットを削除',
@@ -170,7 +223,7 @@ export const strings = {
   confirm_deleting_all_entries: 'すべてのエントリーを削除してもよろしいですか？',
   confirm_deleting_all_entries_with_assets:
     'すべてのエントリーと関連アセットを削除してもよろしいですか？',
-  upload_files: '新しいファイルをアップロード',
+  confirm_replacing_file: '「{name}」を以下のファイルと差し替えてもよろしいですか？',
   confirm_uploading_file: '以下のファイルを「{folder}」フォルダーに保存してもよろしいですか？',
   confirm_uploading_files:
     '以下の {count} 個のファイルを「{folder}」フォルダーに保存してもよろしいですか？',
@@ -193,6 +246,13 @@ export const strings = {
   asset_saved_and_published: 'アセットが保存、公開されました。',
   assets_saved: '{count} 個のアセットが保存されました。',
   assets_saved_and_published: '{count} 個のアセットが保存、公開されました。',
+  asset_url_copied: 'アセット URL がクリップボードにコピーされました。',
+  asset_urls_copied: 'アセット URL がクリップボードにコピーされました。',
+  asset_path_copied: 'アセットファイルパスがクリップボードにコピーされました。',
+  asset_paths_copied: 'アセットファイルパスがクリップボードにコピーされました。',
+  asset_data_copied: 'アセットファイルがクリップボードにコピーされました。',
+  asset_downloaded: 'アセットファイルがダウンロードされました。',
+  assets_downloaded: 'アセットファイルがダウンロードされました。',
   asset_deleted: 'アセットが削除されました。',
   assets_deleted: '{count} 個のアセットが削除されました。',
 
@@ -269,6 +329,10 @@ export const strings = {
       add_many: '追加できるのは最大で {max} 項目です。',
       add_one: '追加できるのは最大で {max} 項目です。',
     },
+    type_mismatch: {
+      email: '正しいメールアドレスを入力してください。',
+      url: '正しい URL を入力してください。',
+    },
   },
   saving_entry: {
     error: {
@@ -280,9 +344,12 @@ export const strings = {
   // Media details
   viewing_x_asset_details: '「{name}」アセットの詳細を表示しています。',
   asset_editor: 'アセットエディター',
-  no_preview_available: 'プレビューは表示できません',
+  preview_unavailable: 'プレビューは表示できません',
   public_url: '公開 URL',
+  public_urls: '公開 URL',
   file_path: 'ファイルパス',
+  file_paths: 'ファイルパス',
+  file_data: 'ファイルデータ',
   kind: '種類',
   size: 'サイズ',
   dimensions: '大きさ',
@@ -301,6 +368,7 @@ export const strings = {
   move_down: '下へ移動',
   add_x: '{name} を追加',
   select_list_type: 'リストタイプを選択',
+  opacity: '透明度',
   assets_dialog: {
     title: {
       file: 'ファイルを選択',
@@ -310,7 +378,8 @@ export const strings = {
     search_for_image: '画像を検索',
     locations: '場所',
     location: {
-      this_repository: 'このレポジトリ',
+      local: 'お使いのコンピューター',
+      repository: 'このレポジトリ',
       external_locations: '外部の場所',
       stock_photos: 'ストックフォト',
     },
@@ -354,10 +423,15 @@ export const strings = {
   config: {
     error: {
       fetch_failed: '設定ファイルを読み込めませんでした。',
+      fetch_failed_not_ok: 'HTTP レスポンスがステータス {status} で返されました。',
       parse_failed: '設定ファイルを解析できませんでした。',
+      parse_failed_invalid_object: '設定ファイルが有効な JavaScript オブジェクトではありません。',
       no_collection: '設定ファイル内でコレクションが定義されていません。',
       no_backend: '設定ファイル内でバックエンドが定義されていません。',
       unsupported_backend: '設定されている「{name}」バックエンドは非対応です。',
+      no_repository: '設定ファイル内でレポジトリが定義されていません。',
+      oauth_implicit_flow: '設定されている認証方式 (暗黙的フロー) は非対応です。',
+      oauth_no_app_id: '設定ファイル内で OAuth アプリケーション ID が定義されていません。',
       no_media_folder: '設定ファイル内でメディアフォルダーが定義されていません。',
       unexpected: '設定ファイルを検証中に予期せぬ問題が発生しました。',
       try_again: '問題を解決してから再度お試しください。',
@@ -442,6 +516,8 @@ export const strings = {
 
   // Keyboard shortcuts
   keyboard_shortcuts: {
+    view_content_library: 'コンテンツライブラリを表示',
+    view_asset_library: 'アセットライブラリを表示',
     search: 'エントリーとアセットを検索',
     create_entry: '新しいエントリーを作成',
     save_entry: 'エントリーを保存',
@@ -487,5 +563,14 @@ export const strings = {
     rtf: 'リッチテキストドキュメント',
     xls: 'Excel スプレッドシート',
     xlsx: 'Excel スプレッドシート',
+  },
+
+  // file size units
+  file_size_units: {
+    b: '{size} バイト',
+    kb: '{size} KB',
+    mb: '{size} MB',
+    gb: '{size} GB',
+    tb: '{size} TB',
   },
 };

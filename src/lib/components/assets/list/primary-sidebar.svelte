@@ -1,9 +1,10 @@
 <script>
   import { Icon, Listbox, Option } from '@sveltia/ui';
   import { _, locale as appLocale } from 'svelte-i18n';
+  import { goto } from '$lib/services/app/navigation';
   import { allAssetFolders, selectedAssetFolder } from '$lib/services/assets';
   import { getFolderLabelByCollection } from '$lib/services/assets/view';
-  import { goto } from '$lib/services/navigation';
+  import { getCollection } from '$lib/services/contents';
 
   $: folders = [
     {
@@ -19,6 +20,7 @@
 <div role="none" class="primary-sidebar">
   <Listbox aria-label={$_('asset_folders')} aria-controls="assets-container">
     {#each folders as { collectionName, internalPath, entryRelative } (collectionName)}
+      {@const collection = collectionName ? getCollection(collectionName) : undefined}
       <!-- Can’t upload assets if collection assets are saved at entry-relative paths -->
       {@const uploadDisabled = entryRelative}
       {@const selected =
@@ -28,7 +30,7 @@
         {selected}
         label={$appLocale ? getFolderLabelByCollection(collectionName) : ''}
         on:select={() => {
-          goto(internalPath ? `/assets/${internalPath}` : `/assets`);
+          goto(internalPath ? `/assets/${internalPath}` : '/assets');
         }}
         on:dragover={(event) => {
           event.preventDefault();
@@ -38,9 +40,9 @@
           }
 
           if (!internalPath || selected) {
-            event.dataTransfer.dropEffect = 'none';
+            /** @type {DataTransfer} */ (event.dataTransfer).dropEffect = 'none';
           } else {
-            event.dataTransfer.dropEffect = 'move';
+            /** @type {DataTransfer} */ (event.dataTransfer).dropEffect = 'move';
             /** @type {HTMLElement} */ (event.target).classList.add('dragover');
           }
         }}
@@ -74,7 +76,7 @@
           // confirmation dialog.
         }}
       >
-        <Icon slot="start-icon" name="folder" />
+        <Icon slot="start-icon" name={collection?.icon || 'folder'} />
       </Option>
     {/each}
   </Listbox>

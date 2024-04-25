@@ -15,8 +15,10 @@
     Toast,
     Toolbar,
   } from '@sveltia/ui';
+  import { truncate } from '@sveltia/utils/string';
   import equal from 'fast-deep-equal';
   import { _ } from 'svelte-i18n';
+  import { goBack, goto } from '$lib/services/app/navigation';
   import { backendName } from '$lib/services/backends';
   import { siteConfig } from '$lib/services/config';
   import { deleteEntries } from '$lib/services/contents/data';
@@ -30,8 +32,6 @@
   import { getAssociatedAssets } from '$lib/services/contents/entry';
   import { defaultI18nConfig, getLocaleLabel } from '$lib/services/contents/i18n';
   import { formatSummary } from '$lib/services/contents/view';
-  import { goBack, goto } from '$lib/services/navigation';
-  import { truncate } from '$lib/services/utils/strings';
 
   let showDuplicateToast = false;
   let showValidationToast = false;
@@ -54,17 +54,17 @@
   } = $entryDraft ?? /** @type {EntryDraft} */ ({}));
 
   $: ({
-    backend: { automatic_deployments: autoDeployEnabled },
-  } = $siteConfig);
+    editor: { preview: showPreviewPane = true } = {},
+    backend: { automatic_deployments: autoDeployEnabled = undefined } = {},
+  } = $siteConfig ?? /** @type {SiteConfig} */ ({}));
   $: showSaveOptions = $backendName !== 'local' && typeof autoDeployEnabled === 'boolean';
   $: ({ defaultLocale } = (collectionFile ?? collection)?._i18n ?? defaultI18nConfig);
   $: collectionLabel = collection?.label || collection?.name;
   $: collectionLabelSingular = collection?.label_singular || collectionLabel;
-  $: canPreview =
-    collection?.editor?.preview !== false && collectionFile?.editor?.preview !== false;
+  $: canPreview = (collectionFile ?? collection)?.editor?.preview ?? showPreviewPane;
   $: modified =
     isNew || !equal(originalLocales, currentLocales) || !equal(originalValues, currentValues);
-  $: errorCount = Object.values(validities ?? [])
+  $: errorCount = Object.values(validities)
     .map((validity) => Object.values(validity).map(({ valid }) => !valid))
     .flat(1)
     .filter(Boolean).length;
@@ -79,7 +79,11 @@
   const duplicateDraft = async () => {
     showDuplicateToast = true;
     goto(`/collections/${collection?.name}/new`, { replaceState: true, notifyChange: false });
-    $entryDraft = { ...$entryDraft, isNew: true, originalEntry: undefined };
+    $entryDraft = {
+      .../** @type {EntryDraft} */ ($entryDraft ?? {}),
+      isNew: true,
+      originalEntry: undefined,
+    };
   };
 
   /**
@@ -92,13 +96,13 @@
       saving = true;
       await saveEntry({ skipCI });
       goBack(`/collections/${collection?.name}`);
-    } catch (/** @type {any} */ error) {
-      if (error.message === 'validation_failed') {
+    } catch (/** @type {any} */ ex) {
+      if (ex.message === 'validation_failed') {
         showValidationToast = true;
       } else {
         showErrorDialog = true;
         // eslint-disable-next-line no-console
-        console.error(error);
+        console.error(ex);
       }
     } finally {
       saving = false;
@@ -124,17 +128,40 @@
       {$_('editing_x_in_x', {
         values: {
           collection: collectionLabel,
+          // eslint-disable-next-line no-nested-ternary
           entry: collectionFile
             ? collectionFile.label || collectionFile.name
-            : truncate(
-                formatSummary(collection, originalEntry, defaultLocale, { useTemplate: false }),
-                40,
-              ),
+            : originalEntry
+              ? truncate(
+                  formatSummary(collection, originalEntry, defaultLocale, { useTemplate: false }),
+                  40,
+                )
+              : '',
         },
       })}
     {/if}
   </h2>
   <Spacer flex />
+  {#if !collectionFile && !isNew}
+    <Button
+      variant="ghost"
+      label={$_('duplicate')}
+      aria-label={$_('duplicate_entry')}
+      disabled={collection?.create === false}
+      on:click={() => {
+        duplicateDraft();
+      }}
+    />
+    <Button
+      variant="ghost"
+      label={$_('delete')}
+      aria-label={$_('delete_entry')}
+      disabled={collection?.delete === false}
+      on:click={() => {
+        showDeleteDialog = true;
+      }}
+    />
+  {/if}
   <MenuButton
     variant="ghost"
     iconic
@@ -174,41 +201,33 @@
           revertChanges();
         }}
       />
-      {#if !collectionFile}
-        <Divider />
-        <MenuItem
-          label={$_('duplicate_entry')}
-          disabled={collection?.create === false || isNew}
-          on:click={() => {
-            duplicateDraft();
-          }}
-        />
-        <MenuItem
-          disabled={collection?.delete === false || isNew}
-          label={$_('delete_entry')}
-          on:click={() => {
-            showDeleteDialog = true;
-          }}
-        />
-      {/if}
     </Menu>
   </MenuButton>
-  <svelte:component
-    this={showSaveOptions ? SplitButton : Button}
-    variant="primary"
-    label={$_(saving ? 'saving' : 'save')}
-    disabled={!modified || saving}
-    keyShortcuts="Accel+S"
-    on:click={() => save()}
-  >
-    <svelte:component this={showSaveOptions ? Menu : undefined} slot="popup">
-      <!-- Show the opposite option: if automatic deployments are enabled, allow to disable it -->
-      <MenuItem
-        label={$_(autoDeployEnabled ? 'save_without_publishing' : 'save_and_publish')}
-        on:click={() => save({ skipCI: autoDeployEnabled })}
-      />
-    </svelte:component>
-  </svelte:component>
+  {#if showSaveOptions}
+    <SplitButton
+      variant="primary"
+      label={$_(saving ? 'saving' : 'save')}
+      disabled={!modified || saving}
+      keyShortcuts="Accel+S"
+      on:click={() => save()}
+    >
+      <Menu slot="popup">
+        <!-- Show the opposite option: if automatic deployments are enabled, allow to disable it -->
+        <MenuItem
+          label={$_(autoDeployEnabled ? 'save_without_publishing' : 'save_and_publish')}
+          on:click={() => save({ skipCI: autoDeployEnabled })}
+        />
+      </Menu>
+    </SplitButton>
+  {:else}
+    <Button
+      variant="primary"
+      label={$_(saving ? 'saving' : 'save')}
+      disabled={!modified || saving}
+      keyShortcuts="Accel+S"
+      on:click={() => save()}
+    />
+  {/if}
 </Toolbar>
 
 <Toast bind:show={showDuplicateToast}>
@@ -228,7 +247,9 @@
 <Toast id={$copyFromLocaleToast.id} bind:show={$copyFromLocaleToast.show}>
   {@const { status, message, count, sourceLocale } = $copyFromLocaleToast}
   <Alert {status}>
-    {$_(`editor.${message}`, { values: { count, source: getLocaleLabel(sourceLocale) } })}
+    {$_(`editor.${message}`, {
+      values: { count, source: sourceLocale ? getLocaleLabel(sourceLocale) : '' },
+    })}
   </Alert>
 </Toast>
 
@@ -237,10 +258,13 @@
   title={$_('delete_entry')}
   okLabel={$_('delete')}
   on:ok={async () => {
-    await deleteEntries(
-      [originalEntry?.id],
-      associatedAssets.map(({ path }) => path),
-    );
+    if (originalEntry) {
+      await deleteEntries(
+        [originalEntry.id],
+        associatedAssets.map(({ path }) => path),
+      );
+    }
+
     goBack(`/collections/${collection?.name}`);
   }}
   on:close={() => {

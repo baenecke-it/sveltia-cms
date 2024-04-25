@@ -1,13 +1,13 @@
 /* eslint-disable jsdoc/require-jsdoc */
 
-import TOML from '@ltd/j-toml';
+import { isObject } from '@sveltia/utils/object';
+import { escapeRegExp, stripSlashes } from '@sveltia/utils/string';
 import { get } from 'svelte/store';
 import YAML from 'yaml';
 import { allAssetFolders, getAssetKind } from '$lib/services/assets';
 import { allEntryFolders, getCollection } from '$lib/services/contents';
 import { normalizeSlug } from '$lib/services/contents/slug';
-import { isObject } from '$lib/services/utils/misc';
-import { escapeRegExp, stripSlashes } from '$lib/services/utils/strings';
+import TOML from '$lib/services/utils/toml';
 
 /**
  * Get the file extension for the given collection.
@@ -68,9 +68,15 @@ export const createFileList = (files) => {
       folderPath ? path.startsWith(folderPath) : path === filePath,
     );
 
-    const mediaFolderConfig = get(allAssetFolders).findLast(({ internalPath }) =>
-      path.startsWith(internalPath),
-    );
+    const mediaFolderConfig = get(allAssetFolders).findLast(({ internalPath, entryRelative }) => {
+      if (entryRelative) {
+        return path.startsWith(`${internalPath}/`);
+      }
+
+      // Compare that the enclosing directory is exactly the same as the internal path, and ignore
+      // any subdirectories, as there is no way to upload assets to them.
+      return path.match(/^(.+)\//)?.[1] === internalPath;
+    });
 
     if (
       entryFolderConfig &&
@@ -129,17 +135,17 @@ const getFrontmatterDelimiters = (format, delimiter) => {
 /**
  * Parse raw content with given file details.
  * @param {BaseEntryListItem} entry - File entry.
- * @returns {{ [key: string]: any }} Parsed content.
+ * @returns {EntryContent | null} Parsed content.
  */
 const parseEntryFile = ({
-  text,
+  text = '',
   path,
   config: { filePath, extension, format, frontmatterDelimiter },
 }) => {
   format ||=
     extension === 'md' || path.endsWith('.md')
       ? 'yaml-frontmatter'
-      : extension || filePath?.match(/\.([^.]+)$/)[1];
+      : extension || (filePath?.match(/\.([^.]+)$/) ?? [])[1];
 
   // Ignore files with unknown format
   if (!format) {
@@ -158,7 +164,10 @@ const parseEntryFile = ({
     if (format === 'json' && path.match(/\.json$/)) {
       return JSON.parse(text);
     }
-  } catch {
+  } catch (/** @type {any} */ ex) {
+    // eslint-disable-next-line no-console
+    console.error(ex);
+
     return null;
   }
 
@@ -177,24 +186,27 @@ const parseEntryFile = ({
     if (head && (format === 'frontmatter' || format === 'yaml-frontmatter')) {
       try {
         return { ...YAML.parse(head), body };
-      } catch {
-        //
+      } catch (/** @type {any} */ ex) {
+        // eslint-disable-next-line no-console
+        console.error(ex);
       }
     }
 
     if (head && (format === 'frontmatter' || format === 'toml-frontmatter')) {
       try {
         return { ...TOML.parse(head), body };
-      } catch {
-        //
+      } catch (/** @type {any} */ ex) {
+        // eslint-disable-next-line no-console
+        console.error(ex);
       }
     }
 
     if (head && (format === 'frontmatter' || format === 'json-frontmatter')) {
       try {
         return { ...JSON.parse(head), body };
-      } catch {
-        //
+      } catch (/** @type {any} */ ex) {
+        // eslint-disable-next-line no-console
+        console.error(ex);
       }
     }
   }
@@ -225,7 +237,7 @@ export const formatEntryFile = ({
   format ||=
     extension === 'md' || path.endsWith('.md')
       ? 'yaml-frontmatter'
-      : extension || path.match(/\.([^.]+)$/)[1];
+      : extension || (path.match(/\.([^.]+)$/) ?? [])[1];
 
   const formatYAML = () =>
     YAML.stringify(content, null, {
@@ -234,7 +246,7 @@ export const formatEntryFile = ({
       defaultStringType: yamlQuote ? 'QUOTE_DOUBLE' : 'PLAIN',
     }).trim();
 
-  const formatTOML = () => TOML.stringify(/** @type {any} */ (content), { newline: '\n' }).trim();
+  const formatTOML = () => TOML.stringify(content).trim();
   const formatJSON = () => JSON.stringify(content, null, 2).trim();
 
   try {
@@ -249,7 +261,10 @@ export const formatEntryFile = ({
     if (format === 'json') {
       return `${formatJSON()}\n`;
     }
-  } catch {
+  } catch (/** @type {any} */ ex) {
+    // eslint-disable-next-line no-console
+    console.error(ex);
+
     return '';
   }
 
@@ -271,8 +286,9 @@ export const formatEntryFile = ({
       if (format === 'json-frontmatter') {
         return `${startDelimiter}\n${formatJSON()}\n${endDelimiter}\n${body}`;
       }
-    } catch {
-      //
+    } catch (/** @type {any} */ ex) {
+      // eslint-disable-next-line no-console
+      console.error(ex);
     }
   }
 
@@ -288,11 +304,16 @@ export const formatEntryFile = ({
  * @param {EntryContent} content - Entry content.
  * @returns {string} Slug.
  * @see https://decapcms.org/docs/configuration-options/#slug
- * @see https://decapcms.org/docs/beta-features/#folder-collections-path
+ * @see https://decapcms.org/docs/collection-folder/#folder-collections-path
  */
 const getSlug = (collectionName, filePath, content) => {
-  const { path: pathTemplate, identifier_field: identifierField = 'title' } =
-    getCollection(collectionName);
+  const collection = getCollection(collectionName);
+
+  if (!collection) {
+    return '';
+  }
+
+  const { path: pathTemplate, identifier_field: identifierField = 'title' } = collection;
 
   if (!pathTemplate) {
     // It’s a slug
@@ -328,7 +349,7 @@ export const parseEntryFiles = (entryFiles) => {
   entryFiles.forEach((file) => {
     const parsedFile = parseEntryFile(file);
 
-    if (!isObject(parsedFile)) {
+    if (!parsedFile || !isObject(parsedFile)) {
       return;
     }
 
@@ -336,11 +357,16 @@ export const parseEntryFiles = (entryFiles) => {
       path,
       sha,
       meta = {},
-      config: { folderPath: configFolderPath, collectionName, fileName },
+      config: { folderPath: configFolderPath = '', collectionName, fileName },
     } = file;
 
     const collection = getCollection(collectionName);
-    const collectionFile = fileName ? collection._fileMap[fileName] : undefined;
+
+    if (!collection) {
+      return;
+    }
+
+    const collectionFile = fileName ? collection._fileMap?.[fileName] : undefined;
     const { i18nEnabled, locales, defaultLocale, structure } = (collectionFile ?? collection)._i18n;
 
     const extension = getFileExtension({
@@ -359,7 +385,7 @@ export const parseEntryFiles = (entryFiles) => {
       return;
     }
 
-    /** @type {Entry} */
+    /** @type {any} */
     const entry = { sha, collectionName, fileName, locales: {}, ...meta };
 
     if (!i18nEnabled) {
@@ -433,11 +459,8 @@ export const parseAssetFiles = (assetFiles) =>
   assetFiles.map((assetInfo) => {
     const {
       file,
-      url,
-      fetchURL,
-      repoFileURL,
       path,
-      name,
+      name = /** @type {string} */ (path.split('/').pop()),
       sha,
       size,
       text = undefined,
@@ -445,11 +468,9 @@ export const parseAssetFiles = (assetFiles) =>
       config: { collectionName, internalPath },
     } = assetInfo;
 
-    return {
+    return /** @type {Asset} */ ({
       file,
-      url,
-      fetchURL,
-      repoFileURL,
+      blobURL: undefined,
       path,
       name,
       sha,
@@ -459,5 +480,5 @@ export const parseAssetFiles = (assetFiles) =>
       collectionName,
       folder: internalPath,
       ...meta,
-    };
+    });
   });

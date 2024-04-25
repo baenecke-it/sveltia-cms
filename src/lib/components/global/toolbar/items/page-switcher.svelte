@@ -1,16 +1,16 @@
 <script>
   import { Icon, SelectButton, SelectButtonGroup } from '@sveltia/ui';
   import { _ } from 'svelte-i18n';
+  import { goto, selectedPageName } from '$lib/services/app/navigation';
   import { selectedAssetFolder } from '$lib/services/assets';
   import { selectedCollection } from '$lib/services/contents';
-  import { goto, selectedPageName } from '$lib/services/navigation';
 
   $: pages = [
     {
       key: 'collections',
       label: $_('contents'),
       icon: 'library_books',
-      link: `/collections/${$selectedCollection.name}`,
+      link: `/collections/${$selectedCollection?.name}`,
     },
     {
       key: 'assets',
@@ -35,12 +35,13 @@
 
 <div role="none" class="wrapper">
   <SelectButtonGroup aria-label={$_('switch_page')} aria-controls="page-container">
-    {#each pages as { key, label, icon, link } (key)}
+    {#each pages as { key, label, icon, link }, index (key)}
       <SelectButton
         variant="ghost"
         iconic
         selected={$selectedPageName === key}
         aria-label={label}
+        keyShortcuts="Alt+{index + 1}"
         on:select={() => {
           goto(link);
         }}

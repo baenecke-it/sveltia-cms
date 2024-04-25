@@ -1,8 +1,7 @@
 <!--
   @component
-  Implement the editor for the DataTime and (deprecated) Date widgets.
+  Implement the editor for the DataTime widget.
   @see https://decapcms.org/docs/widgets/#datetime
-  @see https://decapcms.org/docs/widgets/#date
   @todo Replace the native `<input>` with a custom component.
 -->
 <script>
@@ -65,35 +64,37 @@
   let inputValue;
 
   /**
-   * Set the current value. Make sure to prevent a cycle dependency.
-   */
-  const setCurrentValue = () => {
-    const _currentValue = getCurrentValue(inputValue, fieldConfig);
-
-    if (_currentValue !== undefined && _currentValue !== currentValue) {
-      currentValue = _currentValue;
-    }
-  };
-
-  /**
-   * Set the input value. Make sure to prevent a cycle dependency.
+   * Update {@link inputValue} based on {@link currentValue}.
    */
   const setInputValue = () => {
     const _inputValue = getInputValue(currentValue, fieldConfig);
 
+    // Avoid a cycle dependency & infinite loop
     if (_inputValue !== undefined && _inputValue !== inputValue) {
       inputValue = _inputValue;
     }
   };
 
-  $: {
-    void inputValue;
-    setCurrentValue();
-  }
+  /**
+   * Update {@link currentValue} based on {@link inputValue}.
+   */
+  const setCurrentValue = () => {
+    const _currentValue = getCurrentValue(inputValue, fieldConfig);
+
+    // Avoid a cycle dependency & infinite loop
+    if (_currentValue !== undefined && _currentValue !== currentValue) {
+      currentValue = _currentValue;
+    }
+  };
 
   $: {
     void currentValue;
     setInputValue();
+  }
+
+  $: {
+    void inputValue;
+    setCurrentValue();
   }
 </script>
 

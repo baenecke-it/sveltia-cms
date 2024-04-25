@@ -1,9 +1,9 @@
 <script>
-  import { Button, Icon, Toolbar } from '@sveltia/ui';
+  import { Button, Icon, Spacer, Toolbar } from '@sveltia/ui';
   import { _ } from 'svelte-i18n';
   import DeleteEntriesDialog from '$lib/components/contents/shared/delete-entries-dialog.svelte';
+  import { goto } from '$lib/services/app/navigation';
   import { selectedCollection, selectedEntries } from '$lib/services/contents';
-  import { goto } from '$lib/services/navigation';
 
   let showDeleteDialog = false;
 
@@ -22,9 +22,10 @@
   <Toolbar variant="primary" aria-label={$_('collection')}>
     <h2 role="none">{collectionLabel}</h2>
     <div role="none" class="description">{description || ''}</div>
+    <Spacer flex />
     {#if !files}
       <Button
-        variant="secondary"
+        variant="ghost"
         label={$_('delete')}
         aria-label={$selectedEntries.length === 1
           ? $_('delete_selected_entry')
@@ -33,9 +34,7 @@
         on:click={() => {
           showDeleteDialog = true;
         }}
-      >
-        <Icon slot="start-icon" name="delete" />
-      </Button>
+      />
       <Button
         variant="primary"
         disabled={!create}
@@ -55,11 +54,16 @@
 <DeleteEntriesDialog bind:open={showDeleteDialog} />
 
 <style lang="scss">
+  h2 {
+    flex: none !important;
+  }
+
   .description {
     flex: auto;
     font-size: var(--sui-font-size-small);
     opacity: 0.8;
     overflow: hidden;
+    white-space: nowrap;
     text-overflow: ellipsis;
   }
 </style>
