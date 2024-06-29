@@ -33,8 +33,7 @@
   import { getAssociatedAssets } from '$lib/services/contents/entry';
   import { defaultI18nConfig, getLocaleLabel } from '$lib/services/contents/i18n';
   import { formatSummary } from '$lib/services/contents/view';
-  import { goBack, goto } from '$lib/services/navigation';
-  import { truncate } from '$lib/services/utils/strings';
+  import {selectedCollection} from '$lib/services/contents/index.js';
 
   let showDuplicateToast = false;
   let showValidationToast = false;
