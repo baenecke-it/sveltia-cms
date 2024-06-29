@@ -575,5 +575,6 @@ export const strings = {
   // Newsletter
   newsletter: {
     send: 'Send Newsletter',
+    confirm: 'Are you sure you want to send this newsletter?',
   },
 };

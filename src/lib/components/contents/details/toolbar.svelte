@@ -1,5 +1,4 @@
 <script>
-  import {marked} from "marked";
   import {
     Alert,
     AlertDialog,
@@ -19,6 +18,7 @@
   import { truncate } from '@sveltia/utils/string';
   import equal from 'fast-deep-equal';
   import { _ } from 'svelte-i18n';
+  import NewsletterContent from '../../newsletters/details/preview/NewsletterContent.svelte';
   import { goBack, goto } from '$lib/services/app/navigation';
   import { backendName } from '$lib/services/backends';
   import { siteConfig } from '$lib/services/config';
@@ -39,6 +39,7 @@
   let showValidationToast = false;
   let showDeleteDialog = false;
   let showErrorDialog = false;
+  let showSendNewsletterDialog = false;
   let saving = false;
   /** @type {MenuButton} */
   let menuButton;
@@ -230,34 +231,14 @@
       on:click={() => save()}
     />
   {/if}
-    {#if ($selectedCollection.name === 'newsletter')}
+  {#if ($selectedCollection?.name === 'newsletter')}
         <!--        <pre>{JSON.stringify(currentValues)}</pre>-->
         <Button
                 variant="primary"
                 disabled={!!currentValues[defaultLocale].sent}
                 label={$_('newsletter.send')}
                 on:click={async () => {
-              const newsletter = currentValues[defaultLocale];
-
-              const html = `<img alt="" class="" height="451" src="https://singtonic.net/${newsletter.image}" width="451"/><br/>\n` +
-    `<br/>\n${marked.parse(newsletter.text)}`;
-
-              await fetch("https://api.singtonic.net/newsletter?auth=61e25c7b-7917-409c-a5bb-c9d051e05bb3", {
-                method: "POST",
-                body: JSON.stringify({
-                  content: {
-                    subject: currentValues[defaultLocale].title,
-                    html,
-                    text: newsletter.text,
-                  }
-                }),
-                headers: {
-                  "Content-type": "application/json; charset=UTF-8"
-                }
-              });
-
-              $entryDraft.currentValues[defaultLocale].sent = true;
-              await save();
+                  showSendNewsletterDialog = true;
             }}
         >
             <Icon slot="start-icon" name="send"/>
@@ -323,3 +304,41 @@
 >
   {$_('saving_entry.error.description')}
 </AlertDialog>
+
+<ConfirmationDialog
+        bind:open={showSendNewsletterDialog}
+        title={$_('newsletter.send')}
+        okLabel={$_('newsletter.send')}
+        on:ok={async () => {
+          const newsletter = currentValues[defaultLocale];
+
+          /* eslint-disable */
+          const elem = document.createElement('div');
+          new NewsletterContent({ target: elem, props: { newsletter } });
+          const html = elem.innerHTML;
+          /* eslint-enable */
+
+          await fetch('https://api.singtonic.net/newsletter?auth=61e25c7b-7917-409c-a5bb-c9d051e05bb3', {
+            method: 'POST',
+            body: JSON.stringify({
+              content: {
+                subject: currentValues[defaultLocale].title,
+                html,
+                text: newsletter.text,
+              }
+            }),
+            headers: {
+              'Content-type': 'application/json; charset=UTF-8'
+            }
+          });
+
+          if(!$entryDraft) return;
+          $entryDraft.currentValues[defaultLocale].sent = true;
+          await save();
+  }}
+        on:close={() => {
+    menuButton.focus();
+  }}
+>
+  {$_('newsletter.confirm')}
+</ConfirmationDialog>
