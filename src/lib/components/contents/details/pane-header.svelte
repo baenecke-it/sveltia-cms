@@ -21,6 +21,7 @@
     toggleLocale,
   } from '$lib/services/contents/editor';
   import CopyMenuItems from '$lib/components/contents/details/editor/copy-menu-items.svelte';
+  import {selectedCollection} from "$lib/services/contents/index.js";
 
   /**
    * The wrapper element’s `id` attribute.
@@ -54,7 +55,7 @@
 </script>
 
 <div role="none" {id} class="header">
-  <Toolbar variant="secondary" aria-label={$_('secondary')}>
+  <Toolbar variant="secondary" aria-label={$_('secondary')} class={$selectedCollection.name}>
     {#if i18nEnabled}
       <!-- @todo Use a dropdown list when there are 5+ locales. -->
       <SelectButtonGroup
@@ -162,7 +163,9 @@
     & > :global([role='toolbar']) {
       margin-right: auto;
       margin-left: auto;
-      max-width: 800px;
+      &:not(.newsletter) {
+        max-width: 800px;
+      }
 
       :global(h3) {
         margin: 0 8px;

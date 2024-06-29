@@ -1,4 +1,5 @@
 <script>
+  import {marked} from "marked";
   import {
     Alert,
     AlertDialog,
@@ -32,6 +33,7 @@
   import { formatSummary } from '$lib/services/contents/view';
   import { goBack, goto } from '$lib/services/navigation';
   import { truncate } from '$lib/services/utils/strings';
+  import {selectedCollection} from "$lib/services/contents/index.js";
 
   let showDuplicateToast = false;
   let showValidationToast = false;
@@ -209,6 +211,39 @@
       />
     </svelte:component>
   </svelte:component>
+  {#if ($selectedCollection.name === 'newsletter')}
+    <!--        <pre>{JSON.stringify(currentValues)}</pre>-->
+    <Button
+            variant="primary"
+            disabled={!!currentValues[defaultLocale].sent}
+            label={$_('newsletter.send')}
+            on:click={async () => {
+              const newsletter = currentValues[defaultLocale];
+
+              const html = `<img alt="" class="" height="451" src="https://singtonic.net/${newsletter.image}" width="451"/><br/>\n` +
+`<br/>\n${marked.parse(newsletter.text)}`;
+
+              await fetch("https://api.singtonic.net/newsletter?auth=61e25c7b-7917-409c-a5bb-c9d051e05bb3", {
+                method: "POST",
+                body: JSON.stringify({
+                  content: {
+                    subject: currentValues[defaultLocale].title,
+                    html,
+                    text: newsletter.text,
+                  }
+                }),
+                headers: {
+                  "Content-type": "application/json; charset=UTF-8"
+                }
+              });
+
+              $entryDraft.currentValues[defaultLocale].sent = true;
+              await save();
+            }}
+    >
+      <Icon slot="start-icon" name="send"/>
+    </Button>
+  {/if}
 </Toolbar>
 
 <Toast bind:show={showDuplicateToast}>

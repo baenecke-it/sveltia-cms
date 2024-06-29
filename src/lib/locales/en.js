@@ -487,4 +487,9 @@ export const strings = {
     xls: 'Excel spreadsheet',
     xlsx: 'Excel spreadsheet',
   },
+
+  // Newsletter
+  newsletter: {
+    send: 'Send Newsletter',
+  },
 };
