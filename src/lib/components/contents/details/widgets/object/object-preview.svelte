@@ -4,6 +4,7 @@
   @see https://decapcms.org/docs/widgets/#object
 -->
 <script>
+  import { waitForVisibility } from '@sveltia/utils/element';
   import FieldPreview from '$lib/components/contents/details/preview/field-preview.svelte';
   import { entryDraft } from '$lib/services/contents/editor';
 
@@ -25,15 +26,37 @@
   // svelte-ignore unused-export-let
   export let currentValue;
 
-  $: ({ fields } = fieldConfig);
-  $: valueMap = $entryDraft.currentValues[locale];
-  $: hasValues = Object.keys(valueMap).some((_keyPath) => _keyPath.startsWith(`${keyPath}.`));
+  /** @type {HTMLElement | undefined} */
+  let wrapper;
+
+  $: ({
+    // Widget-specific options
+    fields,
+    types,
+    typeKey = 'type',
+  } = fieldConfig);
+  $: valueMap = $entryDraft?.currentValues[locale] ?? {};
+  $: hasValues = Object.entries(valueMap).some(
+    ([_keyPath, value]) => !!_keyPath.startsWith(`${keyPath}.`) && !!value,
+  );
+  $: hasVariableTypes = Array.isArray(types);
+  $: typeKeyPath = `${keyPath}.${typeKey}`;
+  $: typeConfig = hasVariableTypes
+    ? types?.find(({ name }) => name === valueMap[typeKeyPath])
+    : undefined;
+  $: subFields = (hasVariableTypes ? typeConfig?.fields : fields) ?? [];
 </script>
 
 {#if hasValues}
-  <section class="subsection">
-    {#each fields as subField (subField.name)}
-      <FieldPreview keyPath={[keyPath, subField.name].join('.')} {locale} fieldConfig={subField} />
-    {/each}
+  <section class="subsection" bind:this={wrapper}>
+    {#await waitForVisibility(wrapper) then}
+      {#each subFields as subField (subField.name)}
+        <FieldPreview
+          keyPath={[keyPath, subField.name].join('.')}
+          {locale}
+          fieldConfig={subField}
+        />
+      {/each}
+    {/await}
   </section>
 {/if}

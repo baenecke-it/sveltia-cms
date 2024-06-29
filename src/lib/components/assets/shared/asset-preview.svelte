@@ -1,12 +1,13 @@
 <script>
-  import { onMount } from 'svelte';
-  import { getAssetPreviewURL } from '$lib/services/assets/view';
+  import { Icon } from '@sveltia/ui';
+  import { waitForVisibility } from '@sveltia/utils/element';
+  import { getAssetBlobURL, getAssetThumbnailURL } from '$lib/services/assets';
 
   /**
-   * Media type.
-   * @type {'image' | 'video'}
+   * Asset type.
+   * @type {AssetKind}
    */
-  export let type;
+  export let kind;
   /**
    * Loading method.
    * @type {'lazy' | 'eager'}
@@ -53,50 +54,90 @@
    * @type {string}
    */
   export let alt = '';
+  /**
+   * Whether to show controls for audio/video. If this is `false` and {@link kind} is `audio`, an
+   * icon will be displayed instead.
+   * @type {boolean}
+   */
+  export let controls = false;
 
   /**
-   * @type {HTMLImageElement | HTMLVideoElement}
+   * @type {HTMLImageElement | HTMLMediaElement}
    */
-  let element;
+  let mediaElement;
   let updatingSrc = false;
+  let hasError = false;
   let loaded = false;
+
+  $: isImage = kind === 'image' || asset?.name.endsWith('.pdf');
 
   /**
    * Update the {@link src} property.
    */
   const updateSrc = async () => {
-    if (asset && element && !updatingSrc) {
-      updatingSrc = true;
-      src = await getAssetPreviewURL(asset, loading, element);
-      updatingSrc = false;
+    if (!asset || !mediaElement || updatingSrc) {
+      return;
     }
+
+    updatingSrc = true;
+    hasError = false;
+
+    if (loading === 'lazy') {
+      await waitForVisibility(mediaElement);
+    }
+
+    try {
+      src = variant ? await getAssetThumbnailURL(asset) : await getAssetBlobURL(asset);
+    } catch {
+      hasError = true;
+    }
+
+    updatingSrc = false;
   };
 
   $: {
-    void element;
+    void mediaElement;
     void asset;
     updateSrc();
   }
 
-  onMount(() => {
-    const isVideo = element.matches('video');
+  /**
+   * Update the {@link loaded} state when the media is loaded.
+   */
+  const checkLoaded = async () => {
+    if (!mediaElement) {
+      return;
+    }
 
     if (
-      isVideo
-        ? /** @type {HTMLVideoElement} */ (element).readyState > 0
-        : /** @type {HTMLImageElement} */ (element).complete
+      isImage
+        ? !(/** @type {HTMLImageElement} */ (mediaElement).complete)
+        : !(/** @type {HTMLMediaElement} */ (mediaElement).readyState)
     ) {
-      loaded = true;
-    } else {
-      element.addEventListener(
-        isVideo ? 'loadedmetadata' : 'load',
-        () => {
-          loaded = true;
-        },
-        { once: true },
-      );
+      // Not loaded yet; wait until it’s ready
+      await new Promise((resolve) => {
+        mediaElement.addEventListener(
+          isImage ? 'load' : 'loadedmetadata',
+          () => {
+            resolve(void 0);
+          },
+          { once: true },
+        );
+      });
     }
-  });
+
+    // Enable a dissolve transition
+    if (dissolve) {
+      await waitForVisibility(mediaElement);
+    }
+
+    loaded = true;
+  };
+
+  $: {
+    void mediaElement;
+    checkLoaded();
+  }
 </script>
 
 <div
@@ -107,18 +148,34 @@
   class:dissolve
   class:loaded
 >
-  {#if type === 'video'}
+  {#if hasError}
+    <Icon name="draft" />
+  {:else if isImage}
+    <img {loading} {src} {alt} {...$$restProps} bind:this={mediaElement} />
+  {:else if kind === 'video'}
     <!-- svelte-ignore a11y-media-has-caption -->
-    <video playsinline {src} {...$$restProps} bind:this={element} />
+    <video
+      {src}
+      controls={controls || undefined}
+      playsinline
+      {...$$restProps}
+      bind:this={mediaElement}
+    />
+  {:else if kind === 'audio'}
+    {#if controls}
+      <audio {src} controls playsinline {...$$restProps} bind:this={mediaElement} />
+    {:else}
+      <Icon name="audio_file" />
+    {/if}
   {:else}
-    <img {loading} {src} {alt} {...$$restProps} bind:this={element} />
+    <Icon name="draft" />
   {/if}
   {#if blurBackground}
     <div role="none" class="blur">
       <div role="none" class="overlay" />
-      {#if type === 'video'}
+      {#if kind === 'video'}
         <!-- svelte-ignore a11y-media-has-caption -->
-        <video playsinline {src} />
+        <video {src} playsinline />
       {:else}
         <img {loading} {src} alt="" />
       {/if}
@@ -141,6 +198,10 @@
       border-color: transparent;
       padding: var(--tile-padding, 8px);
       background-color: var(--sui-secondary-background-color);
+
+      :global(.sui.icon) {
+        font-size: 48px;
+      }
     }
 
     &.icon {
@@ -169,8 +230,7 @@
         backdrop-filter: blur(32px) brightness(0.8);
       }
 
-      img,
-      video {
+      :is(img, video) {
         width: 100%;
         height: 100%;
         z-index: -2;
@@ -183,22 +243,19 @@
       padding: 0;
     }
 
-    & > video,
-    & > img {
+    & > :is(img, video) {
       max-width: 100%;
       max-height: 100%;
     }
 
     &.dissolve {
-      img,
-      video {
+      :is(img, video) {
         opacity: 0;
         transition: opacity 250ms;
       }
 
       &.loaded {
-        img,
-        video {
+        :is(img, video) {
           opacity: 1;
         }
       }
@@ -222,8 +279,7 @@
     }
   }
 
-  video,
-  img {
+  :is(img, video) {
     object-fit: contain;
 
     &:not([src]) {

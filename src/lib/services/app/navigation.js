@@ -34,13 +34,13 @@ export const parseLocation = (loc = window.location) => {
 
   return {
     path: decodeURIComponent(pathname),
-    params: Object.fromEntries([...searchParams.entries()]),
+    params: Object.fromEntries(searchParams),
   };
 };
 
 /**
- * Navigate to a different URL. This is similar to SvelteKit’s `goto` method but assumes hash-based
- * SPA routing.
+ * Navigate to a different URL or replace the current URL. This is similar to SvelteKit’s `goto`
+ * method but assumes hash-based SPA routing.
  * @param {string} path - URL path. It will appear in th URL hash but omit the leading `#` sign
  * here.
  * @param {object} [options] - Options.
@@ -82,7 +82,9 @@ export const goBack = (path, options = {}) => {
  * Open the production site in a new browser tab.
  */
 export const openProductionSite = () => {
-  const { display_url: displayURL, site_url: siteURL } = get(siteConfig);
+  const { display_url: displayURL, site_url: siteURL } = /** @type {SiteConfig} */ (
+    get(siteConfig)
+  );
 
   window.open(displayURL || siteURL || '/', '_blank');
 };

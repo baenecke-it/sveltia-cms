@@ -1,12 +1,12 @@
 <script>
   import { Button } from '@sveltia/ui';
+  import mime from 'mime';
   import { _, locale as appLocale } from 'svelte-i18n';
-  import Image from '$lib/components/common/image.svelte';
-  import Video from '$lib/components/common/video.svelte';
+  import AssetPreview from '$lib/components/assets/shared/asset-preview.svelte';
+  import { goto } from '$lib/services/app/navigation';
   import { getAssetDetails } from '$lib/services/assets';
   import { getCollection } from '$lib/services/contents';
-  import { goto } from '$lib/services/navigation';
-  import { formatSize } from '$lib/services/utils/files';
+  import { formatSize } from '$lib/services/utils/file';
   import { formatDuration } from '$lib/services/utils/media';
 
   /**
@@ -15,24 +15,24 @@
   export let asset;
 
   /**
-   * Whether to show the image/video preview.
+   * Whether to show the media preview.
    */
   export let showPreview = false;
 
   $: ({ path, size, kind, commitAuthor, commitDate, repoFileURL } = asset);
   $: [, extension = ''] = path.match(/\.([^.]+)$/) ?? [];
-  $: canPreview = ['image', 'video'].includes(kind);
+  $: canPreview = ['image', 'audio', 'video'].includes(kind) || path.endsWith('.pdf');
 
   /**
-   * @type {string}
+   * @type {string | undefined}
    */
-  let displayURL;
+  let publicURL;
   /**
-   * @type {{ width: number, height: number }}
+   * @type {{ width: number, height: number } | undefined}
    */
   let dimensions;
   /**
-   * @type {number}
+   * @type {number | undefined}
    */
   let duration;
   /**
@@ -44,7 +44,7 @@
    * Update the properties above.
    */
   const updateProps = async () => {
-    ({ displayURL, dimensions, duration, usedEntries } = await getAssetDetails(asset));
+    ({ publicURL, dimensions, duration, usedEntries } = await getAssetDetails(asset));
   };
 
   $: {
@@ -56,21 +56,26 @@
 <div role="none" class="detail">
   {#if showPreview && canPreview}
     <div role="none" class="preview">
-      {#if kind === 'image'}
-        <Image {asset} variant="tile" checkerboard={true} />
-      {/if}
-      {#if kind === 'video'}
-        <Video {asset} variant="tile" controls />
-      {/if}
+      <AssetPreview
+        {kind}
+        {asset}
+        variant="tile"
+        checkerboard={kind === 'image'}
+        controls={kind === 'audio' || kind === 'video'}
+      />
     </div>
   {/if}
   <section>
     <h4>{$_('kind')}</h4>
-    <p>{$_(`file_type_labels.${extension}`, { default: extension.toUpperCase() })}</p>
+    <p>
+      {$_(`file_type_labels.${extension}`, {
+        default: mime.getType(path) ?? extension.toUpperCase(),
+      })}
+    </p>
   </section>
   <section>
     <h4>{$_('size')}</h4>
-    <p>{formatSize(size)}</p>
+    <p>{$appLocale ? formatSize(size) : ''}</p>
   </section>
   {#if canPreview}
     <section>
@@ -87,10 +92,10 @@
   <section>
     <h4>{$_('public_url')}</h4>
     <p>
-      {#if !displayURL || displayURL.startsWith('blob:')}
-        –
+      {#if publicURL}
+        <a href={publicURL}>{publicURL}</a>
       {:else}
-        <a href={displayURL}>{displayURL}</a>
+        –
       {/if}
     </p>
   </section>
@@ -113,14 +118,14 @@
   {#if commitDate}
     <section>
       <h4>{$_('sort_keys.commit_date')}</h4>
-      <p>{commitDate.toLocaleString($appLocale)}</p>
+      <p>{commitDate.toLocaleString($appLocale ?? undefined)}</p>
     </section>
   {/if}
   <section>
     <h4>{$_('used_in')}</h4>
     {#each usedEntries as { sha, slug, locales, collectionName, fileName } (sha)}
-      {@const collection = getCollection(collectionName)}
-      {@const collectionFile = fileName ? collection._fileMap[fileName] : undefined}
+      {@const collection = /** @type {Collection} */ (getCollection(collectionName))}
+      {@const collectionFile = fileName ? collection._fileMap?.[fileName] : undefined}
       {@const { defaultLocale } = (collectionFile ?? collection)._i18n}
       {@const locale = defaultLocale in locales ? defaultLocale : Object.keys(locales)[0]}
       {@const { content } = locales[locale]}
@@ -137,7 +142,7 @@
             {#if collectionFile}
               {collectionFile.label || collectionFile.name}
             {:else if content}
-              {content[collection.identifier_field] ||
+              {content[collection.identifier_field ?? ''] ||
                 content.title ||
                 content.name ||
                 content.label}

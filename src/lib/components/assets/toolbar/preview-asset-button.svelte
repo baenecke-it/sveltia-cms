@@ -1,0 +1,21 @@
+<script>
+  import { Button } from '@sveltia/ui';
+  import { _ } from 'svelte-i18n';
+  import { goto } from '$lib/services/app/navigation';
+  import { canPreviewAsset } from '$lib/services/assets';
+
+  /**
+   * @type {Asset | undefined}
+   */
+  export let asset;
+</script>
+
+<Button
+  variant="ghost"
+  disabled={!asset || !canPreviewAsset(asset)}
+  label={$_('preview')}
+  aria-label={$_('show_preview')}
+  on:click={() => {
+    goto(`/assets/${asset?.path}`);
+  }}
+/>

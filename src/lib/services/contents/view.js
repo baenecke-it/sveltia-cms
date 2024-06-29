@@ -1,24 +1,24 @@
+import { getDateTimeParts } from '@sveltia/utils/datetime';
+import { LocalStorage } from '@sveltia/utils/storage';
+import { stripSlashes } from '@sveltia/utils/string';
 import equal from 'fast-deep-equal';
 import { flatten } from 'flat';
-import moment from 'moment';
 import { _, locale as appLocale } from 'svelte-i18n';
 import { derived, get, writable } from 'svelte/store';
+import { prefs } from '$lib/services/prefs';
+import { applyTemplateFilter } from '$lib/services/contents/slug';
+import {
+  getFieldConfig,
+  getFieldDisplayValue,
+  getPropertyValue,
+} from '$lib/services/contents/entry';
+import { editorLeftPane, editorRightPane } from '$lib/services/contents/editor';
 import {
   allEntries,
   getEntriesByCollection,
   selectedCollection,
   selectedEntries,
 } from '$lib/services/contents';
-import { editorLeftPane, editorRightPane } from '$lib/services/contents/editor';
-import {
-  getFieldConfig,
-  getFieldDisplayValue,
-  getPropertyValue,
-} from '$lib/services/contents/entry';
-import { prefs } from '$lib/services/prefs';
-import { getDateTimeParts } from '$lib/services/utils/datetime';
-import LocalStorage from '$lib/services/utils/local-storage';
-import { stripSlashes, truncate } from '$lib/services/utils/strings';
 
 const storageKey = 'sveltia-cms.contents-view';
 /**
@@ -30,70 +30,7 @@ const defaultSortableFields = ['title', 'name', 'date', 'author', 'description']
  * View settings for the selected folder collection.
  * @type {import('svelte/store').Writable<EntryListView>}
  */
-export const currentView = writable({});
-
-/**
- * Transform summary template.
- * @param {string} summary - Original summary.
- * @param {string} tf - Transformation.
- * @param {Field} fieldConfig - Field configuration.
- * @returns {string} Transformed summary.
- * @see https://decapcms.org/docs/beta-features/#summary-string-template-transformations
- */
-const transformSummary = (summary, tf, fieldConfig) => {
-  if (tf === 'upper') {
-    return String(summary).toUpperCase();
-  }
-
-  if (tf === 'lower') {
-    return String(summary).toLowerCase();
-  }
-
-  const dateTransformer = tf.match(/^date\('(.*?)'\)$/);
-
-  if (dateTransformer && fieldConfig) {
-    const [, format] = dateTransformer;
-
-    const { time_format: timeFormat, picker_utc: pickerUTC = false } =
-      /** @type {DateTimeField} */ (fieldConfig);
-
-    const dateOnly = timeFormat === false;
-
-    return (
-      pickerUTC ||
-      (dateOnly && !!summary?.match(/^\d{4}-[01]\d-[0-3]\d$/)) ||
-      (dateOnly && !!summary.match(/T00:00(?::00)?(?:\.000)?Z$/))
-        ? moment.utc(summary)
-        : moment(summary)
-    ).format(format);
-  }
-
-  const defaultTransformer = tf.match(/^default\('?(.*?)'?\)$/);
-
-  if (defaultTransformer) {
-    const [, defaultValue] = defaultTransformer;
-
-    return summary ?? defaultValue;
-  }
-
-  const ternaryTransformer = tf.match(/^ternary\('?(.*?)'?,\s*'?(.*?)'?\)$/);
-
-  if (ternaryTransformer) {
-    const [, truthyValue, falsyValue] = ternaryTransformer;
-
-    return summary ? truthyValue : falsyValue;
-  }
-
-  const truncateTransformer = tf.match(/^truncate\((\d+)(?:,\s*'?(.*?)'?)?\)$/);
-
-  if (truncateTransformer) {
-    const [, max, ellipsis = ''] = truncateTransformer;
-
-    return truncate(String(summary), Number(max), { ellipsis });
-  }
-
-  return summary;
-};
+export const currentView = writable({ type: 'list' });
 
 /**
  * Parse the collection summary template to generate the summary to be displayed on the entry list.
@@ -106,7 +43,7 @@ const transformSummary = (summary, tf, fieldConfig) => {
  * @see https://decapcms.org/docs/configuration-options/#summary
  */
 export const formatSummary = (collection, entry, locale, { useTemplate = true } = {}) => {
-  const { content } = entry.locales[locale];
+  const { content } = /** @type {{ content: EntryContent }} */ (entry.locales[locale]);
 
   const {
     name: collectionName,
@@ -120,78 +57,86 @@ export const formatSummary = (collection, entry, locale, { useTemplate = true } 
   // CMS document, but actually `name` also works as a fallback. We also use the label` property and
   // the entry slug.
   if (!useTemplate || !summaryTemplate) {
-    return content[identifierField] || content.title || content.name || content.label || entry.slug;
+    return (
+      content[identifierField ?? ''] || content.title || content.name || content.label || entry.slug
+    );
   }
 
   const { locales, slug, commitDate, commitAuthor } = entry;
-  const { path: entryPath } = locales[locale];
+  const { path: entryPath = '' } = locales[locale];
   const valueMap = flatten(content);
 
   /**
-   * Replacer.
+   * Replacer subroutine.
    * @param {string} tag - Field name or one of special tags.
+   * @returns {any} Summary.
+   */
+  const replaceSub = (tag) => {
+    if (tag === 'slug') {
+      return slug;
+    }
+
+    if (tag === 'dirname') {
+      return stripSlashes(entryPath.replace(/[^/]+$/, '').replace(collectionFolder ?? '', ''));
+    }
+
+    if (tag === 'filename') {
+      return /** @type {string} */ (entryPath.split('/').pop()).split('.').shift();
+    }
+
+    if (tag === 'extension') {
+      return /** @type {string} */ (entryPath.split('/').pop()).split('.').pop();
+    }
+
+    if (tag === 'commit_date') {
+      return commitDate ?? '';
+    }
+
+    if (tag === 'commit_author') {
+      return commitAuthor?.name || commitAuthor?.login || commitAuthor?.email;
+    }
+
+    return getFieldDisplayValue({
+      collectionName,
+      valueMap,
+      keyPath: tag.replace(/^fields\./, ''),
+      locale: defaultLocale,
+    });
+  };
+
+  /**
+   * Replacer.
+   * @param {string} placeholder - Field name or one of special tags. May contain transformations.
    * @returns {string} Replaced string.
    */
-  const replace = (tag) => {
-    const [keyPath, ...transformations] = tag.split(/\s*\|\s*/);
+  const replace = (placeholder) => {
+    const [tag, ...transformations] = placeholder.split(/\s*\|\s*/);
+    let slugPart = replaceSub(tag);
 
-    let summary = (() => {
-      if (tag === 'slug') {
-        return slug;
-      }
-
-      if (tag === 'dirname') {
-        return stripSlashes(entryPath.replace(/[^/]+$/, '').replace(collectionFolder, ''));
-      }
-
-      if (tag === 'filename') {
-        return entryPath.split('/').pop().split('.').shift();
-      }
-
-      if (tag === 'extension') {
-        return entryPath.split('/').pop().split('.').pop();
-      }
-
-      if (tag === 'commit_date') {
-        return commitDate ?? '';
-      }
-
-      if (tag === 'commit_author') {
-        return commitAuthor?.name || commitAuthor?.login || commitAuthor?.email;
-      }
-
-      return getFieldDisplayValue({
-        collectionName,
-        valueMap,
-        keyPath,
-        locale: defaultLocale,
-      });
-    })();
-
-    if (!summary) {
+    if (slugPart === undefined) {
       return '';
     }
 
-    if (!transformations.length) {
-      if (summary instanceof Date) {
-        const { year, month, day } = getDateTimeParts({ date: summary });
+    if (slugPart instanceof Date && !transformations.length) {
+      const { year, month, day } = getDateTimeParts({ date: slugPart });
 
-        return `${year}-${month}-${day}`;
-      }
-
-      return String(summary);
+      return `${year}-${month}-${day}`;
     }
 
-    const fieldConfig = getFieldConfig({ collectionName, valueMap, keyPath });
+    if (transformations.length) {
+      const fieldConfig = getFieldConfig({ collectionName, valueMap, keyPath: tag });
 
-    transformations.forEach((tf) => {
-      summary = transformSummary(summary, tf, fieldConfig);
-    });
+      transformations.forEach((tf) => {
+        slugPart = applyTemplateFilter(slugPart, tf, fieldConfig);
+      });
+    }
 
-    return String(summary);
+    return String(slugPart);
   };
 
-  return summaryTemplate.replace(/{{(.+?)}}/g, (_match, tag) => replace(tag)).trim();
+  return summaryTemplate
+    .replace(/{{(.+?)}}/g, (_match, placeholder) => replace(placeholder))
+    .trim();
 };
 
 /**
@@ -207,7 +152,7 @@ const sortEntries = (entries, { key, order }) => {
   }
 
   const _entries = [...entries];
-  const { defaultLocale } = get(selectedCollection)._i18n;
+  const { defaultLocale } = /** @type {Collection} */ (get(selectedCollection))._i18n;
 
   const type =
     { slug: String, commit_author: String, commit_date: Date }[key] ||
@@ -253,9 +198,9 @@ const sortEntries = (entries, { key, order }) => {
  */
 const filterEntries = (entries, filters) => {
   const {
-    view_filters: configuredFilters,
+    view_filters: configuredFilters = [],
     _i18n: { defaultLocale },
-  } = get(selectedCollection);
+  } = /** @type {Collection} */ (get(selectedCollection));
 
   // Ignore invalid filters
   const validFilters = filters.filter(
@@ -293,13 +238,13 @@ const filterEntries = (entries, filters) => {
  * a name and an entry list. When ungrouped, there will still be one group object named `*`.
  * @see https://decapcms.org/docs/configuration-options/#view_groups
  */
-const groupEntries = (entries, { field, pattern } = { field: undefined, pattern: undefined }) => {
+const groupEntries = (entries, { field, pattern } = { field: '', pattern: undefined }) => {
   if (!field) {
     return entries.length ? [{ name: '*', entries }] : [];
   }
 
   const sortCondition = get(currentView).sort;
-  const { defaultLocale } = get(selectedCollection)._i18n;
+  const { defaultLocale } = /** @type {Collection} */ (get(selectedCollection))._i18n;
   const regex = typeof pattern === 'string' ? new RegExp(pattern) : undefined;
   /** @type {{ [key: string]: Entry[] }} */
   const groups = {};
@@ -307,18 +252,12 @@ const groupEntries = (entries, { field, pattern } = { field: undefined, pattern:
 
   entries.forEach((entry) => {
     const value = getPropertyValue(entry, defaultLocale, field);
-    /**
-     * @type {string}
-     */
-    let key;
 
-    if (value !== undefined) {
-      if (regex) {
-        [key = otherKey] = String(value).match(regex) ?? [];
-      } else {
-        key = value;
-      }
+    if (value === undefined) {
+      return;
     }
+
+    const key = regex ? (String(value).match(regex) ?? [])[0] ?? otherKey : String(value);
 
     if (!(key in groups)) {
       groups[key] = [];
@@ -414,7 +353,11 @@ const getSortFieldLabel = (collection, key) => {
 export const sortFields = derived(
   [selectedCollection, allEntries, appLocale],
   ([_collection, _allEntries], set) => {
-    const { files, sortable_fields: customSortableFields } = _collection ?? {};
+    const {
+      name: collectionName = '',
+      files,
+      sortable_fields: customSortableFields,
+    } = _collection ?? {};
 
     // Disable sorting for file collections
     if (files) {
@@ -427,7 +370,7 @@ export const sortFields = derived(
 
     const _sortFields = (
       Array.isArray(customSortableFields) ? customSortableFields : defaultSortableFields
-    ).filter((keyPath) => !!getFieldConfig({ collectionName: _collection.name, keyPath }));
+    ).filter((keyPath) => !!getFieldConfig({ collectionName, keyPath }));
 
     if (commitAuthor && !_sortFields.includes('author')) {
       _sortFields.push('commit_author');
@@ -437,7 +380,12 @@ export const sortFields = derived(
       _sortFields.push('commit_date');
     }
 
-    set(_sortFields.map((key) => ({ key, label: getSortFieldLabel(_collection, key) })));
+    set(
+      _sortFields.map((key) => ({
+        key,
+        label: _collection ? getSortFieldLabel(_collection, key) : '',
+      })),
+    );
   },
 );
 
@@ -538,9 +486,9 @@ selectedCollection.subscribe((collection) => {
 
 currentView.subscribe((view) => {
   const { name } = get(selectedCollection) ?? {};
-  const savedView = get(entryListSettings)[name] ?? {};
+  const savedView = get(entryListSettings)[name ?? ''] ?? {};
 
-  if (!equal(view, savedView)) {
+  if (name && !equal(view, savedView)) {
     entryListSettings.update((settings) => ({ ...settings, [name]: view }));
   }
 });

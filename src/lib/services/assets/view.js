@@ -1,52 +1,41 @@
+import { LocalStorage } from '@sveltia/utils/storage';
 import equal from 'fast-deep-equal';
 import { _, locale as appLocale } from 'svelte-i18n';
 import { derived, get, writable } from 'svelte/store';
+import { prefs } from '$lib/services/prefs';
+import { siteConfig } from '$lib/services/config';
 import {
   allAssetFolders,
   allAssets,
   assetExtensions,
-  getAssetURL,
   selectedAssetFolder,
   selectedAssets,
+  uploadingAssets,
 } from '$lib/services/assets';
-import { siteConfig } from '$lib/services/config';
-import { prefs } from '$lib/services/prefs';
-import LocalStorage from '$lib/services/utils/local-storage';
 
 const storageKey = 'sveltia-cms.assets-view';
 
 /**
- * Lazily or eagerly generate the asset’s Blob URL on demand to be used for a `<Image>` or `<Video>`
- * component. For a Git backend, this will be done by fetching the Blob via the API.
- * @param {Asset} asset - Asset.
- * @param {('lazy' | 'eager')} loading - How to load the media.
- * @param {(HTMLImageElement | HTMLVideoElement)} element - Element to observe the visibility using
- * the Intersection Observer API.
- * @returns {Promise<string | undefined>} Blob URL.
+ * Whether to show the Upload Assets dialog.
  */
-export const getAssetPreviewURL = (asset, loading, element) => {
-  if (loading === 'eager') {
-    return getAssetURL(asset);
-  }
+export const showUploadAssetsDialog = writable(false);
 
-  return new Promise((resolve) => {
-    const observer = new IntersectionObserver(([entry]) => {
-      if (entry.isIntersecting) {
-        observer.disconnect();
-        resolve(getAssetURL(asset));
-      }
-    });
-
-    observer.observe(element);
-  });
-};
+/**
+ * @type {import('svelte/store').Readable<boolean>}
+ */
+export const showUploadAssetsConfirmDialog = derived(
+  [uploadingAssets],
+  ([_uploadingAssets], set) => {
+    set(!!_uploadingAssets.files?.length);
+  },
+);
 
 /**
  * Get the label for the given collection. It can be a category name if the folder is a
  * collection-specific asset folder.
- * @param {string} collectionName - Collection name.
+ * @param {string | undefined} collectionName - Collection name.
  * @returns {string} Human-readable label.
- * @see https://decapcms.org/docs/beta-features/#folder-collections-media-and-public-folder
+ * @see https://decapcms.org/docs/collection-folder/#media-and-public-folder
  */
 export const getFolderLabelByCollection = (collectionName) => {
   if (collectionName === '*') {
@@ -57,18 +46,18 @@ export const getFolderLabelByCollection = (collectionName) => {
     return get(_)('uncategorized');
   }
 
-  return get(siteConfig).collections.find(({ name }) => name === collectionName)?.label ?? '';
+  return get(siteConfig)?.collections.find(({ name }) => name === collectionName)?.label ?? '';
 };
 
 /**
  * Get the label for the given folder path. It can be a category name if the folder is a
  * collection-specific asset folder.
- * @param {string} folderPath - Media folder path.
+ * @param {string | undefined} folderPath - Media folder path.
  * @returns {string} Human-readable label.
- * @see https://decapcms.org/docs/beta-features/#folder-collections-media-and-public-folder
+ * @see https://decapcms.org/docs/collection-folder/#media-and-public-folder
  */
 export const getFolderLabelByPath = (folderPath) => {
-  const { media_folder: defaultMediaFolder } = get(siteConfig);
+  const { media_folder: defaultMediaFolder } = /** @type {SiteConfig} */ (get(siteConfig));
 
   if (!folderPath) {
     return getFolderLabelByCollection('*');
@@ -158,7 +147,7 @@ const sortAssets = (assets, { key, order } = {}) => {
  * @param {FilteringConditions} [conditions] - Filtering conditions.
  * @returns {Asset[]} Filtered asset list.
  */
-const filterAssets = (assets, { field, pattern } = { field: undefined, pattern: undefined }) => {
+const filterAssets = (assets, { field, pattern } = { field: '', pattern: '' }) => {
   if (!field) {
     return assets;
   }
@@ -191,7 +180,7 @@ const filterAssets = (assets, { field, pattern } = { field: undefined, pattern: 
  * @returns {{ [key: string]: Asset[] }} Grouped assets, where key is a group label and value is an
  * asset list.
  */
-const groupAssets = (assets, { field, pattern } = { field: undefined, pattern: undefined }) => {
+const groupAssets = (assets, { field, pattern } = { field: '', pattern: undefined }) => {
   if (!field) {
     return assets.length ? { '*': assets } : {};
   }
@@ -233,6 +222,7 @@ const groupAssets = (assets, { field, pattern } = { field: undefined, pattern: u
  */
 const defaultView = {
   type: 'grid',
+  showInfo: true,
   sort: {
     key: 'name',
     order: 'ascending',
@@ -243,7 +233,7 @@ const defaultView = {
  * View settings for the selected asset collection.
  * @type {import('svelte/store').Writable<AssetListView>}
  */
-export const currentView = writable({});
+export const currentView = writable({ type: 'grid', showInfo: true });
 
 /**
  * View settings for all the asset collection.

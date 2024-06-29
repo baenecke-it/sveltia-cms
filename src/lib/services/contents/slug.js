@@ -1,9 +1,77 @@
+import { generateUUID } from '@sveltia/utils/crypto';
+import { getDateTimeParts } from '@sveltia/utils/datetime';
+import { truncate } from '@sveltia/utils/string';
+import moment from 'moment';
 import { get } from 'svelte/store';
-import { siteConfig } from '$lib/services/config';
+import { renameIfNeeded } from '$lib/services/utils/file';
+import { getFieldConfig } from '$lib/services/contents/entry';
 import { getEntriesByCollection } from '$lib/services/contents';
-import { getDateTimeParts } from '$lib/services/utils/datetime';
-import { renameIfNeeded } from '$lib/services/utils/files';
-import { generateUUID, truncate } from '$lib/services/utils/strings';
+import { siteConfig } from '$lib/services/config';
+
+/**
+ * Transform slug template.
+ * @param {any} slugPart - Original slug part.
+ * @param {string} tf - Transformation.
+ * @param {Field} [fieldConfig] - Field configuration.
+ * @returns {string} Transformed slug part.
+ * @see https://decapcms.org/docs/summary-strings/
+ */
+export const applyTemplateFilter = (slugPart, tf, fieldConfig) => {
+  const slugPartStr = String(slugPart);
+
+  if (tf === 'upper') {
+    return slugPartStr.toUpperCase();
+  }
+
+  if (tf === 'lower') {
+    return slugPartStr.toLowerCase();
+  }
+
+  const dateTransformer = tf.match(/^date\('(.*?)'\)$/);
+
+  if (dateTransformer) {
+    const [, format] = dateTransformer;
+
+    const { time_format: timeFormat = undefined, picker_utc: pickerUTC = false } =
+      /** @type {DateTimeField} */ (fieldConfig) ?? /** @type {DateTimeField} */ ({});
+
+    const dateOnly = timeFormat === false;
+
+    return (
+      pickerUTC ||
+      (dateOnly && !!slugPartStr?.match(/^\d{4}-[01]\d-[0-3]\d$/)) ||
+      (dateOnly && !!slugPartStr.match(/T00:00(?::00)?(?:\.000)?Z$/))
+        ? moment.utc(slugPartStr)
+        : moment(slugPartStr)
+    ).format(format);
+  }
+
+  const defaultTransformer = tf.match(/^default\('?(.*?)'?\)$/);
+
+  if (defaultTransformer) {
+    const [, defaultValue] = defaultTransformer;
+
+    return slugPart ? slugPartStr : defaultValue;
+  }
+
+  const ternaryTransformer = tf.match(/^ternary\('?(.*?)'?,\s*'?(.*?)'?\)$/);
+
+  if (ternaryTransformer) {
+    const [, truthyValue, falsyValue] = ternaryTransformer;
+
+    return slugPart ? truthyValue : falsyValue;
+  }
+
+  const truncateTransformer = tf.match(/^truncate\((\d+)(?:,\s*'?(.*?)'?)?\)$/);
+
+  if (truncateTransformer) {
+    const [, max, ellipsis = ''] = truncateTransformer;
+
+    return truncate(slugPartStr, Number(max), { ellipsis });
+  }
+
+  return slugPartStr;
+};
 
 /**
  * Normalize the given string as a slug for a filename.
@@ -18,7 +86,7 @@ export const normalizeSlug = (string) => {
       clean_accents: cleanAccents = false,
       sanitize_replacement: sanitizeReplacement = '-',
     } = {},
-  } = get(siteConfig);
+  } = /** @type {SiteConfig} */ (get(siteConfig)) ?? {};
 
   let slug = string;
 
@@ -52,11 +120,11 @@ export const normalizeSlug = (string) => {
  * @returns {string} Filled template that can be used for an entry slug, path, etc.
  * @see https://decapcms.org/docs/configuration-options/#slug-type
  * @see https://decapcms.org/docs/configuration-options/#slug
- * @see https://decapcms.org/docs/beta-features/#folder-collections-media-and-public-folder
+ * @see https://decapcms.org/docs/collection-folder/#media-and-public-folder
  */
 export const fillSlugTemplate = (
   template,
-  { collection, content, currentSlug = '', isMediaFolder = false, entryFilePath = '' },
+  { collection, content: valueMap, currentSlug = '', isMediaFolder = false, entryFilePath = '' },
 ) => {
   const {
     name: collectionName,
@@ -67,7 +135,12 @@ export const fillSlugTemplate = (
 
   const dateTimeParts = getDateTimeParts();
 
-  let slug = template.replaceAll(/{{(.+?)}}/g, (_match, tag) => {
+  /**
+   * Replacer subroutine.
+   * @param {string} tag - Field name or one of special tags.
+   * @returns {any} Slug part.
+   */
+  const replaceSub = (tag) => {
     if (['year', 'month', 'day', 'hour', 'minute', 'second'].includes(tag)) {
       return dateTimeParts[tag];
     }
@@ -81,13 +154,11 @@ export const fillSlugTemplate = (
     }
 
     if (tag === 'uuid_short') {
-      // Last 12 characters
-      return generateUUID().split('-').pop();
+      return generateUUID('short');
     }
 
     if (tag === 'uuid_shorter') {
-      // First 8 characters
-      return generateUUID().split('-').shift();
+      return generateUUID('shorter');
     }
 
     if (isMediaFolder) {
@@ -96,39 +167,69 @@ export const fillSlugTemplate = (
       }
 
       if (tag === 'dirname') {
-        return entryFilePath.replace(collectionFolderPath, '').match(/(.+?)(?:\/[^/]+)?$/)[1];
+        return (
+          (entryFilePath.replace(collectionFolderPath ?? '', '').match(/(.+?)(?:\/[^/]+)?$/) ??
+            [])[1] ?? ''
+        );
       }
 
       if (tag === 'filename') {
-        return entryFilePath.split('/').pop().split('.').shift();
+        return /** @type {string} */ (entryFilePath.split('/').pop()).split('.').shift();
       }
 
       if (tag === 'extension') {
-        return entryFilePath.split('/').pop().split('.').pop();
+        return /** @type {string} */ (entryFilePath.split('/').pop()).split('.').pop();
       }
     }
 
     let value;
 
     if (tag.startsWith('fields.')) {
-      value = content[tag.replace(/^fields\./, '')];
+      value = valueMap[tag.replace(/^fields\./, '')];
     } else if (tag === 'slug') {
-      value = content[identifierField] || content.title || content.name || content.label;
+      value = valueMap[identifierField] || valueMap.title || valueMap.name || valueMap.label;
     } else {
-      value = content[tag];
+      value = valueMap[tag];
     }
 
-    if (value) {
-      value = normalizeSlug(value);
+    return value;
+  };
+
+  /**
+   * Replacer.
+   * @param {string} placeholder - Field name or one of special tags. May contain transformations.
+   * @returns {string} Replaced string.
+   */
+  const replace = (placeholder) => {
+    const [tag, ...transformations] = placeholder.split(/\s*\|\s*/);
+    let slugPart = replaceSub(tag);
+
+    if (slugPart === undefined) {
+      // Use a random ID as a fallback
+      return generateUUID('short');
     }
 
-    if (value) {
-      return value;
+    if (transformations.length) {
+      const fieldConfig = getFieldConfig({ collectionName, valueMap, keyPath: tag });
+
+      transformations.forEach((tf) => {
+        slugPart = applyTemplateFilter(slugPart, tf, fieldConfig);
+      });
+    }
+
+    if (slugPart !== undefined) {
+      slugPart = normalizeSlug(String(slugPart));
+    }
+
+    if (slugPart) {
+      return String(slugPart);
     }
 
     // Use a random ID as a fallback
-    return generateUUID().split('-').pop();
-  });
+    return generateUUID('short');
+  };
+
+  let slug = template.replace(/{{(.+?)}}/g, (_match, tag) => replace(tag)).trim();
 
   // Truncate a long slug if needed
   if (typeof slugMaxLength === 'number') {

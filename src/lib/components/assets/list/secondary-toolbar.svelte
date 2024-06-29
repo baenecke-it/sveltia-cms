@@ -12,7 +12,7 @@
   $: hasMultipleAssets = $listedAssets.length > 1;
 </script>
 
-{#if !$selectedCollection.files}
+{#if !$selectedCollection?.files}
   <Toolbar variant="secondary" aria-label={$_('asset_list')}>
     <Button
       variant="ghost"
@@ -48,7 +48,7 @@
       aria-controls="asset-list"
     />
     <ViewSwitcher disabled={!hasListedAssets} {currentView} aria-controls="asset-list" />
-    <Divider />
+    <Divider orientation="vertical" />
     <Button
       variant="ghost"
       iconic

@@ -2,6 +2,10 @@
 /* eslint-disable no-restricted-syntax */
 /* eslint-disable no-continue */
 
+import { generateRandomId, generateUUID, getHash } from '@sveltia/utils/crypto';
+import { getDateTimeParts } from '@sveltia/utils/datetime';
+import { LocalStorage } from '@sveltia/utils/storage';
+import { escapeRegExp, stripTags } from '@sveltia/utils/string';
 import equal from 'fast-deep-equal';
 import { flatten, unflatten } from 'flat';
 import { get, writable } from 'svelte/store';
@@ -16,10 +20,7 @@ import { translator } from '$lib/services/integrations/translators';
 import { formatEntryFile, getFileExtension } from '$lib/services/parser';
 import { prefs } from '$lib/services/prefs';
 import { user } from '$lib/services/user';
-import { getDateTimeParts } from '$lib/services/utils/datetime';
-import { createPath, getHash, renameIfNeeded, resolvePath } from '$lib/services/utils/files';
-import LocalStorage from '$lib/services/utils/local-storage';
-import { escapeRegExp } from '$lib/services/utils/strings';
+import { createPath, renameIfNeeded, resolvePath } from '$lib/services/utils/file';
 
 const storageKey = 'sveltia-cms.entry-view';
 
@@ -66,15 +67,92 @@ export const entryEditorSettings = writable({}, (set) => {
 export const entryDraft = writable();
 
 /**
+ * Parse the given dynamic default value.
+ * @param {object} args - Arguments.
+ * @param {Field} args.fieldConfig - Field configuration.
+ * @param {string} args.keyPath - Field key path, e.g. `author.name`.
+ * @param {FlattenedEntryContent} args.newContent - An object holding a content key-value map.
+ * @param {string} args.value - Dynamic default value.
+ * @see https://decapcms.org/docs/dynamic-default-values/
+ * @todo Validate the value carefully before adding it to the content map.
+ */
+const parseDynamicDefaultValue = ({ fieldConfig, keyPath, newContent, value }) => {
+  const { widget: widgetName = 'string' } = fieldConfig;
+
+  /**
+   * Parse the value as a list and add the items to the key-value map.
+   */
+  const fillList = () => {
+    newContent[keyPath] = [];
+
+    value.split(/,\s*/).forEach((val, index) => {
+      newContent[`${keyPath}.${index}`] = val;
+    });
+  };
+
+  if (widgetName === 'boolean') {
+    newContent[keyPath] = value === 'true';
+
+    return;
+  }
+
+  if (widgetName === 'list') {
+    const { field: subField, fields: subFields, types } = /** @type {ListField} */ (fieldConfig);
+    const hasSubFields = !!subField || !!subFields || !!types;
+
+    // Handle simple list
+    if (!hasSubFields) {
+      fillList();
+
+      return;
+    }
+  }
+
+  if (widgetName === 'markdown') {
+    // Sanitize the given value to prevent XSS attacks as the preview may not be sanitized
+    newContent[keyPath] = stripTags(value);
+
+    return;
+  }
+
+  if (widgetName === 'number') {
+    const { value_type: valueType = 'int' } = /** @type {NumberField} */ (fieldConfig);
+
+    newContent[keyPath] =
+      // eslint-disable-next-line no-nested-ternary
+      valueType === 'int'
+        ? Number.parseInt(value, 10)
+        : valueType === 'float'
+          ? Number.parseFloat(value)
+          : value;
+
+    return;
+  }
+
+  if (widgetName === 'relation' || widgetName === 'select') {
+    const { multiple = false } = /** @type {RelationField | SelectField} */ (fieldConfig);
+
+    if (multiple) {
+      fillList();
+
+      return;
+    }
+  }
+
+  // Just use the string as is
+  newContent[keyPath] = value;
+};
+
+/**
  * Get the default values for the given fields. If dynamic default values are given, these values
  * take precedence over static default values defined with the site configuration.
  * @param {Field[]} fields - Field list of a collection.
- * @param {{ [key: string]: string }} [defaultValues] - Dynamic default values.
+ * @param {{ [key: string]: string }} [dynamicValues] - Dynamic default values.
  * @returns {FlattenedEntryContent} Flattened entry content for creating a new draft content or
  * adding a new list item.
  * @todo Make this more diligent.
  */
-export const getDefaultValues = (fields, defaultValues = {}) => {
+export const getDefaultValues = (fields, dynamicValues = {}) => {
   /** @type {FlattenedEntryContent} */
   const newContent = {};
 
@@ -84,16 +162,15 @@ export const getDefaultValues = (fields, defaultValues = {}) => {
    * @param {object} args - Arguments.
    * @param {Field} args.fieldConfig - Field configuration.
    * @param {string} args.keyPath - Field key path, e.g. `author.name`.
-   * @see https://decapcms.org/docs/beta-features/#dynamic-default-values
    */
   const getDefaultValue = ({ fieldConfig, keyPath }) => {
-    if (keyPath in defaultValues) {
-      newContent[keyPath] = defaultValues[keyPath];
+    if (keyPath in dynamicValues) {
+      parseDynamicDefaultValue({ fieldConfig, keyPath, newContent, value: dynamicValues[keyPath] });
 
       return;
     }
 
-    const { widget: widgetName, default: defaultValue, required = true } = fieldConfig;
+    const { widget: widgetName = 'string', default: defaultValue, required = true } = fieldConfig;
     const isArray = Array.isArray(defaultValue) && !!defaultValue.length;
 
     if (widgetName === 'list') {
@@ -123,19 +200,19 @@ export const getDefaultValues = (fields, defaultValues = {}) => {
     }
 
     if (widgetName === 'object') {
-      // Skip optional objects
-      if (!required) {
-        return;
-      }
+      const { fields: subFields, types } = /** @type {ObjectField} */ (fieldConfig);
 
-      const { fields: subFields } = /** @type {ObjectField} */ (fieldConfig);
-
-      subFields.forEach((_subField) => {
-        getDefaultValue({
-          keyPath: [keyPath, _subField.name].join('.'),
-          fieldConfig: _subField,
+      if (!required || Array.isArray(types)) {
+        // Enable validation
+        newContent[keyPath] = null;
+      } else {
+        subFields?.forEach((_subField) => {
+          getDefaultValue({
+            keyPath: [keyPath, _subField.name].join('.'),
+            fieldConfig: _subField,
+          });
         });
-      });
+      }
 
       return;
     }
@@ -150,13 +227,19 @@ export const getDefaultValues = (fields, defaultValues = {}) => {
       const { multiple = false } = /** @type {RelationField | SelectField} */ (fieldConfig);
 
       if (multiple) {
-        newContent[keyPath] = isArray ? defaultValue : [];
+        if (isArray) {
+          defaultValue.forEach((value, index) => {
+            newContent[[keyPath, index].join('.')] = value;
+          });
+        } else {
+          newContent[keyPath] = [];
+        }
 
         return;
       }
     }
 
-    if (widgetName === 'date' || widgetName === 'datetime') {
+    if (widgetName === 'datetime') {
       if (typeof defaultValue === 'string') {
         newContent[keyPath] = defaultValue;
       } else {
@@ -171,14 +254,26 @@ export const getDefaultValues = (fields, defaultValues = {}) => {
           timeZone: pickerUTC ? 'UTC' : undefined,
         });
 
+        const dateStr = `${year}-${month}-${day}`;
+        const timeStr = `${hour}:${minute}`;
+
         if (timeFormat === false) {
-          newContent[keyPath] = `${year}-${month}-${day}`;
+          newContent[keyPath] = dateStr;
         } else if (dateFormat === false) {
-          newContent[keyPath] = `${hour}:${minute}`;
+          newContent[keyPath] = timeStr;
         } else {
-          newContent[keyPath] = `${year}-${month}-${day}T${hour}:${minute}${pickerUTC ? 'Z' : ''}`;
+          newContent[keyPath] = `${dateStr}T${timeStr}:00.000Z`;
         }
       }
+
+      return;
+    }
+
+    if (widgetName === 'uuid') {
+      const { prefix, use_b32_encoding: useEncoding } = /** @type {UuidField} */ (fieldConfig);
+      const value = useEncoding ? generateRandomId() : generateUUID();
+
+      newContent[keyPath] = prefix ? `${prefix}${value}` : value;
 
       return;
     }
@@ -218,7 +313,12 @@ export const createProxy = ({
   getValueMap = undefined,
 }) => {
   const collection = getCollection(collectionName);
-  const collectionFile = fileName ? collection._fileMap[fileName] : undefined;
+
+  if (!collection) {
+    return undefined;
+  }
+
+  const collectionFile = fileName ? collection._fileMap?.[fileName] : undefined;
   const { defaultLocale } = (collectionFile ?? collection)._i18n;
 
   return new Proxy(/** @type {any} */ (target), {
@@ -238,7 +338,7 @@ export const createProxy = ({
         ).forEach(([targetLocale, content]) => {
           // Don’t duplicate the value if the parent object doesn’t exist
           if (keyPath.includes('.')) {
-            const [, parentKeyPath] = keyPath.match(/(.+)\.[^.]+$/);
+            const [, parentKeyPath] = keyPath.match(/(.+)\.[^.]+$/) ?? [];
 
             if (
               !Object.keys(content).some((_keyPath) => _keyPath.startsWith(`${parentKeyPath}.`))
@@ -260,19 +360,24 @@ export const createProxy = ({
 
 /**
  * Create an entry draft.
- * @param {Entry} entry - Entry to be edited, or a partial `Entry` object containing at least the
- * collection name for a new entry.
- * @param {{ [key: string]: string }} [defaultValues] - Dynamic default values for a new entry
+ * @param {any} entry - Entry to be edited, or a partial {@link Entry} object containing at least
+ * the collection name for a new entry.
+ * @param {{ [key: string]: string }} [dynamicValues] - Dynamic default values for a new entry
  * passed through URL parameters.
  */
-export const createDraft = (entry, defaultValues) => {
+export const createDraft = (entry, dynamicValues) => {
   const { id, collectionName, fileName, locales } = entry;
   const isNew = id === undefined;
   const collection = getCollection(collectionName);
-  const collectionFile = fileName ? collection._fileMap[fileName] : undefined;
-  const { fields, _i18n } = collectionFile ?? collection;
+
+  if (!collection) {
+    return;
+  }
+
+  const collectionFile = fileName ? collection._fileMap?.[fileName] : undefined;
+  const { fields = [], _i18n } = collectionFile ?? collection;
   const { i18nEnabled, locales: allLocales } = _i18n;
-  const newContent = getDefaultValues(fields, defaultValues);
+  const newContent = getDefaultValues(fields, dynamicValues);
 
   const enabledLocales = isNew
     ? allLocales
@@ -321,13 +426,14 @@ export const createDraft = (entry, defaultValues) => {
               prop: 'files',
               locale,
               // eslint-disable-next-line jsdoc/require-jsdoc
-              getValueMap: () => get(entryDraft).currentValues[locale],
+              getValueMap: () => /** @type {EntryDraft} */ (get(entryDraft)).currentValues[locale],
             })
           : {},
       ]),
     ),
     validities: Object.fromEntries(allLocales.map((locale) => [locale, {}])),
-    viewStates: Object.fromEntries(allLocales.map((locale) => [locale, {}])),
+    // Any locale-agnostic view states will be put under the `_` key
+    expanderStates: { _: {} },
   });
 };
 
@@ -342,7 +448,7 @@ const unflattenObj = (obj) => unflatten(JSON.parse(JSON.stringify(obj)));
  * Traverse the given object by decoding dot-connected `keyPath`.
  * @param {any} obj - Unflatten object.
  * @param {string} keyPath - Dot-connected field name.
- * @returns {object[]} Values.
+ * @returns {any[]} Values.
  */
 const getItemList = (obj, keyPath) =>
   keyPath.split('.').reduce((_obj, key) => {
@@ -358,29 +464,37 @@ const getItemList = (obj, keyPath) =>
  * Update the value in a list field.
  * @param {LocaleCode} locale - Target locale.
  * @param {string} keyPath - Dot-connected field name.
- * @param {(arg: { valueList: object[], viewList: object[] }) => void} manipulate - A function to
- * manipulate the list, which takes one object argument containing the value list and view state
- * list. The typical usage is `list.splice()`.
+ * @param {(arg: { valueList: object[], expanderStateList: boolean[] }) => void} manipulate - A
+ * function to manipulate the list, which takes one object argument containing the value list and
+ * view state list. The typical usage is `list.splice()`.
  */
 export const updateListField = (locale, keyPath, manipulate) => {
-  const currentValues = unflattenObj(get(entryDraft).currentValues[locale]);
-  const viewStates = unflattenObj(get(entryDraft).viewStates[locale]);
+  const draft = /** @type {EntryDraft} */ (get(entryDraft));
+  const { collection, collectionFile } = draft;
+  const { defaultLocale } = (collectionFile ?? collection)._i18n;
+  const currentValues = unflattenObj(draft.currentValues[locale]);
+  const expanderStates = unflattenObj(draft.expanderStates._);
 
   manipulate({
     valueList: getItemList(currentValues, keyPath),
-    viewList: getItemList(viewStates, keyPath),
+    // Manipulation should only happen once with the default locale
+    expanderStateList: locale === defaultLocale ? getItemList(expanderStates, keyPath) : [],
   });
 
-  entryDraft.update((draft) => ({
-    ...draft,
+  /** @type {import('svelte/store').Writable<EntryDraft>} */ (entryDraft).update((_draft) => ({
+    ..._draft,
     currentValues: {
-      ...draft.currentValues,
+      ..._draft.currentValues,
       // Flatten & proxify the object again
-      [locale]: createProxy({ draft, locale, target: flatten(currentValues) }),
+      [locale]: createProxy({
+        draft: _draft,
+        locale,
+        target: flatten(currentValues),
+      }),
     },
-    viewStates: {
-      ...draft.viewStates,
-      [locale]: flatten(viewStates),
+    expanderStates: {
+      ..._draft.expanderStates,
+      _: flatten(expanderStates),
     },
   }));
 };
@@ -395,7 +509,7 @@ export const updateListField = (locale, keyPath, manipulate) => {
  * @returns {FlattenedEntryContent} Updated content.
  */
 export const copyDefaultLocaleValues = (content, { prop = 'currentValues' } = {}) => {
-  const draft = get(entryDraft);
+  const draft = /** @type {EntryDraft} */ (get(entryDraft));
   const { collectionName, fileName, collection, collectionFile } = draft;
   const { defaultLocale } = (collectionFile ?? collection)._i18n;
   const defaultLocaleValues = draft[prop][defaultLocale];
@@ -418,19 +532,21 @@ export const copyDefaultLocaleValues = (content, { prop = 'currentValues' } = {}
  * @param {LocaleCode} locale - Locale.
  */
 export const toggleLocale = (locale) => {
-  entryDraft.update((draft) => {
-    const { currentLocales, currentValues } = draft;
+  /** @type {import('svelte/store').Writable<EntryDraft>} */ (entryDraft).update((_draft) => {
+    const { currentLocales, currentValues } = _draft;
     const enabled = !currentLocales[locale];
 
     // Initialize the content for the locale
     if (enabled && !currentValues[locale]) {
-      const { collection, collectionName, collectionFile, fileName, originalValues, files } = draft;
-      const { fields, _i18n } = collectionFile ?? collection;
+      const { collection, collectionName, collectionFile, fileName, originalValues, files } =
+        _draft;
+
+      const { fields = [], _i18n } = collectionFile ?? collection;
       const { defaultLocale } = _i18n;
       const newContent = getDefaultValues(fields);
 
       return {
-        ...draft,
+        ..._draft,
         currentLocales: { ...currentLocales, [locale]: enabled },
         originalValues: { ...originalValues, [locale]: newContent },
         currentValues: {
@@ -452,14 +568,14 @@ export const toggleLocale = (locale) => {
               { prop: 'files' },
             ),
             // eslint-disable-next-line jsdoc/require-jsdoc
-            getValueMap: () => get(entryDraft).currentValues[locale],
+            getValueMap: () => /** @type {EntryDraft} */ (get(entryDraft)).currentValues[locale],
           }),
         },
       };
     }
 
     return {
-      ...draft,
+      ..._draft,
       currentLocales: { ...currentLocales, [locale]: enabled },
     };
   });
@@ -468,12 +584,12 @@ export const toggleLocale = (locale) => {
 /**
  * Copy/translation toast state.
  * @type {import('svelte/store').Writable<{
- * id: number,
+ * id: number | undefined,
  * show: boolean,
- * status: 'info' | 'success' | 'error',
- * message: string,
+ * status: 'info' | 'success' | 'error' | undefined,
+ * message: string | undefined,
  * count: number,
- * sourceLocale: LocaleCode,
+ * sourceLocale: LocaleCode | undefined,
  * }>}
  */
 export const copyFromLocaleToast = writable({
@@ -500,7 +616,7 @@ export const copyFromLocale = async (
   keyPath = '',
   translate = false,
 ) => {
-  const { collectionName, fileName, currentValues } = get(entryDraft);
+  const { collectionName, fileName, currentValues } = /** @type {EntryDraft} */ (get(entryDraft));
   const valueMap = currentValues[sourceLocale];
 
   const copingFields = Object.fromEntries(
@@ -511,7 +627,7 @@ export const copyFromLocale = async (
       if (
         (keyPath && !_keyPath.startsWith(keyPath)) ||
         typeof value !== 'string' ||
-        !['markdown', 'text', 'string', 'list'].includes(field?.widget) ||
+        !['markdown', 'text', 'string', 'list'].includes(field?.widget ?? 'string') ||
         (field?.widget === 'list' &&
           (/** @type {ListField} */ (field).field ?? /** @type {ListField} */ (field).fields)) ||
         (!translate && value === currentValues[targetLocale][_keyPath])
@@ -571,10 +687,12 @@ export const copyFromLocale = async (
       });
 
       updateToast('success', `translation.complete.${countType}`);
-    } catch {
+    } catch (/** @type {any} */ ex) {
       // @todo Show a detailed error message.
       // @see https://www.deepl.com/docs-api/api-access/error-handling/
       updateToast('error', 'translation.error');
+      // eslint-disable-next-line no-console
+      console.error(ex);
     }
   } else {
     Object.entries(copingFields).forEach(([_keyPath, value]) => {
@@ -584,7 +702,10 @@ export const copyFromLocale = async (
     updateToast('success', `copy.complete.${countType}`);
   }
 
-  entryDraft.update((_entryDraft) => ({ ..._entryDraft, currentValues }));
+  /** @type {import('svelte/store').Writable<EntryDraft>} */ (entryDraft).update((_draft) => ({
+    ..._draft,
+    currentValues,
+  }));
 };
 
 /**
@@ -595,7 +716,9 @@ export const copyFromLocale = async (
  * Object, this will likely match multiple fields.
  */
 export const revertChanges = (locale = '', keyPath = '') => {
-  const { collection, collectionFile, fileName, currentValues, originalValues } = get(entryDraft);
+  const { collection, collectionFile, fileName, currentValues, originalValues } =
+    /** @type {EntryDraft} */ (get(entryDraft));
+
   const { locales: allLocales, defaultLocale } = (collectionFile ?? collection)._i18n;
   const locales = locale ? [locale] : allLocales;
 
@@ -615,7 +738,7 @@ export const revertChanges = (locale = '', keyPath = '') => {
           keyPath: _keyPath,
         });
 
-        if (_locale === defaultLocale || [true, 'translate'].includes(fieldConfig?.i18n)) {
+        if (_locale === defaultLocale || [true, 'translate'].includes(fieldConfig?.i18n ?? false)) {
           if (reset) {
             delete currentValues[_locale][_keyPath];
           } else {
@@ -633,7 +756,10 @@ export const revertChanges = (locale = '', keyPath = '') => {
     revert(_locale, originalValues[_locale], false);
   });
 
-  entryDraft.update((_entryDraft) => ({ ..._entryDraft, currentValues }));
+  /** @type {import('svelte/store').Writable<EntryDraft>} */ (entryDraft).update((_draft) => ({
+    ..._draft,
+    currentValues,
+  }));
 };
 
 /**
@@ -645,7 +771,7 @@ export const revertChanges = (locale = '', keyPath = '') => {
  */
 const validateEntry = () => {
   const { collection, collectionFile, fileName, currentLocales, currentValues, validities } =
-    get(entryDraft);
+    /** @type {EntryDraft} */ (get(entryDraft));
 
   const { i18nEnabled, defaultLocale } = (collectionFile ?? collection)._i18n;
   let validated = true;
@@ -678,71 +804,92 @@ const validateEntry = () => {
       }
 
       const arrayMatch = keyPath.match(/\.(\d+)$/);
-      const { widget: widgetName, required = true, i18n = false, pattern } = fieldConfig;
+      const { widget: widgetName = 'string', required = true, i18n = false, pattern } = fieldConfig;
       const { multiple = false } = /** @type {RelationField | SelectField} */ (fieldConfig);
 
       const { min, max } = /** @type {ListField | NumberField | RelationField | SelectField} */ (
         fieldConfig
       );
 
-      const canTranslate = i18nEnabled && i18n !== false;
+      const canTranslate = i18nEnabled && (i18n === true || i18n === 'translate');
       const _required = required !== false && (locale === defaultLocale || canTranslate);
       let valueMissing = false;
       let rangeUnderflow = false;
       let rangeOverflow = false;
       let patternMismatch = false;
+      let typeMismatch = false;
 
       // Given that values for an array field are flatten into `field.0`, `field.1` ... `field.n`,
       // we should validate only once against all these values
-      if (arrayMatch) {
-        const index = Number(arrayMatch[1]);
-
-        if (index > 0) {
-          return;
+      if (widgetName === 'list' || arrayMatch) {
+        if (arrayMatch) {
+          keyPath = keyPath.replace(/\.\d+$/, '');
         }
 
-        keyPath = keyPath.replace(/\.\d+$/, '');
+        if (keyPath in validities[locale]) {
+          return;
+        }
 
         const keyPathRegex = new RegExp(`^${escapeRegExp(keyPath)}\\.\\d+$`);
 
         const values =
-          valueEntries
-            .filter(([_keyPath]) => _keyPath.match(keyPathRegex))
-            .map(([, savedValue]) => savedValue)
-            .filter((val) => val !== undefined) ?? [];
+          Array.isArray(value) && value.length
+            ? value
+            : valueEntries
+                .filter(([_keyPath]) => _keyPath.match(keyPathRegex))
+                .map(([, savedValue]) => savedValue)
+                .filter((val) => val !== undefined) ?? [];
 
         if (_required && !values.length) {
           valueMissing = true;
-        }
-
-        if (typeof min === 'number' && Array.isArray(value) && value.length < min) {
+        } else if (typeof min === 'number' && values.length < min) {
           rangeUnderflow = true;
-        }
-
-        if (typeof max === 'number' && Array.isArray(value) && value.length > max) {
+        } else if (typeof max === 'number' && values.length > max) {
           rangeOverflow = true;
         }
       }
 
-      if (widgetName === 'list' && Array.isArray(value)) {
-        if (typeof min === 'number' && value.length < min) {
-          rangeUnderflow = true;
-        } else if (_required && !value.length) {
+      if (widgetName === 'object') {
+        if (_required && !value) {
           valueMissing = true;
         }
       }
 
-      if (!['object', 'list'].includes(widgetName)) {
+      if (!['object', 'list', 'hidden', 'compute'].includes(widgetName)) {
+        if (typeof value === 'string') {
+          value = value.trim();
+        }
+
         if (_required && (value === undefined || value === '' || (multiple && !value.length))) {
           valueMissing = true;
         }
 
         if (
+          _required &&
           Array.isArray(pattern) &&
           pattern.length === 2 &&
-          !String(value).match(escapeRegExp(pattern[0]))
+          !String(value).match(pattern[0])
         ) {
           patternMismatch = true;
+        }
+
+        // Check the URL or email with native form validation
+        if (widgetName === 'string' && value) {
+          const { type = 'text' } = /** @type {StringField} */ (fieldConfig);
+
+          if (type !== 'text') {
+            const inputElement = document.createElement('input');
+
+            inputElement.type = type;
+            inputElement.value = value;
+            ({ typeMismatch } = inputElement.validity);
+          }
+
+          // Check if the email’s domain part contains a dot, because native validation marks
+          // `me@example` valid but it’s not valid in the real world
+          if (type === 'email' && !typeMismatch && !value.split('@')[1]?.includes('.')) {
+            typeMismatch = true;
+          }
         }
       }
 
@@ -751,6 +898,7 @@ const validateEntry = () => {
         rangeUnderflow,
         rangeOverflow,
         patternMismatch,
+        typeMismatch,
       };
 
       const valid = !Object.values(validity).some(Boolean);
@@ -763,7 +911,10 @@ const validateEntry = () => {
     });
   });
 
-  entryDraft.update((draft) => ({ ...draft, validities }));
+  /** @type {import('svelte/store').Writable<EntryDraft>} */ (entryDraft).update((_draft) => ({
+    ..._draft,
+    validities,
+  }));
 
   return validated;
 };
@@ -830,7 +981,7 @@ export const getEntryAssetFolderPaths = (fillSlugOptions) => {
  * @param {LocaleCode} locale - Locale code.
  * @param {string} slug - Entry slug.
  * @returns {string} Complete path, including the folder, slug, extension and possibly locale.
- * @see https://decapcms.org/docs/beta-features/#i18n-support
+ * @see https://decapcms.org/docs/i18n/
  */
 const createEntryPath = (draft, locale, slug) => {
   const { collection, collectionFile, originalEntry, currentValues } = draft;
@@ -840,15 +991,15 @@ const createEntryPath = (draft, locale, slug) => {
   }
 
   if (originalEntry?.locales[locale]) {
-    return originalEntry?.locales[locale].path;
+    return /** @type {string} */ (originalEntry?.locales[locale].path);
   }
 
   const { defaultLocale, structure } = collection._i18n;
-  const collectionFolder = collection.folder?.replace(/\/$/, '');
+  const collectionFolder = collection.folder;
 
   /**
    * Support folder collections path.
-   * @see https://decapcms.org/docs/beta-features/#folder-collections-path
+   * @see https://decapcms.org/docs/collection-folder/#folder-collections-path
    */
   const path = collection.path
     ? fillSlugTemplate(collection.path, {
@@ -875,6 +1026,57 @@ const createEntryPath = (draft, locale, slug) => {
 };
 
 /**
+ * Sync the field object/list expander states between locales.
+ * @param {{ [keyPath: string]: boolean }} stateMap - Map of keypath and state.
+ */
+export const syncExpanderStates = (stateMap) => {
+  entryDraft.update((_draft) => {
+    if (_draft) {
+      Object.entries(stateMap).forEach(([keyPath, expanded]) => {
+        if (_draft.expanderStates._[keyPath] !== expanded) {
+          _draft.expanderStates._[keyPath] = expanded;
+        }
+      });
+    }
+
+    return _draft;
+  });
+};
+
+/**
+ * Join key path segments for the expander UI state.
+ * @param {string[]} arr - Key path array, e.g. `testimonials.0.authors.2.foo.bar`.
+ * @param {number} end - End index for `Array.slice()`.
+ * @returns {string} Joined string, e.g. `testimonials.0.authors.10.foo#.bar#`.
+ */
+export const joinExpanderKeyPathSegments = (arr, end) =>
+  arr
+    .slice(0, end)
+    .map((k) => `${k}#`)
+    .join('.')
+    .replaceAll(/#\.(\d+)#/g, '.$1');
+
+/**
+ * Expand any invalid fields, including the parent list/object(s).
+ */
+const expandInvalidFields = () => {
+  /** @type {{ [keyPath: string]: boolean }} */
+  const stateMap = {};
+
+  Object.values(get(entryDraft)?.validities ?? {}).forEach((validities) => {
+    Object.entries(validities).forEach(([keyPath, { valid }]) => {
+      if (!valid) {
+        keyPath.split('.').forEach((_key, index, arr) => {
+          stateMap[joinExpanderKeyPathSegments(arr, index + 1)] = true;
+        });
+      }
+    });
+  });
+
+  syncExpanderStates(stateMap);
+};
+
+/**
  * Save the entry draft.
  * @param {object} [options] - Options.
  * @param {boolean} [options.skipCI] - Whether to disable automatic deployments for the change.
@@ -882,11 +1084,13 @@ const createEntryPath = (draft, locale, slug) => {
  */
 export const saveEntry = async ({ skipCI = undefined } = {}) => {
   if (!validateEntry()) {
+    expandInvalidFields();
+
     throw new Error('validation_failed');
   }
 
-  const _user = get(user);
-  const draft = get(entryDraft);
+  const _user = /** @type {User} */ (get(user));
+  const draft = /** @type {EntryDraft} */ (get(entryDraft));
 
   const {
     collection,
@@ -935,7 +1139,9 @@ export const saveEntry = async ({ skipCI = undefined } = {}) => {
     text: undefined,
     collectionName,
     folder: internalAssetFolder,
-    commitAuthor: _user.email ? { name: _user.name, email: _user.email } : undefined,
+    commitAuthor: _user.email
+      ? /** @type {CommitAuthor} */ ({ name: _user.name, email: _user.email })
+      : undefined,
     commitDate: new Date(), // Use the current datetime
   };
 
@@ -1006,7 +1212,7 @@ export const saveEntry = async ({ skipCI = undefined } = {}) => {
 
             savingAssets.push({
               ...savingAssetProps,
-              url: URL.createObjectURL(file),
+              blobURL: URL.createObjectURL(file),
               name: _fileName,
               path: assetPath,
               sha,
@@ -1034,7 +1240,7 @@ export const saveEntry = async ({ skipCI = undefined } = {}) => {
     collectionName,
     fileName,
     slug,
-    sha: savingEntryLocales[defaultLocale].sha,
+    sha: /** @type {string} */ (savingEntryLocales[defaultLocale].sha),
     locales: Object.fromEntries(
       Object.entries(savingEntryLocales).filter(([, { content }]) => !!content),
     ),
@@ -1050,7 +1256,9 @@ export const saveEntry = async ({ skipCI = undefined } = {}) => {
   const config = { extension, format, frontmatterDelimiter, yamlQuote };
 
   if (collectionFile || !i18nEnabled || structure === 'single_file') {
-    const { path, content } = savingEntryLocales[defaultLocale];
+    const { path, content } = /** @type {{ path: string, content: LocalizedEntry }} */ (
+      savingEntryLocales[defaultLocale]
+    );
 
     changes.push({
       action: isNew ? 'create' : 'update',
@@ -1068,7 +1276,9 @@ export const saveEntry = async ({ skipCI = undefined } = {}) => {
     });
   } else {
     locales.forEach((locale) => {
-      const { path, content } = savingEntryLocales[locale];
+      const { path, content } = /** @type {{ path: string, content: LocalizedEntry }} */ (
+        savingEntryLocales[locale]
+      );
 
       if (currentLocales[locale]) {
         changes.push({
@@ -1084,13 +1294,16 @@ export const saveEntry = async ({ skipCI = undefined } = {}) => {
   }
 
   try {
-    await get(backend).commitChanges(changes, {
+    await /** @type {BackendService} */ (get(backend)).commitChanges(changes, {
       commitType: isNew ? 'create' : 'update',
       collection,
       skipCI,
     });
-  } catch {
-    throw new Error('saving_failed');
+  } catch (/** @type {any} */ ex) {
+    // eslint-disable-next-line no-console
+    console.error(ex);
+
+    throw new Error('saving_failed', { cause: ex });
   }
 
   const savingAssetsPaths = savingAssets.map((a) => a.path);
@@ -1105,7 +1318,9 @@ export const saveEntry = async ({ skipCI = undefined } = {}) => {
   entryDraft.set(null);
 
   const isLocal = get(backendName) === 'local';
-  const { automatic_deployments: autoDeployEnabled } = get(siteConfig).backend;
+
+  const { backend: { automatic_deployments: autoDeployEnabled = undefined } = {} } =
+    get(siteConfig) ?? /** @type {SiteConfig} */ ({});
 
   contentUpdatesToast.set({
     count: 1,

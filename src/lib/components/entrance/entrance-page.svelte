@@ -1,21 +1,17 @@
 <script>
   import DOMPurify from 'isomorphic-dompurify';
   import { marked } from 'marked';
-  import { onMount } from 'svelte';
   import { _ } from 'svelte-i18n';
   import SveltiaLogo from '$lib/assets/sveltia-logo.svg?raw&inline';
   import SignIn from '$lib/components/entrance/sign-in.svelte';
-  import { fetchSiteConfig, siteConfig } from '$lib/services/config';
+  import { announcedPageStatus } from '$lib/services/app/navigation';
+  import { inAuthPopup } from '$lib/services/backends/shared/auth';
+  import { siteConfig, siteConfigError } from '$lib/services/config';
   import { dataLoaded } from '$lib/services/contents';
-  import { announcedPageStatus } from '$lib/services/navigation';
-  import { prefs } from '$lib/services/prefs';
-  import { authError, unauthenticated, user } from '$lib/services/user';
+  import { prefs, prefsError } from '$lib/services/prefs';
+  import { signInError, unauthenticated, user } from '$lib/services/user';
 
   $: $announcedPageStatus = $_('welcome_to_sveltia_cms');
-
-  onMount(() => {
-    fetchSiteConfig();
-  });
 </script>
 
 <div role="none" class="container">
@@ -27,27 +23,29 @@
       class="logo"
     />
     <h1>Sveltia CMS</h1>
-    {#if !$siteConfig || !$prefs}
-      <div role="alert" class="message">{$_('loading_site_config')}</div>
-    {:else if $siteConfig.error}
+    {#if $siteConfigError}
       <div role="alert" class="message">
-        {$siteConfig.error}
+        {$siteConfigError.message}
         {$_('config.error.try_again')}
       </div>
-    {:else if $prefs.error}
+    {:else if $prefsError}
       <div role="alert" class="message">
-        {$_(`prefs.error.${$prefs.error}`)}
+        {$_(`prefs.error.${$prefsError.type}`)}
       </div>
-    {:else if $authError}
+    {:else if !$siteConfig || !$prefs}
+      <div role="alert" class="message">{$_('loading_site_config')}</div>
+    {:else if $signInError.message && !$signInError.canRetry}
       <div role="alert">
         <div role="none" class="message">{$_('loading_site_data_error')}</div>
         <div role="none" class="error">
-          {@html DOMPurify.sanitize(/** @type {string } */ (marked.parseInline($authError)), {
-            ALLOWED_TAGS: ['a', 'code'],
-            ALLOWED_ATTR: ['href'],
-          })}
+          {@html DOMPurify.sanitize(
+            /** @type {string} */ (marked.parseInline($signInError.message)),
+            { ALLOWED_TAGS: ['a', 'code'], ALLOWED_ATTR: ['href'] },
+          )}
         </div>
       </div>
+    {:else if $inAuthPopup}
+      <div role="alert" class="message">{$_('authorizing')}</div>
     {:else if !$user || $unauthenticated}
       <SignIn />
     {:else if !$dataLoaded}
@@ -58,12 +56,12 @@
 
 <style lang="scss">
   .container {
-    position: fixed;
-    inset: 32px;
+    flex: auto;
     display: flex;
     justify-content: center;
     align-items: center;
     gap: 16px;
+    padding: 32px;
 
     .inner {
       display: flex;

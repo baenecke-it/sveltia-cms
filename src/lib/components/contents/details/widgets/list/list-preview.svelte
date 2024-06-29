@@ -4,11 +4,12 @@
   @see https://decapcms.org/docs/widgets/#list
 -->
 <script>
+  import { waitForVisibility } from '@sveltia/utils/element';
+  import { escapeRegExp } from '@sveltia/utils/string';
   import { unflatten } from 'flat';
   import FieldPreview from '$lib/components/contents/details/preview/field-preview.svelte';
   import { entryDraft } from '$lib/services/contents/editor';
   import { getCanonicalLocale } from '$lib/services/contents/i18n';
-  import { escapeRegExp } from '$lib/services/utils/strings';
 
   /**
    * @type {LocaleCode}
@@ -27,6 +28,9 @@
    */
   export let currentValue;
 
+  /** @type {HTMLElement[]} */
+  const wrappers = [];
+
   $: ({
     name: fieldName,
     // Widget-specific options
@@ -43,7 +47,7 @@
   $: items =
     unflatten(
       Object.fromEntries(
-        Object.entries($entryDraft.currentValues[locale])
+        Object.entries($entryDraft?.currentValues[locale] ?? {})
           .filter(([_keyPath]) => _keyPath.match(keyPathRegex))
           .map(([_keyPath, value]) => [
             _keyPath.replace(new RegExp(`^${escapeRegExp(keyPath)}`), fieldName),
@@ -57,19 +61,21 @@
   <!-- eslint-disable-next-line no-unused-vars -->
   {#each items as item, index}
     {@const subFieldName = Array.isArray(types)
-      ? $entryDraft.currentValues[locale][`${keyPath}.${index}.${typeKey}`]
+      ? $entryDraft?.currentValues[locale][`${keyPath}.${index}.${typeKey}`]
       : undefined}
     {@const subFields = subFieldName
-      ? types.find(({ name }) => name === subFieldName)?.fields ?? []
-      : fields ?? [field]}
-    <section class="subsection">
-      {#each subFields as subField (subField.name)}
-        <FieldPreview
-          keyPath={field ? `${keyPath}.${index}` : `${keyPath}.${index}.${subField.name}`}
-          {locale}
-          fieldConfig={subField}
-        />
-      {/each}
+      ? types?.find(({ name }) => name === subFieldName)?.fields ?? []
+      : fields ?? (field ? [field] : [])}
+    <section class="subsection" bind:this={wrappers[index]}>
+      {#await waitForVisibility(wrappers[index]) then}
+        {#each subFields as subField (subField.name)}
+          <FieldPreview
+            keyPath={field ? `${keyPath}.${index}` : `${keyPath}.${index}.${subField.name}`}
+            {locale}
+            fieldConfig={subField}
+          />
+        {/each}
+      {/await}
     </section>
   {/each}
 {:else if Array.isArray(currentValue) && currentValue.length}

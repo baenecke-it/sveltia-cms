@@ -33,10 +33,12 @@
   $: numberFormatter = Intl.NumberFormat(canonicalLocale);
 </script>
 
-{#if currentValue === undefined || currentValue === ''}
-  <!--  -->
-{:else if valueType === 'int' || valueType === 'float'}
-  <p>{numberFormatter.format(Number(currentValue))}</p>
-{:else}
-  <p>{currentValue}</p>
+{#if currentValue !== undefined && currentValue !== ''}
+  <p>
+    {#if valueType === 'int' || valueType === 'float'}
+      {numberFormatter.format(Number(currentValue))}
+    {:else}
+      {currentValue}
+    {/if}
+  </p>
 {/if}

@@ -1,11 +1,56 @@
 import App from './app.svelte';
 
-const app = new App({ target: document.getElementById('nc-root') ?? document.body });
+const knownFuncNames = [
+  'getBackend',
+  'getCustomFormats',
+  'getCustomFormatsExtensions',
+  'getCustomFormatsFormatters',
+  'getEditorComponents',
+  'getEventListeners',
+  'getLocale',
+  'getMediaLibrary',
+  'getPreviewStyles',
+  'getPreviewTemplate',
+  'getRemarkPlugins',
+  'getWidget',
+  'getWidgetValueSerializer',
+  'getWidgets',
+  'invokeEvent',
+  'moment',
+  'registerBackend',
+  'registerCustomFormat',
+  'registerEditorComponent',
+  'registerEventListener',
+  'registerLocale',
+  'registerMediaLibrary',
+  'registerPreviewStyle',
+  'registerPreviewTemplate',
+  'registerRemarkPlugin',
+  'registerWidget',
+  'registerWidgetValueSerializer',
+  'removeEventListener',
+  'resolveWidget',
+];
 
-export default app;
+/**
+ * Initialize the CMS, optionally with the given configuration.
+ * @param {object} [options] - Options.
+ * @param {object} [options.config] - Configuration to be merged with the default configuration.
+ * @see https://decapcms.org/docs/manual-initialization/
+ * @see https://decapcms.org/docs/custom-mounting/
+ */
+const init = ({ config = {} } = {}) => {
+  // eslint-disable-next-line no-new
+  new App({
+    target: document.querySelector('#nc-root') ?? document.body,
+    props: { config },
+  });
+};
 
-window.CMS = new Proxy(
-  {},
+const CMS = new Proxy(
+  {
+    init,
+  },
   {
     /**
      * Define the getter.
@@ -18,44 +63,11 @@ window.CMS = new Proxy(
         return obj[key];
       }
 
-      const knownFuncNames = [
-        'getBackend',
-        'getCustomFormats',
-        'getCustomFormatsExtensions',
-        'getCustomFormatsFormatters',
-        'getEditorComponents',
-        'getEventListeners',
-        'getLocale',
-        'getMediaLibrary',
-        'getPreviewStyles',
-        'getPreviewTemplate',
-        'getRemarkPlugins',
-        'getWidget',
-        'getWidgetValueSerializer',
-        'getWidgets',
-        'init',
-        'invokeEvent',
-        'moment',
-        'registerBackend',
-        'registerCustomFormat',
-        'registerEditorComponent',
-        'registerEventListener',
-        'registerLocale',
-        'registerMediaLibrary',
-        'registerPreviewStyle',
-        'registerPreviewTemplate',
-        'registerRemarkPlugin',
-        'registerWidget',
-        'registerWidgetValueSerializer',
-        'removeEventListener',
-        'resolveWidget',
-      ];
-
       if (knownFuncNames.includes(key)) {
         // eslint-disable-next-line no-console
         console.error(
           `CMS.${key}() is not yet supported in Sveltia CMS. ` +
-            `See https://github.com/sveltia/sveltia-cms#compatibility for compatibility information.`,
+            'See https://github.com/sveltia/sveltia-cms#compatibility for compatibility information.',
         );
 
         // eslint-disable-next-line jsdoc/require-description
@@ -67,3 +79,21 @@ window.CMS = new Proxy(
     },
   },
 );
+
+export default CMS;
+export { init };
+
+window.CMS = CMS;
+window.initCMS = init;
+
+// Automatically initialize the CMS if manual initialization is not requested AND the script is NOT
+// a module; We can’t just use `document.currentScript` for module detection because the earlier
+// versions of Sveltia CMS were built and shipped as modules
+if (
+  !window.CMS_MANUAL_INIT &&
+  (!!document.currentScript ||
+    !!document.querySelector('script[src$="/sveltia-cms.js"]') ||
+    import.meta.env.DEV)
+) {
+  init();
+}

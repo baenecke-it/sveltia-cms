@@ -4,6 +4,8 @@
   @see https://decapcms.org/docs/widgets/#string
 -->
 <script>
+  import { isURL } from '@sveltia/utils/string';
+
   /**
    * @type {LocaleCode}
    */
@@ -23,27 +25,25 @@
    */
   export let currentValue;
 
-  $: ({ name: fieldName } = fieldConfig);
+  $: ({
+    name: fieldName,
+    // Widget-specific options
+    type = 'text',
+  } = fieldConfig);
 
-  $: isURL = (() => {
-    try {
-      // eslint-disable-next-line no-new
-      new URL(currentValue);
-      return true;
-    } catch {
-      return false;
-    }
-  })();
+  $: isEmail = type === 'email';
 </script>
 
 {#if typeof currentValue === 'string' && currentValue.trim()}
-  {#if fieldName === 'title'}
-    <p class="title">{currentValue}</p>
-  {:else if isURL}
-    <p><a href={currentValue}>{currentValue}</a></p>
-  {:else}
-    <p>{currentValue}</p>
-  {/if}
+  <p class:title={fieldName === 'title'}>
+    {#if type === 'url' || isURL(currentValue)}
+      <a href={encodeURI(currentValue)}>{currentValue}</a>
+    {:else if isEmail}
+      <a href="mailto:{encodeURI(currentValue)}">{currentValue}</a>
+    {:else}
+      {currentValue}
+    {/if}
+  </p>
 {/if}
 
 <style lang="scss">
