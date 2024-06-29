@@ -5,6 +5,7 @@
   import { _ } from 'svelte-i18n';
   import Placeholder from '$lib/components/common/placeholder.svelte';
   import FieldPreview from '$lib/components/contents/details/preview/field-preview.svelte';
+  import NewsletterPreview from '$lib/components/newsletters/details/preview/newsletter-preview.svelte';
   import { entryDraft } from '$lib/services/contents/draft';
   import { customPreviewStyle } from '$lib/services/contents/draft/editor';
 
@@ -94,7 +95,9 @@
   {/each}
 {/snippet}
 
-{#if useCustomPreviewStyle}
+{#if collection.name === 'newsletter'}
+  <NewsletterPreview {locale}/>
+{:else useCustomPreviewStyle}
   <iframe class="preview" title={$_('content_preview')} bind:this={iframe}></iframe>
 {:else}
   <div role="document" aria-label={$_('content_preview')}>

@@ -4,17 +4,6 @@
   import { writable } from 'svelte/store';
   import { _ } from 'svelte-i18n';
   import CopyMenuItems from '$lib/components/contents/details/editor/copy-menu-items.svelte';
-  import TranslateButton from '$lib/components/contents/details/editor/translate-button.svelte';
-  import LocaleSwitcher from '$lib/components/contents/details/locale-switcher.svelte';
-  import PreviewButton from '$lib/components/contents/details/preview-button.svelte';
-  import { backend } from '$lib/services/backends';
-  import { entryDraft } from '$lib/services/contents/draft';
-  import { toggleLocale } from '$lib/services/contents/draft/update/locale';
-  import { revertChanges } from '$lib/services/contents/draft/update/revert';
-  import { getEntryPreviewURL, getEntryRepoBlobURL } from '$lib/services/contents/entry';
-  import { DEFAULT_I18N_CONFIG, getLocaleLabel } from '$lib/services/contents/i18n';
-  import { isMediumScreen, isSmallScreen } from '$lib/services/user/env';
-  import { prefs } from '$lib/services/user/prefs';
 
   /**
    * @import { Writable } from 'svelte/store';
@@ -68,7 +57,7 @@
 </script>
 
 <div role="none" {id} class="header">
-  <Toolbar variant="secondary" aria-label={$_('secondary')}>
+  <Toolbar variant="secondary" aria-label={$_('secondary')} class={$selectedCollection.name}>
     {#if i18nEnabled && allLocales.length > 1}
       <LocaleSwitcher {id} {thisPane} {thatPane} />
       {#if ($isSmallScreen || $isMediumScreen) && canPreview}
@@ -160,7 +149,9 @@
       & > .sui.toolbar {
         margin-right: auto;
         margin-left: auto;
+        &:not(.newsletter) {
         max-width: 800px;
+      }
 
         @media (width < 768px) {
           padding: 0;

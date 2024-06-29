@@ -796,4 +796,9 @@ export const strings = {
     gb: '{size} GB',
     tb: '{size} TB',
   },
+
+  // Newsletter
+  newsletter: {
+    send: 'Send Newsletter',
+  },
 };
