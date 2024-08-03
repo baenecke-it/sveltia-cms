@@ -65,7 +65,7 @@
         <MenuItem
           label={additionalLink.label}
           on:click={() => {
-            window.open(additionalLink.url, '_blank');
+            window.open(additionalLink.url.replace('%API_AUTH_KEY%', import.meta.env.VITE_API_AUTH_CODE), '_blank');
           }}
         />
       {/each}

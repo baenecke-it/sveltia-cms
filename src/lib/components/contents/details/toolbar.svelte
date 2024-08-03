@@ -318,7 +318,7 @@
           const html = elem.innerHTML;
           /* eslint-enable */
 
-          await fetch('https://api.singtonic.net/newsletter?auth=61e25c7b-7917-409c-a5bb-c9d051e05bb3', {
+          await fetch(`https://api.singtonic.net/newsletter?auth=${import.meta.env.VITE_API_AUTH_CODE}`, {
             method: 'POST',
             body: JSON.stringify({
               content: {

@@ -1,0 +1,233 @@
+backend:
+  name: github
+  repo: baenecke-it/singtonic
+  branch: master
+  base_url: https://sveltia-cms-auth.baenecke-it263.workers.dev
+
+# publish_mode: editorial_workflow # TODO: currently not supported in sveltia
+media_folder: "/static/assets"
+public_folder: "/assets"
+
+logo_url: "./bit.png"
+
+links:
+  - label: "Newsletter-Subscribers"
+    url: "https://api.singtonic.net/subscribers?auth=%API_AUTH_KEY%"
+
+collections:
+  - name: "events" # Used in routes, e.g., /admin/collections/blog
+    label: "Events" # Used in the UI
+    label_singular: "Event" # Used in the UI
+    icon: calendar_month
+    folder: "content/events" # The path to the folder where the documents are stored
+    media_folder: "/static/assets/events"
+    public_folder: "/assets/events"
+    create: true # Allow users to create new documents in this collection
+    #    slug: "{{slug}}" # Filename template, e.g., YYYY-MM-DD-title.md
+    extension: "yml" # The file extension searched for and used to save new collection items
+    #format: "yml" # Determines how collection files are parsed and saved (inferred from extension)
+    summary: "{{title}} - isPastEvent: {{done}}"
+    sortable_fields: [ 'title', 'metadata.0.time' ]
+    view_groups:
+      - label: isPastEvent
+        field: 'done'
+      - label: Location
+        field: 'metadata.0.location'
+      - label: City
+        field: 'metadata.0.city'
+      - label: Country
+        field: 'metadata.0.country'
+    view_filters:
+      - label: isPastEvent
+        field: done
+        pattern: true
+      - label: Upcoming
+        field: done
+        pattern: false|^$
+    fields: # The fields for each document
+      - { label: "isPastEvent", name: "done", widget: boolean, required: true, default: false }
+      - name: "highlight"
+        label: "Highlight-Data"
+        widget: object
+        required: false
+        collapsed: true
+        fields:
+          - name: "comments"
+            label: "Zitate"
+            label_singular: "Zitat"
+            required: false
+            widget: list
+            add_to_top: true
+            fields:
+              - name: comment
+                label: "Zitat"
+                widget: markdown
+              - name: source
+                label: "Quelle"
+                widget: markdown
+          - name: "images"
+            label: "Images"
+            widget: file
+            required: false
+            hint: "Upload images for gallery packed in a zip-folder."
+      - name: "title"
+        label: "Name"
+        widget: string
+      - name: "metadata"
+        label: "Metadata"
+        widget: list
+        fields:
+          - { label: "Location", name: "location", widget: string, required: false }
+          - { label: "Street", name: "street", widget: string, required: false }
+          - { label: "Postal Code", name: "post-code", widget: string, default: "87700", required: false }
+          - { label: "City", name: "city", widget: string, default: "Memmingen", required: false }
+          - { label: "Country", name: "country", widget: select, default: "Deutschland", options: [ "","Deutschland" ], required: false }
+          - name: "time"
+            label: "Zeit"
+            widget: datetime
+          - name: "booking"
+            label: "Booking URL"
+            widget: string
+            required: false
+          - name: "entry"
+            label: "Einlass"
+            widget: datetime
+            required: false
+      - name: "embedImage"
+        label: "Embed Bild"
+        widget: image
+        allow_multiple: false
+        hint: "Bild das bei Verlinkungen (WhatsApp, Twitter, ...) angezeigt wird."
+      - name: "heroImage"
+        label: "Bild"
+        widget: object
+        fields:
+          - name: "image"
+            label: "Image"
+            widget: image
+            allow_multiple: false
+          - name: "objectPosition"
+            label: "Position"
+            widget: select
+            options: [ "top", "center", "bottom" ]
+            default: "center"
+      - name: "description"
+        label: "Beschreibung"
+        widget: markdown
+
+  - name: "videos"
+    label: "Videos"
+    label_singular: "Video"
+    icon: play_circle
+    folder: "content/videos"
+    media_folder: "/static/assets/videos"
+    public_folder: "/assets/videos"
+    create: true
+    extension: "yml"
+    sortable_fields: ["title"]
+    view_groups:
+      - label: onStartPage
+        field: 'onStart'
+      - label: byEvent
+        field: 'event'
+    view_filters:
+      - label: onStartPage
+        field: 'onStart'
+        pattern: true
+      - label: notOnStartPage
+        field: 'onStart'
+        pattern: false|^$
+      - label: linkedToEvent
+        field: 'event'
+        pattern: ^.+$
+      - label: notLinkedToEvent
+        field: 'event'
+        pattern: ^$
+    fields:
+      - name: "title"
+        label: "Name"
+        widget: string
+      - name: "video"
+        label: "Video"
+        widget: image
+      - name: "description"
+        label: "Beschreibung"
+        widget: markdown
+      - name: "data"
+        label: "Data"
+        widget: string
+        required: false
+        hint: "Displayed over Title (eg. Event • City)"
+      - name: "event"
+        label: "Event"
+        widget: relation
+        collection: "events"
+        display_fields: ["title"]
+        value_field: "{{slug}}"
+        required: false
+        hint: "Video is shown on Highlight-Page of Event + Used for fallback for 'Data' (EventTitle • City)"
+      - name: "onStart"
+        label: "Visible on Startpage"
+        widget: boolean
+        default: false
+        hint: "Is Video is shown on Start-Page?"
+
+  - name: "members"
+    label: "Members"
+    label_singular: "Member"
+    icon: groups
+    folder: "content/members"
+    media_folder: "/static/assets/members"
+    public_folder: "/assets/members"
+    create: true
+    extension: "yml"
+    sortable_fields: ["title"]
+    view_groups:
+      - label: Stimme
+        field: 'voice'
+    fields:
+      - name: "title"
+        label: "Name"
+        widget: string
+      - name: "image"
+        label: "Bild"
+        widget: image
+      - name: "funimage"
+        label: "Spaß-Bild"
+        widget: image
+        required: false
+      - name: "voice"
+        label: "Stimme"
+        widget: select
+        options: [ "SOPRAN", "MEZZOSPORAN", "ALT", "TENOR", "BARITON", "BASS" ]
+      - name: "description"
+        label: "Beschreibung"
+        widget: markdown
+
+  - name: "newsletter"
+    label: "Newsletter"
+    label_singular: "Newsletter"
+    icon: newspaper
+    folder: "content/newsletter"
+    media_folder: "/static/assets/newsletter"
+    public_folder: "/assets/newsletter"
+    create: true
+    extension: "yml"
+    sortable_fields: ["title"]
+#    view_groups:
+#      - label: Stimme
+#        field: 'voice'
+    fields:
+      - name: "title"
+        label: "Title"
+        widget: string
+      - name: "date"
+        label: "Date"
+        widget: datetime
+        time_format: false
+      - name: "image"
+        label: "Bild"
+        widget: image
+      - name: "text"
+        label: "Text"
+        widget: markdown
