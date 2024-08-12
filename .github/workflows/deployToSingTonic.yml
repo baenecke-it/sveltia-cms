@@ -1,0 +1,39 @@
+name: Build and Push bit-SveliaCMS to singtonic
+
+on:
+  push:
+    branches:
+      - main  # Trigger on push to the main branch. Adjust if needed.
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18' # Specify the Node.js version needed
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build Svelte project
+        run: npm run build
+
+      - name: Deploy to another repository
+        run: |
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          git clone --depth=1 git@github.com:baenecke-it/singtonic.git target-repo
+          cp -r dist/sveltia-cms.js target-repo/static/admin/ # Copy the output file to the specific subfolder
+          cd target-repo
+          git add static/admin/sveltia-cms.js # Only add the specific file
+          git commit -m "Update sveltia-cms.js from ${GITHUB_REPOSITORY}"
+          git push origin main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          #SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }} # If using SSH, otherwise omit this line
