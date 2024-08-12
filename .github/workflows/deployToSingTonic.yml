@@ -36,4 +36,4 @@ jobs:
           git push origin main
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          #SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }} # If using SSH, otherwise omit this line
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }} # If using SSH, otherwise omit this line
