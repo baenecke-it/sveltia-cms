@@ -24,6 +24,13 @@ jobs:
       - name: Build Svelte project
         run: npm run build
 
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+
       - name: Deploy to another repository
         run: |
           git config --global user.name "GitHub Action"
@@ -34,6 +41,3 @@ jobs:
           git add static/admin/sveltia-cms.js # Only add the specific file
           git commit -m "Update sveltia-cms.js from ${GITHUB_REPOSITORY}"
           git push origin main
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }} # If using SSH, otherwise omit this line
