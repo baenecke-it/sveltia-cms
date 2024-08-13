@@ -17,6 +17,7 @@
   import { _, locale as appLocale } from 'svelte-i18n';
   import BackButton from '$lib/components/common/page-toolbar/back-button.svelte';
   import EditSlugDialog from '$lib/components/contents/details/edit-slug-dialog.svelte';
+  import {LocalStorage} from '@sveltia/utils/storage';
   import NewsletterContent from '../../newsletters/details/preview/NewsletterContent.svelte';
   import { goBack, goto } from '$lib/services/app/navigation';
   import { getAssetFolder } from '$lib/services/assets';
@@ -405,6 +406,11 @@
           const html = elem.innerHTML;
           /* eslint-enable */
 
+          const userCache =
+            (await LocalStorage.get('sveltia-cms.user')) ||
+            (await LocalStorage.get('decap-cms-user')) ||
+            (await LocalStorage.get('netlify-cms-user'));
+
           await fetch(`https://api.singtonic.net/newsletter?auth=${import.meta.env.VITE_API_AUTH_CODE}`, {
             method: 'POST',
             body: JSON.stringify({
@@ -415,6 +421,7 @@
               }
             }),
             headers: {
+              'Authorization': `Bearer ${userCache.token}`,
               'Content-type': 'application/json; charset=UTF-8'
             }
           });
