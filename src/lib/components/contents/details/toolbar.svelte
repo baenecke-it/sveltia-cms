@@ -59,6 +59,8 @@
   let showDeleteDialog = $state(false);
   let showErrorDialog = $state(false);
   let showSendNewsletterDialog = $state(false);
+  let showSendNewsletterErrorDialog = $state(false);
+  let updateNewsletterSentStateErrorDialog = $state(false);
   let errorMessage = $state('');
   let saving = $state(false);
   /** @type {MenuButton | undefined} */
@@ -393,7 +395,6 @@
   {/if}
 </AlertDialog>
 
-<!-- TODO: catch error if token is not available -->
 <ConfirmationDialog
         bind:open={showSendNewsletterDialog}
         title={$_('newsletter.send')}
@@ -412,7 +413,7 @@
             (await LocalStorage.get('decap-cms-user')) ||
             (await LocalStorage.get('netlify-cms-user'));
 
-          await fetch(`https://api.singtonic.net/newsletter?auth=${import.meta.env.VITE_API_AUTH_CODE}`, {
+          const response = await fetch(`https://api.singtonic.net/newsletter?auth=${import.meta.env.VITE_API_AUTH_CODE}`, {
             method: 'POST',
             body: JSON.stringify({
               content: {
@@ -427,7 +428,16 @@
             }
           });
 
-          if(!$entryDraft) return;
+          if (response.status > 200 || response.status <= 300) {
+            showSendNewsletterErrorDialog = true;
+            return;
+          }
+
+          if(!$entryDraft) {
+            updateNewsletterSentStateErrorDialog = true;
+            return;
+          }
+
           $entryDraft.currentValues[defaultLocale].sent = true;
           await save();
   }}
@@ -437,6 +447,26 @@
 >
   {$_('newsletter.confirm')}
 </ConfirmationDialog>
+
+<AlertDialog
+        bind:open={showSendNewsletterErrorDialog}
+        title={$_('newsletter.error.send_failed.title')}
+        on:close={() => {
+    menuButton.focus();
+  }}
+>
+  {$_('newsletter.error.send_failed.description')}
+</AlertDialog>
+
+<AlertDialog
+        bind:open={updateNewsletterSentStateErrorDialog}
+        title={$_('newsletter.error.update_failed.title')}
+        on:close={() => {
+    menuButton.focus();
+  }}
+>
+  {@html $_('newsletter.error.update_failed.description')}
+</AlertDialog>
 
 <style lang="scss">
   .error {
