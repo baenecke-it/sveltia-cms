@@ -2,14 +2,13 @@ name: Build and Push bit-SveliaCMS to singtonic
 
 on:
   push:
-    branches:
-      - main  # Trigger on push to the main branch. Adjust if needed.
     tags:
       - '*'  # Trigger only on push of any tag
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') && github.base_ref == 'main' # Only run on tags pushed to the main branch
 
     steps:
       - name: Checkout repository
