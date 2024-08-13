@@ -40,4 +40,4 @@ jobs:
           cd target-repo
           git add static/admin/sveltia-cms.js # Only add the specific file
           git commit -m "Update sveltia-cms.js from ${GITHUB_REPOSITORY}"
-          git push origin main
+          git push origin master
