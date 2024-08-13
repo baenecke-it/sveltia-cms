@@ -393,6 +393,7 @@
   {/if}
 </AlertDialog>
 
+<!-- TODO: catch error if token is not available -->
 <ConfirmationDialog
         bind:open={showSendNewsletterDialog}
         title={$_('newsletter.send')}
