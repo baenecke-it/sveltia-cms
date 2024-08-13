@@ -315,7 +315,7 @@
 
           /* eslint-disable */
           const elem = document.createElement('div');
-          new NewsletterContent({ target: elem, props: { newsletter } });
+          new NewsletterContent({ target: elem, props: { newsletter, generateBlobSrc: false } });
           const html = elem.innerHTML;
           /* eslint-enable */
 
