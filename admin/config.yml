@@ -225,9 +225,21 @@ collections:
         label: "Date"
         widget: datetime
         time_format: false
-      - name: "image"
-        label: "Bild"
-        widget: image
-      - name: "text"
-        label: "Text"
-        widget: markdown
+      - name: "content"
+        label: "Content"
+        widget: list
+        types:
+          - name: "text"
+            label: "Text"
+            widget: object
+            fields:
+              - name: "text"
+                label: "Text"
+                widget: markdown
+          - name: "image"
+            label: "Image"
+            widget: object
+            fields:
+              - name: "image"
+                label: "Image"
+                widget: image
