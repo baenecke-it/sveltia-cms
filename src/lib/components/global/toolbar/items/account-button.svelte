@@ -2,6 +2,7 @@
   import { Divider, Icon, Menu, MenuButton, MenuItem } from '@sveltia/ui';
   import { _ } from 'svelte-i18n';
   import { get } from 'svelte/store';
+  import {LocalStorage} from '@sveltia/utils/storage';
   import PublishMenuItem from '$lib/components/global/toolbar/items/publish-menu-item.svelte';
   import ShortcutsDialog from '$lib/components/keyboard-shortcuts/shortcuts-dialog.svelte';
   import PrefsDialog from '$lib/components/prefs/prefs-dialog.svelte';
@@ -64,8 +65,27 @@
       {#each additionalLinks as additionalLink}
         <MenuItem
           label={additionalLink.label}
-          on:click={() => {
-            window.open(additionalLink.url.replace('%API_AUTH_KEY%', import.meta.env.VITE_API_AUTH_CODE), '_blank');
+          on:click={async () => {
+            const url = additionalLink.url.replace('%API_AUTH_KEY%', import.meta.env.VITE_API_AUTH_CODE);
+
+            const userCache =
+            (await LocalStorage.get('sveltia-cms.user')) ||
+            (await LocalStorage.get('decap-cms-user')) ||
+            (await LocalStorage.get('netlify-cms-user'));
+
+            fetch(url, {
+              headers: {
+                Authorization: `Bearer ${userCache?.token}`,
+              },
+            }) // FETCH BLOB FROM IT
+              .then((response) => response.blob())
+              .then((blob) => { // RETRIEVE THE BLOB AND CREATE LOCAL URL
+                const _url = window.URL.createObjectURL(blob);
+
+                window.open(_url, '_blank')?.focus(); // window.open + focus
+            }).catch((err) => {
+              console.log(err);
+            });
           }}
         />
       {/each}

@@ -18,6 +18,7 @@
   import { truncate } from '@sveltia/utils/string';
   import equal from 'fast-deep-equal';
   import { _ } from 'svelte-i18n';
+  import {LocalStorage} from '@sveltia/utils/storage';
   import NewsletterContent from '../../newsletters/details/preview/NewsletterContent.svelte';
   import { goBack, goto } from '$lib/services/app/navigation';
   import { backendName } from '$lib/services/backends';
@@ -318,6 +319,11 @@
           const html = elem.innerHTML;
           /* eslint-enable */
 
+          const userCache =
+            (await LocalStorage.get('sveltia-cms.user')) ||
+            (await LocalStorage.get('decap-cms-user')) ||
+            (await LocalStorage.get('netlify-cms-user'));
+
           await fetch(`https://api.singtonic.net/newsletter?auth=${import.meta.env.VITE_API_AUTH_CODE}`, {
             method: 'POST',
             body: JSON.stringify({
@@ -328,6 +334,7 @@
               }
             }),
             headers: {
+              'Authorization': `Bearer ${userCache.token}`,
               'Content-type': 'application/json; charset=UTF-8'
             }
           });
