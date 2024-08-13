@@ -576,5 +576,15 @@ export const strings = {
   newsletter: {
     send: 'Send Newsletter',
     confirm: 'Are you sure you want to send this newsletter?',
+    error: {
+      send_failed: {
+        title: 'Error',
+        description: 'There was an error while sending the newsletter. Please try again later.'
+      },
+      update_failed: {
+        title: 'Error (Contact Admin)',
+        description: 'There was an error while updating the newsletter-state.<br>Please contact an administrator.'
+      },
+    },
   },
 };
