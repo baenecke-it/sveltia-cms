@@ -57,7 +57,7 @@
 </script>
 
 <div role="none" {id} class="header">
-  <Toolbar variant="secondary" aria-label={$_('secondary')} class={$selectedCollection.name}>
+  <Toolbar variant="secondary" aria-label={$_('secondary')} class={$selectedCollection?.name ?? ''}>
     {#if i18nEnabled && allLocales.length > 1}
       <LocaleSwitcher {id} {thisPane} {thatPane} />
       {#if ($isSmallScreen || $isMediumScreen) && canPreview}

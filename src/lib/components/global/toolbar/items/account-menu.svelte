@@ -11,6 +11,8 @@
   import { signOut } from '$lib/services/user/auth';
   import { isSmallScreen } from '$lib/services/user/env';
   import { prefs } from '$lib/services/user/prefs';
+  import {LocalStorage} from '@sveltia/utils/storage';
+  import { siteConfig } from '$lib/services/config';
 
   /**
    * @typedef {object} Props
@@ -28,6 +30,9 @@
 
   const isLocalRepo = $derived($backendName === 'local');
   const isTestRepo = $derived($backendName === 'test-repo');
+
+  /** @type {{url: string, label: string}[]} */
+  const additionalLinks = siteConfig?.links ?? [];
 </script>
 
 <Menu aria-label={$_('account')}>
@@ -49,6 +54,31 @@
       openProductionSite();
     }}
   />
+  {#each additionalLinks as additionalLink}
+    <MenuItem
+      label={additionalLink.label}
+      onclick={async () => {
+          const userCache =
+          (await LocalStorage.get('sveltia-cms.user')) ||
+          (await LocalStorage.get('decap-cms-user')) ||
+          (await LocalStorage.get('netlify-cms-user'));
+
+          fetch(additionalLink.url, {
+            headers: {
+              Authorization: `Bearer ${userCache?.token}`,
+            },
+          }) // FETCH BLOB FROM IT
+            .then((response) => response.blob())
+            .then((blob) => { // RETRIEVE THE BLOB AND CREATE LOCAL URL
+              const _url = window.URL.createObjectURL(blob);
+
+              window.open(_url, '_blank')?.focus(); // window.open + focus
+          }).catch((err) => {
+            console.log(err);
+          });
+        }}
+    />
+  {/each}
   {#if $prefs.devModeEnabled}
     <MenuItem
       label={$_('git_repository')}
