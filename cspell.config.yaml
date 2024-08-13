@@ -17,6 +17,8 @@ ignorePaths:
   - pnpm-lock.yaml
   - data/**/*.json
   - dist/**
+  - admin/**
+  - .gitignore
 words:
   - astros
   - camelcase
