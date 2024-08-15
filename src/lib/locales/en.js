@@ -12,7 +12,6 @@ export const strings = {
   settings: 'Settings',
   account: 'Account',
   live_site: 'Live Site',
-  subscribers: 'Newsletter-Subscribers',
   git_repository: 'Git Repository',
   help: {
     keyboard_shortcuts: 'Keyboard Shortcuts',
