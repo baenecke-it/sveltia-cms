@@ -66,14 +66,12 @@
         <MenuItem
           label={additionalLink.label}
           on:click={async () => {
-            const url = additionalLink.url.replace('%API_AUTH_KEY%', import.meta.env.VITE_API_AUTH_CODE);
-
             const userCache =
             (await LocalStorage.get('sveltia-cms.user')) ||
             (await LocalStorage.get('decap-cms-user')) ||
             (await LocalStorage.get('netlify-cms-user'));
 
-            fetch(url, {
+            fetch(additionalLink.url, {
               headers: {
                 Authorization: `Bearer ${userCache?.token}`,
               },

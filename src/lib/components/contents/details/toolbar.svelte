@@ -326,7 +326,7 @@
             (await LocalStorage.get('decap-cms-user')) ||
             (await LocalStorage.get('netlify-cms-user'));
 
-          const response = await fetch(`https://api.singtonic.net/newsletter?auth=${import.meta.env.VITE_API_AUTH_CODE}`, {
+          const response = await fetch('https://api.singtonic.net/newsletter', {
             method: 'POST',
             body: JSON.stringify({
               content: {

@@ -12,7 +12,7 @@ logo_url: "./bit.png"
 
 links:
   - label: "Newsletter-Subscribers"
-    url: "https://api.singtonic.net/subscribers?auth=%API_AUTH_KEY%"
+    url: "https://api.singtonic.net/subscribers"
 
 collections:
   - name: "events" # Used in routes, e.g., /admin/collections/blog
