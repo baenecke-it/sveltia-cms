@@ -16,7 +16,7 @@
     export let generateBlobSrc = true;
 </script>
 
-{#if newsletter}
+{#if newsletter && newsletter.content}
     {#each newsletter.content as value}
         {#if value.type === 'image'}
             {#if generateBlobSrc}
