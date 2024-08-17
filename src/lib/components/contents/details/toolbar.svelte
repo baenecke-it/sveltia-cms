@@ -330,6 +330,7 @@
             method: 'POST',
             body: JSON.stringify({
               content: {
+                slug: originalValues.slug,
                 subject: currentValues[defaultLocale].title,
                 html,
                 text: newsletter.text,
