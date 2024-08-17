@@ -28,7 +28,7 @@
                     <p>{error.message}</p>
                 {/await}
             {:else}
-                <img alt="" class="" height="451" src="{value.image}" width="451"/>
+                <img alt="" class="" height="451" src="https://singtonic.net/{value.image}" width="451"/>
             {/if}
             <br/>
             <br/>
