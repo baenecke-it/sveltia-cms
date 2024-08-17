@@ -1,4 +1,5 @@
 <script>
+    export let slug;
     /* eslint-disable */
     let unsubscribeLink = `<div style=font-family: 'Trebuchet MS', 'Lucida Grande', 'Lucida Sans Unicode', 'Lucida Sans', Tahoma, sans-serif;font-size:16px;line-height:16px;color:#fff;background-color:#333>UNSUBSCRIBE <a style=color:#cc2944;text-decoration:none;text-transform:none target=_blank>HERE</a></div>`
 </script>
@@ -610,6 +611,7 @@
 <svelte:body style="height: 100%;margin: 0;padding: 0;width: 100%;background-color: #333333;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;"></svelte:body>
 
 <center>
+    <a href="https://singtonic.net/newsletter/{slug}">Zur Webansicht</a>
     <table align="center" border="0" cellpadding="0" cellspacing="0" height="100%" width="100%" id="bodyTable"
            style="border-collapse: collapse;mso-table-lspace: 0pt;mso-table-rspace: 0pt;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;height: 100%;margin: 0;padding: 0;width: 100%;background-color: #333333;">
         <tr>
