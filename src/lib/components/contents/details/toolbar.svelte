@@ -341,7 +341,7 @@
             }
           });
 
-          if (response.status > 200 || response.status <= 300) {
+          if (!response.ok) {
             showSendNewsletterErrorDialog = true;
             return;
           }
