@@ -23,12 +23,12 @@
                 {#await getMediaFieldURL(value.image, $entryDraft?.originalEntry)}
                     <p>Loading...</p>
                 {:then src}
-                    <img alt="" class="" height="451" src="{src ?? ''}" width="451"/>
+                    <img alt="" class="" src="{src ?? ''}" width="100%"/>
                 {:catch error}
                     <p>{error.message}</p>
                 {/await}
             {:else}
-                <img alt="" class="" height="451" src="https://singtonic.net{value.image}" width="451"/>
+                <img alt="" class="" src="https://singtonic.net{value.image}" width="100%"/>
             {/if}
             <br/>
             <br/>
