@@ -27,6 +27,7 @@
 <style>
     :global(th, td) {
         border: none;
+        padding: 0;
     }
 </style>
 
