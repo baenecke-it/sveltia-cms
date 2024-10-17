@@ -619,7 +619,7 @@
                 style="mso-line-height-rule: exactly;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;height: 100%;margin: 0;padding: 0;width: 100%;background-color: #333333;">
                 <!-- BEGIN TEMPLATE // -->
                 <table border="0" cellpadding="0" cellspacing="0" width="100%"
-                       style="border-collapse: collapse;mso-table-lspace: 0pt;mso-table-rspace: 0pt;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;">
+                       style="border-collapse: collapse;mso-table-lspace: 0pt;mso-table-rspace: 0pt;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;min-height: 100vh">
                     <tr>
                         <td align="center" valign="top" id="templateHeader" data-template-container
                             style="mso-line-height-rule: exactly;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;background-color: #333333;background-image: none;background-repeat: no-repeat;background-position: center;background-size: cover;border-top: 0;border-bottom: 0;padding-top: 36px;padding-bottom: 36px;">
@@ -714,7 +714,7 @@
                             <![endif]-->
                         </td>
                     </tr>
-                    <tr>
+                    <tr style="height: 100%">
                         <td align="center" valign="top" id="templateBody" data-template-container
                             style="mso-line-height-rule: exactly;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;background-color: #222222;background-image: none;background-repeat: no-repeat;background-position: center;background-size: cover;border-top: 0;border-bottom: 0;padding-top: 40px;padding-bottom: 40px;">
                             <!--[if (gte mso 9)|(IE)]>
