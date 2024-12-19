@@ -18,6 +18,7 @@
   import equal from 'fast-deep-equal';
   import { _ } from 'svelte-i18n';
   import {LocalStorage} from '@sveltia/utils/storage';
+  import {mount} from 'svelte';
   import NewsletterContent from '../../newsletters/details/preview/NewsletterContent.svelte';
   import { goBack, goto } from '$lib/services/app/navigation';
   import { backendName } from '$lib/services/backends';
@@ -337,7 +338,7 @@
 
           /* eslint-disable */
           const elem = document.createElement('div');
-          new NewsletterContent({ target: elem, props: { newsletter, generateBlobSrc: false } });
+          mount(NewsletterContent, { target: elem, props: { newsletter, generateBlobSrc: false } });
           const html = elem.innerHTML;
           /* eslint-enable */
 
