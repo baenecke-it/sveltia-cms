@@ -1,5 +1,5 @@
 <script>
-    import {entryDraft} from '$lib/services/contents/editor';
+    import { entryDraft } from '$lib/services/contents/draft';
 
     import NewsletterTemplate from './NewsletterTemplate.svelte';
     import NewsletterContent from './NewsletterContent.svelte';

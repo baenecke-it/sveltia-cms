@@ -2,7 +2,7 @@
     import {marked} from 'marked';
     import {unflatten} from 'flat';
     import {getMediaFieldURL} from '$lib/services/assets/index.js';
-    import {entryDraft} from '$lib/services/contents/editor.js';
+    import { entryDraft } from '$lib/services/contents/draft';
 
     /**
      * @type {Record<string, any>}
