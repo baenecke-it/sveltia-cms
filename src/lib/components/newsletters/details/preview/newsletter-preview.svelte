@@ -11,14 +11,14 @@
 
     let currentValues;
     /**
-     * @type {Record<string, any>}
+     * @type {Entry|undefined}
      */
     let originalEntry;
     /**
      * @type {Record<string, any>}
      */
     let newsletterValues;
-    $: if  ($entryDraft) {
+    $: if ($entryDraft) {
         ({currentValues, originalEntry} = $entryDraft);
         newsletterValues = currentValues[locale] ?? [];
     }
@@ -31,6 +31,6 @@
     }
 </style>
 
-<NewsletterTemplate slug={originalEntry.slug}>
+<NewsletterTemplate slug={originalEntry?.slug}>
     <NewsletterContent newsletter={newsletterValues}></NewsletterContent>
 </NewsletterTemplate>
