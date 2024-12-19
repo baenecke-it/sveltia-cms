@@ -7,6 +7,11 @@
    * Whether to open the dialog.
    */
   export let open = false;
+  /**
+   * Custom `close` event handler.
+   * @type {(() => void) | undefined}
+   */
+  export let onClose = undefined;
 
   const shortcuts = [
     { feature: 'view_content_library', keys: 'Alt+1' },
@@ -14,6 +19,7 @@
     { feature: 'search', keys: 'Accel+F' },
     { feature: 'create_entry', keys: 'Accel+E' },
     { feature: 'save_entry', keys: 'Accel+S' },
+    { feature: 'cancel_editing', keys: 'Escape' },
   ];
 
   let accel = 'Ctrl';
@@ -31,13 +37,15 @@
   showOk={false}
   showCancel={false}
   showClose={true}
-  on:close
+  onClose={() => {
+    onClose?.();
+  }}
 >
   <div role="none" class="wrapper">
     <Table aria-label={$_('help.keyboard_shortcuts')}>
       {#each shortcuts as { feature, keys } (keys)}
         <TableRow>
-          <TableCell class="feature">{$_(`keyboard_shortcuts.${feature}`)}</TableCell>
+          <TableCell class="feature">{$_(`keyboard_shortcuts_.${feature}`)}</TableCell>
           <TableCell class="keys">
             {#each keys.split('+') as key}
               <kbd>{key.replace('Accel', accel)}</kbd>

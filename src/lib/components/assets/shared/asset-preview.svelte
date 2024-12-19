@@ -69,7 +69,8 @@
   let hasError = false;
   let loaded = false;
 
-  $: isImage = kind === 'image' || asset?.name.endsWith('.pdf');
+  $: isThumbnail = !!asset && !!variant;
+  $: isImage = isThumbnail || kind === 'image' || asset?.name.endsWith('.pdf');
 
   /**
    * Update the {@link src} property.
@@ -87,7 +88,7 @@
     }
 
     try {
-      src = variant ? await getAssetThumbnailURL(asset) : await getAssetBlobURL(asset);
+      src = isThumbnail ? await getAssetThumbnailURL(asset) : await getAssetBlobURL(asset);
     } catch {
       hasError = true;
     }
@@ -105,7 +106,7 @@
    * Update the {@link loaded} state when the media is loaded.
    */
   const checkLoaded = async () => {
-    if (!mediaElement) {
+    if (!mediaElement || !src) {
       return;
     }
 
@@ -132,10 +133,16 @@
     }
 
     loaded = true;
+
+    // Revoke the thumbnail blob URL
+    if (asset && isThumbnail && src?.startsWith('blob:')) {
+      URL.revokeObjectURL(src);
+    }
   };
 
   $: {
     void mediaElement;
+    void src;
     checkLoaded();
   }
 </script>
@@ -160,10 +167,10 @@
       playsinline
       {...$$restProps}
       bind:this={mediaElement}
-    />
+    ></video>
   {:else if kind === 'audio'}
     {#if controls}
-      <audio {src} controls playsinline {...$$restProps} bind:this={mediaElement} />
+      <audio {src} controls playsinline {...$$restProps} bind:this={mediaElement}></audio>
     {:else}
       <Icon name="audio_file" />
     {/if}
@@ -172,10 +179,10 @@
   {/if}
   {#if blurBackground}
     <div role="none" class="blur">
-      <div role="none" class="overlay" />
+      <div role="none" class="overlay"></div>
       {#if kind === 'video'}
         <!-- svelte-ignore a11y-media-has-caption -->
-        <video {src} playsinline />
+        <video {src} playsinline></video>
       {:else}
         <img {loading} {src} alt="" />
       {/if}
@@ -234,16 +241,21 @@
         width: 100%;
         height: 100%;
         z-index: -2;
-        object-fit: contain;
+        object-fit: cover;
         transform: scale(1.2);
       }
     }
 
     &.cover {
       padding: 0;
+
+      & > :is(img, video) {
+        flex: auto;
+      }
     }
 
     & > :is(img, video) {
+      flex: 0;
       max-width: 100%;
       max-height: 100%;
     }

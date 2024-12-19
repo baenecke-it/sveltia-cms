@@ -3,6 +3,7 @@ import BooleanPreview from '$lib/components/contents/details/widgets/boolean/boo
 import ColorEditor from '$lib/components/contents/details/widgets/color/color-editor.svelte';
 import ColorPreview from '$lib/components/contents/details/widgets/color/color-preview.svelte';
 import ComputeEditor from '$lib/components/contents/details/widgets/compute/compute-editor.svelte';
+import ComputePreview from '$lib/components/contents/details/widgets/compute/compute-preview.svelte';
 import DateTimeEditor from '$lib/components/contents/details/widgets/date-time/date-time-editor.svelte';
 import DateTimePreview from '$lib/components/contents/details/widgets/date-time/date-time-preview.svelte';
 import FileEditor from '$lib/components/contents/details/widgets/file/file-editor.svelte';
@@ -27,7 +28,7 @@ import UuidEditor from '$lib/components/contents/details/widgets/uuid/uuid-edito
 import UuidPreview from '$lib/components/contents/details/widgets/uuid/uuid-preview.svelte';
 
 /**
- * @type {{ [key: string]: any }}
+ * @type {Record<string, any>}
  */
 export const editors = {
   boolean: BooleanEditor,
@@ -46,14 +47,13 @@ export const editors = {
   text: TextEditor,
   uuid: UuidEditor,
 };
-
 /**
- * @type {{ [key: string]: any }}
+ * @type {Record<string, any>}
  */
 export const previews = {
   boolean: BooleanPreview,
   color: ColorPreview,
-  compute: StringPreview, // alias
+  compute: ComputePreview,
   datetime: DateTimePreview,
   file: FilePreview,
   image: FilePreview, // alias

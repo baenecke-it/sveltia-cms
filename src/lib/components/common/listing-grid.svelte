@@ -4,21 +4,18 @@
 -->
 <script>
   import { Grid } from '@sveltia/ui';
-  import { waitForVisibility } from '@sveltia/utils/element';
+  import { sleep } from '@sveltia/utils/misc';
 
   /**
    * View type.
    * @type {ViewType}
    */
   export let viewType;
-
-  /** @type {HTMLElement | undefined} */
-  let wrapper;
 </script>
 
-<div role="none" class="{viewType}-view" bind:this={wrapper}>
-  {#await waitForVisibility(wrapper) then}
-    <Grid multiple {...$$restProps}>
+<div role="none" class="{viewType}-view">
+  {#await sleep(0) then}
+    <Grid multiple clickToSelect={false} {...$$restProps}>
       <slot />
     </Grid>
   {/await}
@@ -28,6 +25,7 @@
   .grid-view {
     :global(.row-group-caption) {
       display: block;
+      margin: 8px;
       grid-column: 1 / -1; // span the entire row
 
       :global(th) {
@@ -35,14 +33,9 @@
       }
     }
 
-    :global(.row-group:not(:first-child)) {
-      margin: 16px 0 0;
-    }
-
     :global(.grid-body) {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(var(--grid-size, 200px), 1fr));
-      gap: 16px;
       border-width: 0;
     }
 
@@ -50,12 +43,10 @@
       display: block;
       position: relative;
       overflow: hidden;
-      padding: 0;
       height: auto;
       text-align: left;
-      cursor: pointer;
 
-      &:focus {
+      &:focus-visible {
         outline-color: transparent;
 
         :global(.preview) {
@@ -87,6 +78,7 @@
           display: -webkit-box;
           -webkit-box-orient: vertical;
           -webkit-line-clamp: 2;
+          line-clamp: 2;
           overflow: hidden;
           margin: 12px 8px 0;
           height: 40px;
@@ -94,18 +86,31 @@
         }
       }
     }
+
+    :global([role='row'][tabindex]) {
+      border-radius: var(--sui-control-medium-border-radius);
+      padding: 8px;
+      cursor: pointer;
+      transition: background-color 200ms;
+
+      &:hover,
+      &:focus,
+      &:active {
+        background-color: var(--sui-hover-background-color);
+      }
+    }
   }
 
   .list-view {
     :global([role='grid']) {
       :global(.row-group) {
-        :global(.row-group-caption ~ .grid-row:first-of-type) {
+        :global(.row-group-caption + .grid-row) {
           :global(.grid-cell) {
             border-top-width: 0 !important;
           }
         }
 
-        :global(.row-group-caption ~ .grid-row:last-of-type) {
+        :global(.row-group-caption ~ .grid-row:last-child) {
           :global(.grid-cell) {
             border-bottom-width: 0 !important;
           }
@@ -117,13 +122,16 @@
         outline-width: 2px !important;
         outline-style: solid;
         outline-color: transparent;
-        cursor: pointer;
         transition-property: background-color, outline-color;
         transition-duration: 200ms;
 
         &:focus {
           outline-color: var(--sui-primary-accent-color-light);
         }
+      }
+
+      :global([role='row'][tabindex]) {
+        cursor: pointer;
       }
 
       :global([role='row']:hover) {
@@ -144,6 +152,15 @@
           overflow: hidden;
           text-overflow: ellipsis;
         }
+      }
+
+      :global(.grid-cell.image:empty::before) {
+        display: block;
+        border-radius: var(--sui-control-medium-border-radius);
+        width: 40px;
+        height: 40px;
+        background-color: var(--sui-secondary-background-color);
+        content: '';
       }
 
       :global([role='gridcell']:first-child) {
@@ -173,7 +190,10 @@
       }
 
       :global([role='gridcell'].image) {
+        box-sizing: content-box;
         padding: 8px;
+        width: 40px;
+        height: 40px;
       }
     }
   }

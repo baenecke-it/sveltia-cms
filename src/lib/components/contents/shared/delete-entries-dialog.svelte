@@ -1,16 +1,25 @@
 <script>
   import { ConfirmationDialog } from '@sveltia/ui';
   import { _ } from 'svelte-i18n';
-  import { selectedCollection, selectedEntries } from '$lib/services/contents';
-  import { deleteEntries } from '$lib/services/contents/data';
-  import { getAssociatedAssets } from '$lib/services/contents/entry';
-  import { listedEntries } from '$lib/services/contents/view';
+  import { selectedCollection } from '$lib/services/contents/collection';
+  import { deleteEntries } from '$lib/services/contents/collection/data';
+  import { selectedEntries } from '$lib/services/contents/collection/entries';
+  import { listedEntries } from '$lib/services/contents/collection/view';
+  import { getAssociatedAssets } from '$lib/services/contents/entry/assets';
 
   export let open = false;
 
   $: associatedAssets =
     !!$selectedEntries.length && !!$selectedCollection?._assetFolder?.entryRelative
-      ? $selectedEntries.map((entry) => getAssociatedAssets(entry, { relative: true })).flat(1)
+      ? $selectedEntries
+          .map((entry) =>
+            getAssociatedAssets({
+              entry,
+              collectionName: $selectedCollection.name,
+              relative: true,
+            }),
+          )
+          .flat(1)
       : [];
 </script>
 
@@ -18,7 +27,7 @@
   bind:open
   title={$selectedEntries.length === 1 ? $_('delete_entry') : $_('delete_entries')}
   okLabel={$_('delete')}
-  on:ok={() => {
+  onOk={() => {
     deleteEntries(
       $selectedEntries.map(({ id }) => id),
       associatedAssets.map(({ path }) => path),

@@ -1,11 +1,14 @@
+import { getHash } from '@sveltia/utils/crypto';
 import { isObject } from '@sveltia/utils/object';
-import { stripSlashes } from '@sveltia/utils/string';
+import { compare, stripSlashes } from '@sveltia/utils/string';
 import merge from 'deepmerge';
 import { _ } from 'svelte-i18n';
 import { get, writable } from 'svelte/store';
 import YAML from 'yaml';
 import { prefs } from '$lib/services/prefs';
-import { allEntryFolders, getCollection, selectedCollection } from '$lib/services/contents';
+import { getI18nConfig } from '$lib/services/contents/i18n';
+import { getCollection, selectedCollection } from '$lib/services/contents/collection';
+import { allEntryFolders } from '$lib/services/contents';
 import { allBackendServices } from '$lib/services/backends';
 import { allAssetFolders } from '$lib/services/assets';
 
@@ -20,12 +23,14 @@ const { DEV, VITE_SITE_URL } = import.meta.env;
  * with the dev server’s middleware, or loading the CMS config file may fail due to a CORS error.
  */
 export const siteURL = DEV ? VITE_SITE_URL || 'http://localhost:5174' : undefined;
-
 /**
  * @type {import('svelte/store').Writable<SiteConfig | undefined>}
  */
 export const siteConfig = writable();
-
+/**
+ * @type {import('svelte/store').Writable<string | undefined>}
+ */
+export const siteConfigVersion = writable();
 /**
  * @type {import('svelte/store').Writable<{ message: string } | undefined>}
  */
@@ -33,14 +38,20 @@ export const siteConfigError = writable();
 
 /**
  * Fetch the YAML site configuration file and return it as JSON.
- * @returns {Promise<SiteConfig>} Configuration.
+ * @param {object} [options] - Options.
+ * @param {boolean} [options.ignoreError] - Whether to ignore a fetch error.
+ * @returns {Promise<any>} Configuration. Can be an empty object if the `ignoreError` option is
+ * `true` and the config file is missing.
  * @throws {Error} When fetching or parsing has failed.
  */
-const fetchSiteConfig = async () => {
-  const { href = './config.yml' } =
-    /** @type {HTMLAnchorElement | undefined} */ (
-      document.querySelector('link[type="text/yaml"][rel="cms-config-url"]')
-    ) ?? {};
+const fetchSiteConfig = async ({ ignoreError = false } = {}) => {
+  const {
+    // Depending on the server or framework configuration, the trailing slash may be removed from
+    // the CMS `/admin/` URL. In that case, fetch the config file from a root-relative URL instead
+    // of a regular relative URL to avoid 404 Not Found.
+    href = window.location.pathname === '/admin' ? '/admin/config.yml' : './config.yml',
+    type = 'application/yaml',
+  } = /** @type {?HTMLLinkElement} */ (document.querySelector('link[rel="cms-config-url"]')) ?? {};
 
   /** @type {Response} */
   let response;
@@ -54,13 +65,21 @@ const fetchSiteConfig = async () => {
   const { ok, status } = response;
 
   if (!ok) {
+    if (ignoreError) {
+      return {};
+    }
+
     throw new Error(get(_)('config.error.fetch_failed'), {
       cause: new Error(get(_)('config.error.fetch_failed_not_ok', { values: { status } })),
     });
   }
 
   try {
-    return YAML.parse(await response.text());
+    if (type === 'application/json') {
+      return response.json();
+    }
+
+    return YAML.parse(await response.text(), { merge: true });
   } catch (/** @type {any} */ ex) {
     throw new Error(get(_)('config.error.parse_failed'), { cause: ex });
   }
@@ -94,7 +113,7 @@ const validate = (config) => {
     );
   }
 
-  if (typeof config.backend.repo !== 'string' || config.backend.repo.split('/').length !== 2) {
+  if (typeof config.backend.repo !== 'string' || !/(.+)\/([^/]+)$/.test(config.backend.repo)) {
     throw new Error(get(_)('config.error.no_repository'));
   }
 
@@ -106,7 +125,7 @@ const validate = (config) => {
     throw new Error(get(_)('config.error.oauth_no_app_id'));
   }
 
-  if (!config.media_folder) {
+  if (typeof config.media_folder !== 'string') {
     throw new Error(get(_)('config.error.no_media_folder'));
   }
 };
@@ -121,32 +140,44 @@ export const initSiteConfig = async (manualConfig = {}) => {
   siteConfig.set(undefined);
   siteConfigError.set(undefined);
 
-  /** @type {SiteConfig} */
-  let config;
-
   try {
+    // Not a config error but `getHash` below and some other features require a secure context
+    if (!window.isSecureContext) {
+      throw new Error(get(_)('config.error.no_secure_context'));
+    }
+
     if (manualConfig && !isObject(manualConfig)) {
       throw new Error(get(_)('config.error.parse_failed'));
     }
 
+    /** @type {any} */
+    let tempConfig;
+
     if (manualConfig?.load_config_file === false) {
-      config = manualConfig;
+      tempConfig = manualConfig;
+    } else if (Object.entries(manualConfig).length) {
+      tempConfig = merge(await fetchSiteConfig({ ignoreError: true }), manualConfig);
     } else {
-      config = await fetchSiteConfig();
+      tempConfig = await fetchSiteConfig();
+    }
 
-      if (Object.entries(manualConfig).length) {
-        config = merge(config, manualConfig);
+    validate(tempConfig);
+
+    /** @type {SiteConfig} */
+    const config = tempConfig;
+
+    // Set the site URL for development and production if undefined. See also `/src/app.svelte`
+    config.site_url ||= DEV ? siteURL : window.location.origin;
+
+    // Handle root collection folder variants, particularly for VitePress
+    config.collections.forEach((collection) => {
+      if (collection.folder === '.' || collection.folder === '/') {
+        collection.folder = '';
       }
-    }
-
-    validate(config);
-
-    // Set the site URL for development. See also `/src/app.svelte`
-    if (DEV && !config.site_url) {
-      config.site_url = siteURL;
-    }
+    });
 
     siteConfig.set(config);
+    siteConfigVersion.set(await getHash(YAML.stringify(config)));
   } catch (/** @type {any} */ ex) {
     siteConfigError.set({
       message: ex.name === 'Error' ? ex.message : get(_)('config.error.unexpected'),
@@ -173,56 +204,43 @@ siteConfig.subscribe((config) => {
     collections,
   } = config;
 
-  selectedCollection.set(getCollection(collections[0].name));
-
   /** @type {CollectionEntryFolder[]} */
   const _allEntryFolders = [
     ...collections
-      .filter(({ folder }) => !!folder)
-      .map(
-        ({
-          name: collectionName,
-          folder: folderPath,
-          extension,
-          format,
-          frontmatter_delimiter: frontmatterDelimiter,
-          yaml_quote: yamlQuote,
-        }) => ({
-          collectionName,
-          folderPath: stripSlashes(/** @type {string} */ (folderPath)),
-          extension,
-          format,
-          frontmatterDelimiter,
-          yamlQuote,
-        }),
-      )
-      .sort((a, b) => (a.folderPath ?? '').localeCompare(b.folderPath ?? '')),
+      .filter(({ folder, hide, divider }) => typeof folder === 'string' && !hide && !divider)
+      .map(({ name: collectionName, folder }) => ({
+        collectionName,
+        folderPath: stripSlashes(/** @type {string} */ (folder)),
+      }))
+      .sort((a, b) => compare(a.folderPath ?? '', b.folderPath ?? '')),
     ...collections
-      .filter(({ files }) => !!files)
-      .map(
-        ({
-          name: collectionName,
-          files,
-          extension,
-          format,
-          frontmatter_delimiter: frontmatterDelimiter,
-          yaml_quote: yamlQuote,
-        }) =>
-          (files ?? []).map(({ name: fileName, file: filePath }) => ({
+      .filter(({ files, hide, divider }) => Array.isArray(files) && !hide && !divider)
+      .map((collection) => {
+        const { name: collectionName, files } = collection;
+
+        return (files ?? []).map((file) => {
+          const path = stripSlashes(file.file);
+
+          return {
             collectionName,
-            fileName,
-            filePath: stripSlashes(filePath),
-            extension,
-            format,
-            frontmatterDelimiter,
-            yamlQuote,
-          })),
-      )
+            fileName: file.name,
+            filePathMap: path.includes('{{locale}}')
+              ? Object.fromEntries(
+                  getI18nConfig(collection, file).locales.map((locale) => [
+                    locale,
+                    path.replace('{{locale}}', locale),
+                  ]),
+                )
+              : { _default: path },
+          };
+        });
+      })
       .flat(1)
-      .sort((a, b) => a.filePath.localeCompare(b.filePath)),
+      .sort((a, b) => compare(Object.values(a.filePathMap)[0], Object.values(b.filePathMap)[0])),
   ];
 
-  const globalMediaFolder = stripSlashes(_globalMediaFolder);
+  // Normalize the media folder: an empty string, `/` and `.` are all considered as the root folder
+  const globalMediaFolder = stripSlashes(_globalMediaFolder).replace(/^\.$/, '');
 
   // Some frameworks expect asset paths starting with `@`, like `@assets/images/...`. Remove an
   // extra leading slash in that case. A trailing slash should always be removed internally.
@@ -244,6 +262,12 @@ siteConfig.subscribe((config) => {
    */
   const collectionAssetFolders = /** @type {CollectionAssetFolder[]} */ (
     collections
+      .filter(
+        ({ hide, divider, media_folder: mediaFolder, path: entryPath }) =>
+          // Show the asset folder if `media_folder` or `path` is defined, even if the collection is
+          // hidden with the `hide` option
+          (!hide || !!mediaFolder || !!entryPath) && !divider,
+      )
       .map((collection) => {
         const {
           name: collectionName,
@@ -266,32 +290,35 @@ siteConfig.subscribe((config) => {
             return null;
           }
 
-          // When specifying a `path` on a folder collection, `media_folder` defaults to an empty
+          // When specifying a `path` on an entry collection, `media_folder` defaults to an empty
           // string
           mediaFolder = '';
         }
 
         mediaFolder = mediaFolder.replace('{{media_folder}}', globalMediaFolder);
 
-        const entryRelative = !mediaFolder.startsWith('/');
+        const entryRelative = !(
+          mediaFolder.startsWith('/') || mediaFolder.startsWith(globalMediaFolder)
+        );
 
         return {
           collectionName,
-          internalPath: stripSlashes(entryRelative ? collectionFolder ?? '' : mediaFolder),
-          publicPath: (publicFolder ?? mediaFolder).replace(
-            '{{public_folder}}',
-            globalPublicFolder,
-          ),
+          internalPath: stripSlashes(entryRelative ? (collectionFolder ?? '') : mediaFolder),
+          publicPath: `/${stripSlashes(
+            (publicFolder ?? mediaFolder).replace('{{public_folder}}', globalPublicFolder),
+          )}`,
           entryRelative,
         };
       })
       .filter(Boolean)
-  ).sort((a, b) => a.internalPath.localeCompare(b.internalPath));
+  ).sort((a, b) => compare(a.internalPath, b.internalPath));
 
   const _allAssetFolders = [globalAssetFolder, ...collectionAssetFolders];
 
   allEntryFolders.set(_allEntryFolders);
   allAssetFolders.set(_allAssetFolders);
+  // `getCollection` depends on `allAssetFolders`
+  selectedCollection.set(getCollection(collections[0].name));
 
   if (get(prefs).devModeEnabled) {
     // eslint-disable-next-line no-console

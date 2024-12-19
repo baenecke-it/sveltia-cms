@@ -1,7 +1,6 @@
 <script>
   import { Button, Icon } from '@sveltia/ui';
   import { scanFiles } from '@sveltia/utils/file';
-  import { createEventDispatcher } from 'svelte';
   import { _ } from 'svelte-i18n';
   import UploadAssetsPreview from '$lib/components/assets/shared/upload-assets-preview.svelte';
   import FilePicker from '$lib/components/assets/shared/file-picker.svelte';
@@ -14,8 +13,12 @@
   export let multiple = false;
   export let showUploadButton = false;
   export let showFilePreview = false;
+  /**
+   * Custom `select` event handler.
+   * @type {((detail: { files: File[] }) => void) | undefined}
+   */
+  export let onSelect = undefined;
 
-  const dispatch = createEventDispatcher();
   let dragging = false;
   let typeMismatch = false;
   /**
@@ -45,11 +48,13 @@
    * Cache the selected files, and notify the list.
    * @param {File[]} allFiles - Files.
    */
-  const onSelect = (allFiles) => {
+  const updateFileList = (allFiles) => {
     files = multiple ? allFiles : allFiles.slice(0, 1);
   };
 
-  $: dispatch('select', { files });
+  $: {
+    onSelect?.({ files });
+  }
 </script>
 
 <div
@@ -88,7 +93,7 @@
     const filteredFileList = await scanFiles(dataTransfer, { accept });
 
     if (filteredFileList.length) {
-      onSelect(filteredFileList);
+      updateFileList(filteredFileList);
     } else {
       typeMismatch = true;
     }
@@ -102,17 +107,19 @@
   {#if showUploadButton || (showFilePreview && files.length)}
     <div role="none" class="content">
       {#if showUploadButton}
-        <div role="none">{$_(multiple ? 'drop_files_or_browse' : 'drop_file_or_browse')}</div>
+        <div role="none">{$_(multiple ? 'drop_or_browse_files' : 'drop_or_browse_file')}</div>
         <div role="none">
           <Button
             variant="primary"
             label={$_(multiple ? 'choose_files' : 'choose_file')}
             {disabled}
-            on:click={() => {
+            onclick={() => {
               openFilePicker();
             }}
           >
-            <Icon slot="start-icon" name="cloud_upload" />
+            {#snippet startIcon()}
+              <Icon name="cloud_upload" />
+            {/snippet}
           </Button>
         </div>
         {#if typeMismatch}
@@ -128,7 +135,10 @@
   {/if}
   {#if dragging}
     <div role="none" class="drop-indicator">
-      <div role="none">{$_('drop_files_here')}</div>
+      <div role="none">
+        <Icon name="download" />
+        <span role="none">{$_(multiple ? 'drop_files_here' : 'drop_file_here')}</span>
+      </div>
     </div>
   {/if}
 </div>
@@ -137,8 +147,8 @@
   {accept}
   {multiple}
   bind:this={filePicker}
-  on:select={({ detail }) => {
-    onSelect(detail.files);
+  onSelect={({ files: _files }) => {
+    updateFileList(_files);
   }}
 />
 
@@ -171,6 +181,7 @@
     position: absolute;
     inset: 0;
     z-index: 10;
+    border-radius: var(--sui-control-large-border-radius);
     background-color: hsl(var(--sui-background-color-4-hsl) / 80%);
     -webkit-backdrop-filter: blur(8px);
     backdrop-filter: blur(8px);
@@ -179,15 +190,20 @@
 
     div {
       position: absolute;
-      inset: 32px;
+      inset: 0;
       display: flex;
+      flex-direction: column;
       justify-content: center;
       align-items: center;
-      font-size: var(--sui-font-size-xxx-large);
-      border-width: 8px;
-      border-style: dashed;
-      border-color: var(--sui-primary-accent-color-inverted);
-      border-radius: 8px;
+      gap: 4px;
+      border: 4px dashed var(--sui-primary-accent-color);
+      border-radius: var(--sui-control-large-border-radius);
+      font-size: var(--sui-font-size-x-large);
+
+      :global(.icon) {
+        color: var(--sui-secondary-foreground-color);
+        font-size: 48px;
+      }
     }
   }
 

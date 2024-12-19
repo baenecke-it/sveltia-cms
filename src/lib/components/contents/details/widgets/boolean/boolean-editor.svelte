@@ -12,7 +12,7 @@
   // svelte-ignore unused-export-let
   export let locale;
   /**
-   * @type {string}
+   * @type {FieldKeyPath}
    */
   // svelte-ignore unused-export-let
   export let keyPath;
@@ -31,9 +31,9 @@
   // svelte-ignore unused-export-let
   export let fieldConfig;
   /**
-   * @type {boolean}
+   * @type {boolean | 'mixed'}
    */
-  export let currentValue;
+  export let currentValue = false;
   /**
    * @type {boolean}
    */

@@ -1,13 +1,12 @@
 <script>
   import { Option } from '@sveltia/ui';
   import DOMPurify from 'isomorphic-dompurify';
-  import { createEventDispatcher } from 'svelte';
   import { _ } from 'svelte-i18n';
-  import EmptyState from '$lib/components/common/empty-state.svelte';
-  import SimpleImageGrid from '$lib/components/assets/shared/simple-image-grid.svelte';
   import AssetPreview from '$lib/components/assets/shared/asset-preview.svelte';
-
-  const dispatch = createEventDispatcher();
+  import SimpleImageGrid from '$lib/components/assets/shared/simple-image-grid.svelte';
+  import EmptyState from '$lib/components/common/empty-state.svelte';
+  import InfiniteScroll from '$lib/components/common/infinite-scroll.svelte';
+  import { normalize } from '$lib/services/search';
 
   /**
    * @type {Asset[]}
@@ -31,9 +30,14 @@
    * @type {boolean}
    */
   export let checkerboard = false;
+  /**
+   * Custom `select` event handler.
+   * @type {((detail: { asset: Asset }) => void) | undefined}
+   */
+  export let onSelect = undefined;
 
   $: filteredAssets = searchTerms
-    ? assets.filter(({ name }) => name.toLowerCase().includes(searchTerms.toLowerCase()))
+    ? assets.filter(({ name }) => normalize(name).includes(searchTerms))
     : assets;
 </script>
 
@@ -43,24 +47,24 @@
       {gridId}
       {viewType}
       showTitle={true}
-      on:change={(event) => {
-        dispatch('select', {
-          asset: assets.find(({ sha }) => sha === /** @type {CustomEvent} */ (event).detail.value),
-        });
+      onChange={({ value }) => {
+        onSelect?.({ asset: /** @type {Asset} */ (assets.find(({ sha }) => sha === value)) });
       }}
     >
-      {#each filteredAssets as asset (asset.path)}
-        {@const { sha, kind, name } = asset}
-        <Option label="" value={sha}>
-          <AssetPreview {kind} {asset} variant="tile" {checkerboard} />
-          <span role="none" class="name">
-            <!-- Allow to line-break after a hyphen, underscore and dot -->
-            {@html DOMPurify.sanitize(name.replace(/([-_.])/g, '$1<wbr>'), {
-              ALLOWED_TAGS: ['wbr'],
-            })}
-          </span>
-        </Option>
-      {/each}
+      <InfiniteScroll items={filteredAssets} itemKey="path">
+        {#snippet renderItem(/** @type {Asset} */ asset)}
+          {@const { sha, kind, name } = asset}
+          <Option label="" value={sha}>
+            <AssetPreview {kind} {asset} variant="tile" {checkerboard} />
+            <span role="none" class="name">
+              <!-- Allow to line-break after a hyphen, underscore and dot -->
+              {@html DOMPurify.sanitize(name.replace(/([-_.])/g, '$1<wbr>'), {
+                ALLOWED_TAGS: ['wbr'],
+              })}
+            </span>
+          </Option>
+        {/snippet}
+      </InfiniteScroll>
     </SimpleImageGrid>
   </div>
 {:else}
@@ -71,6 +75,7 @@
 
 <style lang="scss">
   .grid-wrapper {
-    display: contents;
+    overflow-y: auto;
+    height: 100%;
   }
 </style>

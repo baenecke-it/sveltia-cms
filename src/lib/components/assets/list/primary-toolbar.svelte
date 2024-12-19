@@ -10,7 +10,7 @@
   import { focusedAsset, selectedAssetFolder, selectedAssets } from '$lib/services/assets';
   import { getFolderLabelByPath, listedAssets } from '$lib/services/assets/view';
 
-  $: assets = $selectedAssets;
+  $: assets = $selectedAssets.length ? $selectedAssets : $focusedAsset ? [$focusedAsset] : [];
 </script>
 
 <Toolbar variant="primary" aria-label={$_('folder')}>
@@ -28,7 +28,6 @@
     {assets}
     buttonDescription={$_(assets.length === 1 ? 'delete_selected_asset' : 'delete_selected_assets')}
     dialogDescription={$_(
-      // eslint-disable-next-line no-nested-ternary
       assets.length === 1
         ? 'confirm_deleting_selected_asset'
         : assets.length === $listedAssets.length

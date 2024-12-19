@@ -3,14 +3,14 @@ name: Tests
 on: push
 
 jobs:
-  lint:
-    name: Lint
+  check:
+    name: Check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout the branch
         uses: actions/checkout@v4
       - name: Install pnpm
-        uses: pnpm/action-setup@v3
+        uses: pnpm/action-setup@v4
         with:
           version: latest
       - name: Setup Node.js environment
@@ -20,8 +20,8 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install
-      - name: Run all lint checks
-        run: pnpm lint
+      - name: Run all checks
+        run: pnpm check
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -29,7 +29,7 @@ jobs:
       - name: Checkout the branch
         uses: actions/checkout@v4
       - name: Install pnpm
-        uses: pnpm/action-setup@v3
+        uses: pnpm/action-setup@v4
         with:
           version: latest
       - name: Setup Node.js environment

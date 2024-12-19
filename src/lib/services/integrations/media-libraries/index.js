@@ -4,15 +4,14 @@ import unsplash from './unsplash';
 
 /**
  * List of all the supported cloud storage services.
- * @type {{ [name: string]: MediaLibraryService }}
+ * @type {Record<string,  MediaLibraryService>}
  */
 export const allCloudStorageServices = {
   //
 };
-
 /**
  * List of all the external media libraries.
- * @type {{ [name: string]: MediaLibraryService }}
+ * @type {Record<string, MediaLibraryService>}
  */
 export const allStockPhotoServices = {
   pexels,

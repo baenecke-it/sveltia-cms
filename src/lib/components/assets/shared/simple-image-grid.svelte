@@ -12,10 +12,22 @@
    * Whether to show the file name or title under the image while in grid view.
    */
   export let showTitle = false;
+  /**
+   * Custom `change` event handler.
+   * @type {((detail: { value: string }) => void) | undefined}
+   */
+  export let onChange = undefined;
 </script>
 
 <div role="none" class="wrapper" class:show-title={showTitle}>
-  <Listbox id={gridId} class={viewType} aria-label={$_('assets_dialog.available_images')} on:change>
+  <Listbox
+    id={gridId}
+    class={viewType}
+    aria-label={$_('assets_dialog.available_images')}
+    onChange={(event) => {
+      onChange?.(event.detail);
+    }}
+  >
     <slot />
   </Listbox>
 </div>
@@ -63,6 +75,7 @@
         min-height: calc(var(--sui-font-size-default) * 2);
         -webkit-box-orient: vertical;
         -webkit-line-clamp: 2;
+        line-clamp: 2;
         overflow: hidden;
         white-space: normal;
         line-height: var(--sui-line-height-compact);
@@ -73,6 +86,7 @@
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
       height: auto;
+      max-height: none;
 
       :global(.option) {
         :global(button) {

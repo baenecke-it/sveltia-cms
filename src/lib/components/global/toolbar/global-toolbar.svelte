@@ -1,10 +1,12 @@
 <script>
-  import { Spacer, Toolbar } from '@sveltia/ui';
+  import { Toolbar } from '@sveltia/ui';
   import { _ } from 'svelte-i18n';
   import AccountButton from '$lib/components/global/toolbar/items/account-button.svelte';
   import CreateButton from '$lib/components/global/toolbar/items/create-button.svelte';
+  import HelpButton from '$lib/components/global/toolbar/items/help-button.svelte';
   import NotificationsButton from '$lib/components/global/toolbar/items/notifications-button.svelte';
   import PageSwitcher from '$lib/components/global/toolbar/items/page-switcher.svelte';
+  import PublishButton from '$lib/components/global/toolbar/items/publish-button.svelte';
   import QuickSearchBar from '$lib/components/global/toolbar/items/quick-search-bar.svelte';
   import SiteLogo from '$lib/components/global/toolbar/items/site-logo.svelte';
   import { hasOverlay } from '$lib/services/app/navigation';
@@ -12,14 +14,18 @@
 
 <div role="none" class="toolbar-wrapper" inert={$hasOverlay}>
   <Toolbar variant="primary" aria-label={$_('global')}>
-    <SiteLogo />
-    <PageSwitcher />
-    <Spacer flex />
+    <div role="none" class="buttons">
+      <SiteLogo />
+      <PageSwitcher />
+    </div>
     <QuickSearchBar />
-    <Spacer flex />
-    <CreateButton />
-    <NotificationsButton />
-    <AccountButton />
+    <div role="none" class="buttons">
+      <PublishButton />
+      <CreateButton />
+      <NotificationsButton />
+      <HelpButton />
+      <AccountButton />
+    </div>
   </Toolbar>
 </div>
 
@@ -35,8 +41,21 @@
     & > :global(.toolbar) {
       border-width: 0 0 1px 0 !important;
 
+      :global(.buttons) {
+        flex: auto;
+        display: flex;
+        align-items: center;
+        width: 50%;
+
+        &:last-child {
+          justify-content: flex-end;
+        }
+      }
+
       :global(.search-bar) {
+        flex: none;
         width: 640px;
+        max-width: 50%;
       }
     }
   }

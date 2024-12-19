@@ -12,10 +12,16 @@
   import SecondarySidebar from '$lib/components/contents/list/secondary-sidebar.svelte';
   import SecondaryToolbar from '$lib/components/contents/list/secondary-toolbar.svelte';
   import { announcedPageStatus, parseLocation } from '$lib/services/app/navigation';
-  import { getCollection, getFile, selectedCollection } from '$lib/services/contents';
-  import { contentUpdatesToast } from '$lib/services/contents/data';
-  import { createDraft, entryDraft } from '$lib/services/contents/editor';
-  import { formatSummary, listedEntries } from '$lib/services/contents/view';
+  import { getCollection, selectedCollection } from '$lib/services/contents/collection';
+  import { contentUpdatesToast } from '$lib/services/contents/collection/data';
+  import { getFile } from '$lib/services/contents/collection/files';
+  import { listedEntries } from '$lib/services/contents/collection/view';
+  import { createDraft } from '$lib/services/contents/draft/create';
+  import { showContentOverlay } from '$lib/services/contents/draft/editor';
+  import { getEntrySummary } from '$lib/services/contents/entry/summary';
+
+  const routeRegex =
+    /^\/collections\/(?<_collectionName>[^/]+)(?:\/(?<routeType>new|entries))?(?:\/(?<subPath>.+?))?$/;
 
   /**
    * Navigate to the content list or content details page given the URL hash.
@@ -23,13 +29,13 @@
    */
   const navigate = () => {
     const { path, params } = parseLocation();
-    const match = path.match(/^\/collections\/([^/]+)(?:\/(new|entries))?(?:\/(.+?))?$/);
+    const match = path.match(routeRegex);
 
-    if (!match) {
+    if (!match?.groups) {
       return; // Not Found
     }
 
-    const [, _collectionName, _state, _slug] = match;
+    const { _collectionName, routeType, subPath } = match.groups;
     /**
      * @type {Collection | undefined}
      */
@@ -39,22 +45,23 @@
       $selectedCollection = collection;
     }
 
-    $entryDraft = null;
-
-    if (!$selectedCollection) {
+    if (!collection || !$selectedCollection) {
       $announcedPageStatus = $_('collection_not_found');
 
       return; // Not Found
     }
 
-    const { name: collectionName, label, create, _fileMap, _i18n } = $selectedCollection;
+    const { name: collectionName, label, create, files } = $selectedCollection;
     const collectionLabel = label || collectionName;
 
-    if (!_state) {
+    const _fileMap = files
+      ? /** @type {FileCollection} */ ($selectedCollection)._fileMap
+      : undefined;
+
+    if (!routeType) {
       const count = $listedEntries.length;
 
       $announcedPageStatus = $_(
-        // eslint-disable-next-line no-nested-ternary
         count > 1
           ? 'viewing_x_collection_many_entries'
           : count === 1
@@ -66,23 +73,27 @@
       return;
     }
 
+    $showContentOverlay = true;
+
     if (_fileMap) {
       // File collection
-      if (_state === 'entries' && _slug) {
-        const selectedEntry = getFile(collectionName, _slug);
-        const collectionFile = _fileMap[_slug];
+      if (routeType === 'entries' && subPath) {
+        const originalEntry = getFile(collectionName, subPath);
+        const collectionFile = _fileMap[subPath];
 
-        if (selectedEntry) {
-          createDraft(selectedEntry);
-        } else if (collectionFile) {
+        if (originalEntry) {
+          createDraft({ collection, collectionFile, originalEntry });
+        } else {
           const { locales } = collectionFile._i18n;
 
           // File is not yet created
           createDraft({
-            collectionName,
-            fileName: collectionFile.name,
-            slug: collectionFile.name,
-            locales: Object.fromEntries(locales.map((_locale) => [_locale, {}])),
+            collection,
+            collectionFile,
+            originalEntry: {
+              slug: collectionFile.name,
+              locales: Object.fromEntries(locales.map((_locale) => [_locale, {}])),
+            },
           });
         }
 
@@ -95,8 +106,8 @@
       }
     } else {
       // Folder collection
-      if (_state === 'new' && !_slug && create) {
-        createDraft({ collectionName }, params);
+      if (routeType === 'new' && !subPath && create) {
+        createDraft({ collection, dynamicValues: params });
 
         $announcedPageStatus = $_('creating_x_collection_entry', {
           values: {
@@ -105,20 +116,16 @@
         });
       }
 
-      if (_state === 'entries' && _slug) {
-        const selectedEntry = $listedEntries.find(({ slug }) => slug === _slug);
+      if (routeType === 'entries' && subPath) {
+        const originalEntry = $listedEntries.find((entry) => entry.subPath === subPath);
 
-        if (selectedEntry) {
-          const { defaultLocale } = _i18n;
-
-          createDraft(selectedEntry);
+        if (originalEntry) {
+          createDraft({ collection, originalEntry });
 
           $announcedPageStatus = $_('editing_x_collection_entry', {
             values: {
               collection: collectionLabel,
-              entry: formatSummary($selectedCollection, selectedEntry, defaultLocale, {
-                useTemplate: false,
-              }),
+              entry: getEntrySummary($selectedCollection, originalEntry),
             },
           });
         }
@@ -160,9 +167,7 @@
   </Group>
 </PageContainer>
 
-{#if $entryDraft}
-  <ContentDetailsOverlay />
-{/if}
+<ContentDetailsOverlay />
 
 <Toast bind:show={$contentUpdatesToast.saved}>
   <Alert status="success">

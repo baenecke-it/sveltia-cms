@@ -1,5 +1,8 @@
 import { initLocales } from '@sveltia/ui';
+import { getPathInfo } from '@sveltia/utils/file';
 import { addMessages, getLocaleFromNavigator } from 'svelte-i18n';
+import { get } from 'svelte/store';
+import { prefs } from '$lib/services/prefs';
 
 /**
  * Load strings and initialize the locales.
@@ -8,18 +11,18 @@ import { addMessages, getLocaleFromNavigator } from 'svelte-i18n';
  */
 export const initAppLocale = () => {
   /**
-   * @type {{ [key: string]: { strings: object }}}
+   * @type {Record<string, { strings: object }>}
    */
   const modules = import.meta.glob('$lib/locales/*.js', { eager: true });
 
   Object.entries(modules).forEach(([path, { strings }]) => {
-    const [, locale] = path.match(/([a-zA-Z-]+)\.js/) ?? [];
+    const locale = getPathInfo(path).filename;
 
     addMessages(locale, /** @type {any} */ (strings));
   });
 
   initLocales({
     fallbackLocale: 'en',
-    initialLocale: (getLocaleFromNavigator() ?? '').split('-')[0] || 'en',
+    initialLocale: get(prefs).locale || (getLocaleFromNavigator() ?? '').split('-')[0] || 'en',
   });
 };

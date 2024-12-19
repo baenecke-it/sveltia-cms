@@ -1,11 +1,8 @@
 <script>
   import { escapeRegExp } from '@sveltia/utils/string';
   import { previews } from '$lib/components/contents/details/widgets';
-  import {
-    entryDraft,
-    joinExpanderKeyPathSegments,
-    syncExpanderStates,
-  } from '$lib/services/contents/editor';
+  import { entryDraft } from '$lib/services/contents/draft';
+  import { getExpanderKeys, syncExpanderStates } from '$lib/services/contents/draft/editor';
   import { defaultI18nConfig } from '$lib/services/contents/i18n';
 
   /**
@@ -13,7 +10,7 @@
    */
   export let locale;
   /**
-   * @type {string}
+   * @type {FieldKeyPath}
    */
   export let keyPath;
   /**
@@ -33,8 +30,9 @@
     ? /** @type {RelationField | SelectField} */ (fieldConfig).multiple
     : undefined;
   $: isList = widgetName === 'list' || (hasMultiple && multiple);
-  $: ({ collection, collectionFile, currentValues } =
+  $: ({ collectionName, fileName, collection, collectionFile, currentValues } =
     $entryDraft ?? /** @type {EntryDraft} */ ({}));
+  $: valueMap = currentValues[locale];
   $: ({ i18nEnabled, defaultLocale } = (collectionFile ?? collection)?._i18n ?? defaultI18nConfig);
   $: canTranslate = i18nEnabled && (i18n === true || i18n === 'translate');
   $: canDuplicate = i18nEnabled && i18n === 'duplicate';
@@ -42,11 +40,11 @@
 
   // Multiple values are flattened in the value map object
   $: currentValue = isList
-    ? Object.entries(currentValues[locale])
-        .filter(([_keyPath]) => _keyPath.match(keyPathRegex))
+    ? Object.entries(valueMap)
+        .filter(([_keyPath]) => keyPathRegex.test(_keyPath))
         .map(([, val]) => val)
         .filter((val) => val !== undefined)
-    : currentValues[locale][keyPath];
+    : valueMap[keyPath];
 
   /**
    * Called whenever the preview field is clicked. Highlight the corresponding editor field by
@@ -55,9 +53,7 @@
   const highlightEditorField = () => {
     syncExpanderStates(
       Object.fromEntries(
-        keyPath
-          .split('.')
-          .map((_key, index, arr) => [joinExpanderKeyPathSegments(arr, index + 1), true]),
+        getExpanderKeys({ collectionName, fileName, valueMap, keyPath }).map((key) => [key, true]),
       ),
     );
 
@@ -74,13 +70,10 @@
         }
 
         targetField.classList.add('highlight');
-        targetField.addEventListener(
-          'animationend',
-          () => {
-            targetField.classList.remove('highlight');
-          },
-          { once: true },
-        );
+
+        window.setTimeout(() => {
+          targetField.classList.remove('highlight');
+        }, 1500);
       }
     });
   };
@@ -107,13 +100,8 @@
   >
     <h4>{label || fieldName}</h4>
     {#if widgetName in previews}
-      <svelte:component
-        this={previews[widgetName]}
-        {keyPath}
-        {locale}
-        {fieldConfig}
-        {currentValue}
-      />
+      {@const Preview = previews[widgetName]}
+      <Preview {keyPath} {locale} {fieldConfig} {currentValue} />
     {/if}
   </section>
 {/if}
@@ -157,7 +145,7 @@
 
       :global(.title) {
         font-size: inherit;
-        font-weight: normal;
+        font-weight: var(--sui-font-weight-normal);
       }
     }
 

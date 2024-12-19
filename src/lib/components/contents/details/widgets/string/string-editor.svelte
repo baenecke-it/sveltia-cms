@@ -5,14 +5,15 @@
 -->
 <script>
   import { TextInput } from '@sveltia/ui';
+  import { getContext } from 'svelte';
+  import CharacterCounter from '$lib/components/contents/details/widgets/string/character-counter.svelte';
 
   /**
    * @type {LocaleCode}
    */
-  // svelte-ignore unused-export-let
   export let locale;
   /**
-   * @type {string}
+   * @type {FieldKeyPath}
    */
   // svelte-ignore unused-export-let
   export let keyPath;
@@ -60,14 +61,9 @@
 
   /**
    * Update {@link inputValue} based on {@link currentValue}. Remove the suffix/prefix if needed.
+   * @param {string} newValue - New value to be set.
    */
-  const setInputValue = () => {
-    if (currentValue === undefined) {
-      return;
-    }
-
-    let newValue = currentValue;
-
+  const setInputValue = (newValue) => {
     if (prefix && newValue.startsWith(prefix)) {
       newValue = newValue.slice(prefix.length);
     }
@@ -84,10 +80,9 @@
 
   /**
    * Update {@link currentValue} based on {@link inputValue}. Add the suffix/prefix if needed.
+   * @param {string} newValue - New value to be set.
    */
-  const setCurrentValue = () => {
-    let newValue = inputValue;
-
+  const setCurrentValue = (newValue) => {
     if (prefix && !newValue.startsWith(prefix)) {
       newValue = `${prefix}${newValue}`;
     }
@@ -102,18 +97,20 @@
     }
   };
 
-  $: {
-    void currentValue;
-    setInputValue();
-  }
+  $: setInputValue(typeof currentValue === 'string' ? currentValue : '');
+  $: setCurrentValue(inputValue ?? '');
+
+  const { extraHint } = getContext('field-editor') ?? {};
 
   $: {
-    void inputValue;
-    setCurrentValue();
+    if (extraHint) {
+      $extraHint = CharacterCounter;
+    }
   }
 </script>
 
 <TextInput
+  lang={locale}
   bind:value={inputValue}
   {type}
   inputmode={type}

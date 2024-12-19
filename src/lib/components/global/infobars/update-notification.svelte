@@ -4,12 +4,18 @@
   import { _ } from 'svelte-i18n';
   import { version as userVersion } from '$lib/services/app';
 
-  const interval = 60 * 60 * 1000; // 1 hour
-  let timer = 0;
+  const checkInterval = 60 * 60 * 1000; // 1 hour
+  const cacheTimeout = 10 * 60 * 1000; // 10 min
+  let interval = 0;
+  let timeout = 0;
   let updateAvailable = false;
 
   /**
-   * Check if an update is available.
+   * Check for a new version of the application. If an update is available, wait 10 minutes before
+   * displaying the update notification, as redirects are cached by the UNPKG CDN. Otherwise, an
+   * older script may still be served when the user reloads the page, and then the notification will
+   * persist.
+   * @see https://unpkg.com/#cache-behavior
    */
   const checkForUpdates = async () => {
     try {
@@ -22,7 +28,9 @@
       const { version: latestVersion } = await response.json();
 
       if (latestVersion && latestVersion !== userVersion) {
-        updateAvailable = true;
+        timeout = window.setTimeout(() => {
+          updateAvailable = true;
+        }, cacheTimeout);
       }
     } catch {
       //
@@ -40,13 +48,14 @@
 
     checkForUpdates();
 
-    timer = window.setInterval(() => {
+    interval = window.setInterval(() => {
       checkForUpdates();
-    }, interval);
+    }, checkInterval);
 
     // onUnmount
     return () => {
-      window.clearInterval(timer);
+      window.clearInterval(interval);
+      window.clearTimeout(timeout);
     };
   });
 </script>
@@ -57,7 +66,7 @@
     <Button
       variant="link"
       label={$_('update_now')}
-      on:click={() => {
+      onclick={() => {
         window.location.reload();
       }}
     />
@@ -73,7 +82,9 @@
     gap: 8px;
     height: 32px;
     text-align: center;
-    border-bottom: 1px solid var(--sui-secondary-border-color);
+    border-bottom: 1px solid var(--sui-info-border-color);
+    color: var(--sui-info-foreground-color);
+    background-color: var(--sui-info-background-color);
     font-size: var(--sui-font-size-small);
 
     :global(button) {

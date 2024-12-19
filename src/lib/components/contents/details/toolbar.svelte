@@ -15,7 +15,6 @@
     Toast,
     Toolbar,
   } from '@sveltia/ui';
-  import { truncate } from '@sveltia/utils/string';
   import equal from 'fast-deep-equal';
   import { _ } from 'svelte-i18n';
   import {LocalStorage} from '@sveltia/utils/storage';
@@ -23,20 +22,19 @@
   import { goBack, goto } from '$lib/services/app/navigation';
   import { backendName } from '$lib/services/backends';
   import { siteConfig } from '$lib/services/config';
-  import { deleteEntries } from '$lib/services/contents/data';
-  import {
-    copyFromLocaleToast,
-    entryDraft,
-    entryEditorSettings,
-    revertChanges,
-    saveEntry,
-  } from '$lib/services/contents/editor';
-  import { getAssociatedAssets } from '$lib/services/contents/entry';
+  import { deleteEntries } from '$lib/services/contents/collection/data';
+  import { entryDraft } from '$lib/services/contents/draft';
+  import { createDraft, duplicateDraft } from '$lib/services/contents/draft/create';
+  import { copyFromLocaleToast, entryEditorSettings } from '$lib/services/contents/draft/editor';
+  import { saveEntry } from '$lib/services/contents/draft/save';
+  import { revertChanges } from '$lib/services/contents/draft/update';
+  import { getEntryPreviewURL } from '$lib/services/contents/entry';
+  import { getAssociatedAssets } from '$lib/services/contents/entry/assets';
+  import { getEntrySummary } from '$lib/services/contents/entry/summary';
   import { defaultI18nConfig, getLocaleLabel } from '$lib/services/contents/i18n';
-  import { formatSummary } from '$lib/services/contents/view';
+  import { prefs } from '$lib/services/prefs';
   import {selectedCollection} from '$lib/services/contents/index.js';
 
-  let showDuplicateToast = false;
   let showValidationToast = false;
   let showDeleteDialog = false;
   let showErrorDialog = false;
@@ -44,7 +42,7 @@
   let showSendNewsletterErrorDialog = false;
   let updateNewsletterSentStateErrorDialog = false;
   let saving = false;
-  /** @type {MenuButton} */
+  /** @type {any} */
   let menuButton;
 
   $: ({
@@ -52,11 +50,12 @@
     collection,
     collectionFile,
     originalEntry,
-    originalLocales,
-    currentLocales,
-    originalValues,
-    currentValues,
-    validities,
+    originalLocales = {},
+    currentLocales = {},
+    originalValues = {},
+    currentValues = {},
+    validities = {},
+    expanderStates,
   } = $entryDraft ?? /** @type {EntryDraft} */ ({}));
 
   $: ({
@@ -65,32 +64,23 @@
   } = $siteConfig ?? /** @type {SiteConfig} */ ({}));
   $: showSaveOptions = $backendName !== 'local' && typeof autoDeployEnabled === 'boolean';
   $: ({ defaultLocale } = (collectionFile ?? collection)?._i18n ?? defaultI18nConfig);
-  $: collectionLabel = collection?.label || collection?.name;
+  $: collectionName = collection?.name;
+  $: collectionLabel = collection?.label || collectionName;
   $: collectionLabelSingular = collection?.label_singular || collectionLabel;
   $: canPreview = (collectionFile ?? collection)?.editor?.preview ?? showPreviewPane;
   $: modified =
     isNew || !equal(originalLocales, currentLocales) || !equal(originalValues, currentValues);
-  $: errorCount = Object.values(validities)
+  $: errorCount = Object.values(validities ?? {})
     .map((validity) => Object.values(validity).map(({ valid }) => !valid))
     .flat(1)
     .filter(Boolean).length;
   $: associatedAssets =
     !!originalEntry && !!collection._assetFolder?.entryRelative
-      ? getAssociatedAssets(originalEntry, { relative: true })
+      ? getAssociatedAssets({ entry: originalEntry, collectionName, relative: true })
       : [];
-
-  /**
-   * Duplicate the current entry.
-   */
-  const duplicateDraft = async () => {
-    showDuplicateToast = true;
-    goto(`/collections/${collection?.name}/new`, { replaceState: true, notifyChange: false });
-    $entryDraft = {
-      .../** @type {EntryDraft} */ ($entryDraft ?? {}),
-      isNew: true,
-      originalEntry: undefined,
-    };
-  };
+  $: previewURL = originalEntry
+    ? getEntryPreviewURL(originalEntry, defaultLocale, collection, collectionFile)
+    : undefined;
 
   /**
    * Save the entry draft.
@@ -98,10 +88,26 @@
    * @param {boolean} [options.skipCI] - Whether to disable automatic deployments for the change.
    */
   const save = async ({ skipCI = undefined } = {}) => {
+    saving = true;
+
     try {
-      saving = true;
-      await saveEntry({ skipCI });
-      goBack(`/collections/${collection?.name}`);
+      const savedEntry = await saveEntry({ skipCI });
+
+      if ($prefs?.closeOnSave ?? true) {
+        goBack(`/collections/${collectionName}`);
+        $entryDraft = null;
+      } else {
+        if (isNew) {
+          // Update the URL
+          goto(`/collections/${collectionName}/entries/${savedEntry.subPath}`, {
+            replaceState: true,
+            notifyChange: false,
+          });
+        }
+
+        // Reset the draft
+        createDraft({ collection, collectionFile, originalEntry: savedEntry, expanderStates });
+      }
     } catch (/** @type {any} */ ex) {
       if (ex.message === 'validation_failed') {
         showValidationToast = true;
@@ -121,40 +127,51 @@
     variant="ghost"
     iconic
     aria-label={$_('cancel_editing')}
-    on:click={() => {
-      goBack(`/collections/${collection?.name}`);
+    keyShortcuts="Escape"
+    onclick={() => {
+      goBack(`/collections/${collectionName}`);
     }}
   >
-    <Icon slot="start-icon" name="arrow_back_ios_new" />
+    {#snippet startIcon()}
+      <Icon name="arrow_back_ios_new" />
+    {/snippet}
   </Button>
   <h2 role="none">
-    {#if isNew}
-      {$_('creating_x', { values: { name: collectionLabelSingular } })}
-    {:else}
-      {$_('editing_x_in_x', {
-        values: {
-          collection: collectionLabel,
-          // eslint-disable-next-line no-nested-ternary
-          entry: collectionFile
-            ? collectionFile.label || collectionFile.name
-            : originalEntry
-              ? truncate(
-                  formatSummary(collection, originalEntry, defaultLocale, { useTemplate: false }),
-                  40,
-                )
-              : '',
-        },
-      })}
-    {/if}
+    <strong role="none">
+      {#if isNew}
+        {$_('creating_x', { values: { name: collectionLabelSingular } })}
+      {:else}
+        {$_('editing_x_in_x', {
+          values: {
+            collection: collectionLabel,
+            entry: collectionFile
+              ? collectionFile.label || collectionFile.name
+              : originalEntry
+                ? getEntrySummary(collection, originalEntry)
+                : '',
+          },
+        })}
+      {/if}
+    </strong>
   </h2>
   <Spacer flex />
+  {#if previewURL}
+    <Button
+      variant="tertiary"
+      label={$_('view_on_live_site')}
+      onclick={() => {
+        window.open(previewURL);
+      }}
+    />
+  {/if}
   {#if !collectionFile && !isNew}
     <Button
       variant="ghost"
       label={$_('duplicate')}
       aria-label={$_('duplicate_entry')}
       disabled={collection?.create === false}
-      on:click={() => {
+      onclick={() => {
+        goto(`/collections/${collectionName}/new`, { replaceState: true, notifyChange: false });
         duplicateDraft();
       }}
     />
@@ -163,7 +180,7 @@
       label={$_('delete')}
       aria-label={$_('delete_entry')}
       disabled={collection?.delete === false}
-      on:click={() => {
+      onclick={() => {
         showDeleteDialog = true;
       }}
     />
@@ -175,39 +192,40 @@
     aria-label={$_('show_editor_options')}
     bind:this={menuButton}
   >
-    <Icon slot="start-icon" name="more_vert" />
-    <Menu slot="popup" aria-label={$_('editor_options')}>
-      <MenuItemCheckbox
-        label={$_('show_preview')}
-        checked={$entryEditorSettings.showPreview}
-        disabled={!canPreview}
-        on:change={() => {
-          entryEditorSettings.update((view) => ({
-            ...view,
-            showPreview: !view.showPreview,
-          }));
-        }}
-      />
-      <MenuItemCheckbox
-        label={$_('sync_scrolling')}
-        checked={$entryEditorSettings.syncScrolling}
-        disabled={!canPreview && Object.keys(currentValues).length === 1}
-        on:change={() => {
-          entryEditorSettings.update((view) => ({
-            ...view,
-            syncScrolling: !view.syncScrolling,
-          }));
-        }}
-      />
-      <Divider />
-      <MenuItem
-        label={$_('revert_all_changes')}
-        disabled={!modified}
-        on:click={() => {
-          revertChanges();
-        }}
-      />
-    </Menu>
+    {#snippet popup()}
+      <Menu aria-label={$_('editor_options')}>
+        <MenuItemCheckbox
+          label={$_('show_preview')}
+          checked={$entryEditorSettings?.showPreview}
+          disabled={!canPreview}
+          onChange={() => {
+            entryEditorSettings.update((view = {}) => ({
+              ...view,
+              showPreview: !view.showPreview,
+            }));
+          }}
+        />
+        <MenuItemCheckbox
+          label={$_('sync_scrolling')}
+          checked={$entryEditorSettings?.syncScrolling}
+          disabled={!canPreview && Object.keys(currentValues).length === 1}
+          onChange={() => {
+            entryEditorSettings.update((view = {}) => ({
+              ...view,
+              syncScrolling: !view.syncScrolling,
+            }));
+          }}
+        />
+        <Divider />
+        <MenuItem
+          label={$_('revert_all_changes')}
+          disabled={!modified}
+          onclick={() => {
+            revertChanges();
+          }}
+        />
+      </Menu>
+    {/snippet}
   </MenuButton>
   {#if showSaveOptions}
     <SplitButton
@@ -215,15 +233,21 @@
       label={$_(saving ? 'saving' : 'save')}
       disabled={!modified || saving}
       keyShortcuts="Accel+S"
-      on:click={() => save()}
+      onclick={() => {
+        save();
+      }}
     >
-      <Menu slot="popup">
+      {#snippet popup()}
         <!-- Show the opposite option: if automatic deployments are enabled, allow to disable it -->
-        <MenuItem
-          label={$_(autoDeployEnabled ? 'save_without_publishing' : 'save_and_publish')}
-          on:click={() => save({ skipCI: autoDeployEnabled })}
-        />
-      </Menu>
+        <Menu>
+          <MenuItem
+            label={$_(autoDeployEnabled ? 'save_without_publishing' : 'save_and_publish')}
+            onclick={() => {
+              save({ skipCI: autoDeployEnabled });
+            }}
+          />
+        </Menu>
+      {/snippet}
     </SplitButton>
   {:else}
     <Button
@@ -231,29 +255,25 @@
       label={$_(saving ? 'saving' : 'save')}
       disabled={!modified || saving}
       keyShortcuts="Accel+S"
-      on:click={() => save()}
+      onclick={() => {
+        save();
+      }}
     />
   {/if}
   {#if ($selectedCollection?.name === 'newsletter')}
-        <!--        <pre>{JSON.stringify(currentValues)}</pre>-->
-        <Button
-                variant="primary"
-                disabled={!!currentValues[defaultLocale].sent || !originalEntry}
-                label={$_('newsletter.send')}
-                on:click={async () => {
-                  showSendNewsletterDialog = true;
-            }}
-        >
-            <Icon slot="start-icon" name="send"/>
-        </Button>
-    {/if}
+    <!--        <pre>{JSON.stringify(currentValues)}</pre>-->
+    <Button
+      variant="primary"
+      disabled={!!currentValues[defaultLocale].sent || !originalEntry}
+      label={$_('newsletter.send')}
+      on:click={async () => {
+        showSendNewsletterDialog = true;
+      }}
+    >
+      <Icon slot="start-icon" name="send"/>
+    </Button>
+  {/if}
 </Toolbar>
-
-<Toast bind:show={showDuplicateToast}>
-  <Alert status="success">
-    {$_('entry_duplicated')}
-  </Alert>
-</Toast>
 
 <Toast bind:show={showValidationToast}>
   <Alert status="error">
@@ -276,7 +296,7 @@
   bind:open={showDeleteDialog}
   title={$_('delete_entry')}
   okLabel={$_('delete')}
-  on:ok={async () => {
+  onOk={async () => {
     if (originalEntry) {
       await deleteEntries(
         [originalEntry.id],
@@ -284,9 +304,9 @@
       );
     }
 
-    goBack(`/collections/${collection?.name}`);
+    goBack(`/collections/${collectionName}`);
   }}
-  on:close={() => {
+  onClose={() => {
     menuButton.focus();
   }}
 >
@@ -301,7 +321,7 @@
 <AlertDialog
   bind:open={showErrorDialog}
   title={$_('saving_entry.error.title')}
-  on:close={() => {
+  onClose={() => {
     menuButton.focus();
   }}
 >

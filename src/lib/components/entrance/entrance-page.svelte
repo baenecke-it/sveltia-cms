@@ -1,4 +1,5 @@
 <script>
+  import { Progressbar } from '@sveltia/ui';
   import DOMPurify from 'isomorphic-dompurify';
   import { marked } from 'marked';
   import { _ } from 'svelte-i18n';
@@ -7,21 +8,19 @@
   import { announcedPageStatus } from '$lib/services/app/navigation';
   import { inAuthPopup } from '$lib/services/backends/shared/auth';
   import { siteConfig, siteConfigError } from '$lib/services/config';
-  import { dataLoaded } from '$lib/services/contents';
+  import { dataLoaded, dataLoadedProgress } from '$lib/services/contents';
   import { prefs, prefsError } from '$lib/services/prefs';
   import { signInError, unauthenticated, user } from '$lib/services/user';
 
   $: $announcedPageStatus = $_('welcome_to_sveltia_cms');
 </script>
 
-<div role="none" class="container">
+<div role="none" class="container" inert={$user && $dataLoaded}>
   <div role="none" class="inner">
-    <img
-      loading="lazy"
-      src={$siteConfig?.logo_url || `data:image/svg+xml;base64,${btoa(SveltiaLogo)}`}
-      alt=""
-      class="logo"
-    />
+    {#if $siteConfig || $siteConfigError}
+      {@const logoURL = $siteConfig?.logo_url}
+      <img src={logoURL || `data:image/svg+xml;base64,${btoa(SveltiaLogo)}`} alt="" class="logo" />
+    {/if}
     <h1>Sveltia CMS</h1>
     {#if $siteConfigError}
       <div role="alert" class="message">
@@ -50,18 +49,29 @@
       <SignIn />
     {:else if !$dataLoaded}
       <div role="alert" class="message">{$_('loading_site_data')}</div>
+      {#if $dataLoadedProgress !== undefined}
+        <Progressbar now={$dataLoadedProgress} />
+      {/if}
     {/if}
   </div>
 </div>
 
 <style lang="scss">
   .container {
+    position: absolute;
+    inset: 0;
+    z-index: 101;
     flex: auto;
     display: flex;
     justify-content: center;
     align-items: center;
     gap: 16px;
     padding: 32px;
+    transition: filter 250ms;
+
+    &[inert] {
+      filter: opacity(0);
+    }
 
     .inner {
       display: flex;
@@ -70,7 +80,7 @@
       gap: 32px;
       min-width: 240px;
       max-width: 800px;
-      height: 240px;
+      min-height: 240px;
     }
 
     .logo {
@@ -86,10 +96,10 @@
       font-size: var(--sui-font-size-xxx-large);
     }
 
-    .message {
+    :global(.message) {
       margin: 0 0 16px;
       font-size: var(--sui-font-size-large);
-      font-weight: normal;
+      font-weight: var(--sui-font-weight-normal);
       text-align: center;
     }
 

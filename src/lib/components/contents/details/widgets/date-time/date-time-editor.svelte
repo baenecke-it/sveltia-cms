@@ -5,10 +5,15 @@
   @todo Replace the native `<input>` with a custom component.
 -->
 <script>
+  import { Button } from '@sveltia/ui';
+  import { _ } from 'svelte-i18n';
   import {
+    getCurrentDateTime,
     getCurrentValue,
+    getDate,
     getInputValue,
-  } from '$lib/components/contents/details/widgets/date-time/helper';
+    parseDateTimeConfig,
+  } from '$lib/services/contents/widgets/date-time/helper';
 
   /**
    * @type {LocaleCode}
@@ -16,7 +21,7 @@
   // svelte-ignore unused-export-let
   export let locale;
   /**
-   * @type {string}
+   * @type {FieldKeyPath}
    */
   // svelte-ignore unused-export-let
   export let keyPath;
@@ -50,13 +55,7 @@
    */
   export let invalid = false;
 
-  $: ({
-    // Widget-specific options
-    date_format: dateFormat,
-    time_format: timeFormat,
-  } = fieldConfig);
-  $: dateOnly = timeFormat === false;
-  $: timeOnly = dateFormat === false;
+  $: ({ dateOnly, timeOnly, utc } = parseDateTimeConfig(fieldConfig));
 
   /**
    * @type {string}
@@ -79,10 +78,17 @@
    * Update {@link currentValue} based on {@link inputValue}.
    */
   const setCurrentValue = () => {
-    const _currentValue = getCurrentValue(inputValue, fieldConfig);
+    const _currentValue = getCurrentValue(inputValue, currentValue, fieldConfig);
 
     // Avoid a cycle dependency & infinite loop
-    if (_currentValue !== undefined && _currentValue !== currentValue) {
+    if (
+      _currentValue !== undefined &&
+      _currentValue !== currentValue &&
+      // Compare the actual date/time: if a user edits an existing entry in a different location
+      // than where it was originally written, `inputValue` and `_currentValue` may shift to the
+      // current time zone, but the epoch won’t change. Don’t update `currentValue` in that case.
+      Number(getDate(_currentValue, fieldConfig)) !== Number(getDate(currentValue, fieldConfig))
+    ) {
       currentValue = _currentValue;
     }
   };
@@ -100,11 +106,7 @@
 
 <div role="none">
   <input
-    {...{
-      // @see https://github.com/sveltejs/svelte/issues/3921
-      // eslint-disable-next-line no-nested-ternary
-      type: dateOnly ? 'date' : timeOnly ? 'time' : 'datetime-local',
-    }}
+    type={dateOnly ? 'date' : timeOnly ? 'time' : 'datetime-local'}
     bind:value={inputValue}
     {readonly}
     aria-readonly={readonly}
@@ -113,26 +115,41 @@
     aria-labelledby="{fieldId}-label"
     aria-errormessage="{fieldId}-error"
   />
+  {#if utc}
+    <span role="none" class="utc">UTC</span>
+  {/if}
+  {#if !readonly}
+    <Button
+      variant="tertiary"
+      label={$_(dateOnly ? 'today' : 'now')}
+      onclick={() => {
+        currentValue = /** @type {string} */ (
+          getCurrentValue(getCurrentDateTime(fieldConfig), '', fieldConfig)
+        );
+      }}
+    />
+  {/if}
+  {#if !readonly && !required}
+    <Button
+      variant="tertiary"
+      label={$_('clear')}
+      disabled={!currentValue}
+      onclick={() => {
+        currentValue = '';
+      }}
+    />
+  {/if}
 </div>
 
 <style lang="scss">
   div {
     display: flex;
     align-items: center;
+  }
 
-    input {
-      margin-right: auto;
-      color: inherit;
-      background-color: transparent;
-      font-family: var(--sui-textbox-font-family);
-
-      &:disabled {
-        opacity: 0.4;
-      }
-    }
-
-    :global(button) {
-      margin: 4px;
-    }
+  .utc {
+    margin: 0 8px;
+    color: var(--sui-secondary-foreground-color);
+    font-size: var(--sui-font-size-small);
   }
 </style>

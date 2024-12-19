@@ -1,14 +1,18 @@
 <script>
-  import { Divider, Icon, Menu, MenuButton, MenuItem, Spacer } from '@sveltia/ui';
+  import { Icon, Menu, MenuButton, MenuItem, Spacer } from '@sveltia/ui';
   import { generateElementId } from '@sveltia/utils/element';
   import { escapeRegExp } from '@sveltia/utils/string';
   import equal from 'fast-deep-equal';
   import DOMPurify from 'isomorphic-dompurify';
   import { marked } from 'marked';
+  import { setContext } from 'svelte';
   import { _ } from 'svelte-i18n';
+  import { writable } from 'svelte/store';
   import { defaultI18nConfig } from '$lib/services/contents/i18n';
-  import { entryDraft, revertChanges } from '$lib/services/contents/editor';
+  import { revertChanges } from '$lib/services/contents/draft/update';
+  import { entryDraft } from '$lib/services/contents/draft';
   import { editors } from '$lib/components/contents/details/widgets';
+  import TranslateButton from '$lib/components/contents/details/editor/translate-button.svelte';
   import CopyMenuItems from '$lib/components/contents/details/editor/copy-menu-items.svelte';
 
   /**
@@ -16,7 +20,7 @@
    */
   export let locale;
   /**
-   * @type {string}
+   * @type {FieldKeyPath}
    */
   export let keyPath;
   /**
@@ -37,10 +41,10 @@
       ALLOWED_ATTR: ['href'],
     });
 
-  /** @type {MenuButton} */
-  let menuButton;
+  /** @type {import('svelte/store').Writable<import('svelte').Component>} */
+  const extraHint = writable();
 
-  // @todo Save & restore draft from local storage.
+  setContext('field-editor', { extraHint });
 
   $: ({
     name: fieldName,
@@ -60,7 +64,8 @@
     fieldConfig
   ));
   $: type =
-    widgetName === 'string' ? /** @type {StringField} */ (fieldConfig).type ?? 'text' : undefined;
+    // prettier-ignore
+    widgetName === 'string' ? (/** @type {StringField} */ (fieldConfig).type ?? 'text') : undefined;
   $: allowPrefix = ['string'].includes(widgetName);
   $: prefix = allowPrefix ? /** @type {StringField} */ (fieldConfig).prefix : undefined;
   $: suffix = allowPrefix ? /** @type {StringField} */ (fieldConfig).suffix : undefined;
@@ -90,13 +95,13 @@
   // Multiple values are flattened in the value map object
   $: currentValue = isList
     ? Object.entries(currentValues[locale])
-        .filter(([_keyPath]) => _keyPath.match(keyPathRegex))
+        .filter(([_keyPath]) => keyPathRegex.test(_keyPath))
         .map(([, val]) => val)
         .filter((val) => val !== undefined)
     : currentValues[locale][keyPath];
   $: originalValue = isList
     ? Object.entries(originalValues[locale])
-        .filter(([_keyPath]) => _keyPath.match(keyPathRegex))
+        .filter(([_keyPath]) => keyPathRegex.test(_keyPath))
         .map(([, val]) => val)
         .filter((val) => val !== undefined)
     : originalValues[locale][keyPath];
@@ -119,11 +124,14 @@
     hidden={widgetName === 'compute'}
   >
     <header role="none">
-      {#if !readonly && required}
-        <div class="required" aria-hidden="true">{$_('required')}</div>
-      {/if}
       <h4 role="none" id="{fieldId}-label">{fieldLabel}</h4>
+      {#if !readonly && required}
+        <div class="required" aria-label={$_('required')}>*</div>
+      {/if}
       <Spacer flex />
+      {#if canCopy && ['markdown', 'string', 'text', 'list', 'object'].includes(widgetName)}
+        <TranslateButton size="small" {locale} {otherLocales} {keyPath} />
+      {/if}
       {#if canCopy || canRevert}
         <MenuButton
           variant="ghost"
@@ -131,32 +139,23 @@
           iconic
           popupPosition="bottom-right"
           aria-label={$_('show_field_options')}
-          bind:this={menuButton}
         >
-          <Icon slot="start-icon" name="more_vert" />
-          <Menu slot="popup" aria-label={$_('field_options')}>
-            {#if canCopy}
-              {#if ['markdown', 'string', 'text', 'list', 'object'].includes(widgetName)}
-                <CopyMenuItems anchor={menuButton} {keyPath} {locale} translate={true} />
-                {#if otherLocales.length > 1}
-                  <Divider />
-                {/if}
+          {#snippet popup()}
+            <Menu aria-label={$_('field_options')}>
+              {#if canCopy}
+                <CopyMenuItems {locale} {otherLocales} {keyPath} />
               {/if}
-              <CopyMenuItems anchor={menuButton} {keyPath} {locale} />
-            {/if}
-            {#if canCopy && canRevert}
-              <Divider />
-            {/if}
-            {#if canRevert}
-              <MenuItem
-                label={$_('revert_changes')}
-                disabled={equal(currentValue, originalValue)}
-                on:click={() => {
-                  revertChanges(locale, keyPath);
-                }}
-              />
-            {/if}
-          </Menu>
+              {#if canRevert}
+                <MenuItem
+                  label={$_('revert_changes')}
+                  disabled={equal(currentValue, originalValue)}
+                  onclick={() => {
+                    revertChanges(locale, keyPath);
+                  }}
+                />
+              {/if}
+            </Menu>
+          {/snippet}
         </MenuButton>
       {/if}
     </header>
@@ -169,6 +168,24 @@
           <div role="none">
             <Icon name="error" />
             {$_('validation.value_missing')}
+          </div>
+        {/if}
+        {#if validity.tooShort}
+          {@const { minlength } = (() => /** @type {StringField | TextField} */ (fieldConfig))()}
+          <div role="none">
+            <Icon name="error" />
+            {$_(minlength === 1 ? 'validation.too_short.one' : 'validation.too_short.many', {
+              values: { min: minlength },
+            })}
+          </div>
+        {/if}
+        {#if validity.tooLong}
+          {@const { maxlength } = (() => /** @type {StringField | TextField} */ (fieldConfig))()}
+          <div role="none">
+            <Icon name="error" />
+            {$_(maxlength === 1 ? 'validation.too_long.one' : 'validation.too_long.many', {
+              values: { max: maxlength },
+            })}
           </div>
         {/if}
         {#if validity.rangeUnderflow}
@@ -217,8 +234,8 @@
       {#if !(widgetName in editors)}
         <div role="none">{$_('unsupported_widget_x', { values: { name: widgetName } })}</div>
       {:else if isList}
-        <svelte:component
-          this={editors[widgetName]}
+        {@const Editor = editors[widgetName]}
+        <Editor
           {locale}
           {keyPath}
           {fieldId}
@@ -236,8 +253,8 @@
         {#if prefix}
           <div role="none" class="prefix">{prefix}</div>
         {/if}
-        <svelte:component
-          this={editors[widgetName]}
+        {@const Editor = editors[widgetName]}
+        <Editor
           {locale}
           {keyPath}
           {fieldId}
@@ -256,8 +273,13 @@
         {/if}
       {/if}
     </div>
-    {#if !readonly && hint}
-      <p class="hint">{@html sanitize(hint)}</p>
+    {#if !readonly && (hint || $extraHint)}
+      <div role="none" class="footer">
+        {#if hint}
+          <p class="hint">{@html sanitize(hint)}</p>
+        {/if}
+        <svelte:component this={$extraHint} {fieldConfig} {currentValue} />
+      </div>
     {/if}
   </section>
 {/if}
@@ -283,30 +305,39 @@
       max-width: 768px;
     }
 
+    &:global(.highlight) {
+      @media (prefers-reduced-motion) {
+        outline-width: 4px !important;
+        outline-color: var(--sui-primary-accent-color-translucent);
+        outline-offset: -4px;
+      }
+    }
+
     &:global(.highlight > *) {
       animation: highlight 750ms 2;
+
+      @media (prefers-reduced-motion) {
+        animation: none;
+      }
     }
   }
 
   header {
     display: flex;
     align-items: center;
-    gap: 8px;
     margin-bottom: 8px;
+    height: var(--sui-button-small-height);
 
     h4 {
       font-size: var(--sui-font-size-small);
-      font-weight: 600;
+      font-weight: var(--sui-font-weight-bold);
       color: var(--sui-secondary-foreground-color);
     }
 
     .required {
-      border: 1px solid var(--sui-error-border-color);
-      border-radius: 4px;
-      padding: 2px 4px;
+      margin: 2px 0 0 2px;
       color: var(--sui-error-foreground-color);
-      background-color: var(--sui-error-background-color);
-      font-size: var(--sui-font-size-x-small);
+      font-size: var(--sui-font-size-large);
     }
   }
 
@@ -316,6 +347,7 @@
 
     div {
       display: flex;
+      align-items: center;
       gap: 4px;
       margin: 4px 0;
 
@@ -334,16 +366,6 @@
       gap: 4px;
     }
 
-    :global(input[type='color']),
-    :global(input[type='date']),
-    :global(input[type='datetime-local']),
-    :global(input[type='time']),
-    :global(input[type='number']) {
-      outline: 0;
-      border: 0;
-      color: inherit;
-    }
-
     :global(input[type='text']),
     :global(textarea) {
       width: 100%;
@@ -351,10 +373,13 @@
 
     :global(input[type='color']),
     :global(input[type='number']) {
-      background-color: var(--sui-textbox-background-color);
+      outline: 0;
       border-width: 1px;
       border-color: var(--sui-primary-border-color);
       border-radius: var(--sui-control-medium-border-radius);
+      height: var(--sui-button-medium-height);
+      color: inherit;
+      background-color: var(--sui-textbox-background-color);
     }
 
     :global(input[type='file']),
@@ -366,9 +391,30 @@
     :global(input[type='date']),
     :global(input[type='datetime-local']),
     :global(input[type='time']) {
+      outline: 0;
+      margin: var(--sui-focus-ring-width);
+      border-width: var(--sui-textbox-border-width, 1px);
+      border-color: var(--sui-primary-border-color);
+      border-radius: var(--sui-control-medium-border-radius);
+      padding: var(--sui-textbox-singleline-padding);
       width: auto;
+      height: var(--sui-textbox-height);
+      color: var(--sui-textbox-foreground-color);
+      background-color: var(--sui-textbox-background-color);
+      font-family: var(--sui-textbox-font-family);
+      font-size: var(--sui-textbox-font-size);
       text-transform: uppercase;
-      background-color: transparent;
+
+      &:disabled {
+        opacity: 0.4;
+      }
+    }
+
+    :global(input[type='color'][aria-invalid='true']),
+    :global(input[type='date'][aria-invalid='true']),
+    :global(input[type='datetime-local'][aria-invalid='true']),
+    :global(input[type='time'][aria-invalid='true']) {
+      border-color: var(--sui-error-foreground-color);
     }
   }
 
@@ -381,12 +427,20 @@
   }
 
   .comment {
-    margin: 4px;
+    margin-block: 4px;
     line-height: var(--sui-line-height-compact);
   }
 
+  .footer {
+    display: flex;
+    gap: 16px;
+    justify-content: flex-end;
+    margin-top: 4px;
+  }
+
   .hint {
-    margin: 4px 4px 0;
+    flex: auto;
+    margin: 0;
     font-size: var(--sui-font-size-small);
     line-height: var(--sui-line-height-compact);
     opacity: 0.75;

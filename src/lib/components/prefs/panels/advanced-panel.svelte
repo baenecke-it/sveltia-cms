@@ -1,14 +1,25 @@
 <script>
   import { Switch, TabPanel, TextInput } from '@sveltia/ui';
-  import { createEventDispatcher } from 'svelte';
   import { _ } from 'svelte-i18n';
-  import { prefs } from '$lib/services/prefs';
   import { siteConfig } from '$lib/services/config';
+  import { prefs } from '$lib/services/prefs';
+
+  /**
+   * Custom `change` event handler.
+   * @type {((detail: { message: string }) => void) | undefined}
+   */
+  export let onChange = undefined;
 
   $: ({ backend: { automatic_deployments: autoDeployEnabled = undefined } = {} } =
     $siteConfig ?? /** @type {SiteConfig} */ ({}));
 
-  const dispatch = createEventDispatcher();
+  $: devModeEnabled = $prefs.devModeEnabled ?? false;
+
+  $: {
+    if ($prefs.devModeEnabled !== devModeEnabled) {
+      $prefs.devModeEnabled = devModeEnabled;
+    }
+  }
 </script>
 
 <TabPanel id="prefs-tab-advanced">
@@ -25,8 +36,8 @@
           bind:value={$prefs.deployHookURL}
           flex
           label={$_('prefs.advanced.deploy_hook.field_label')}
-          on:change={() => {
-            dispatch('change', {
+          onchange={() => {
+            onChange?.({
               message: $_(
                 $prefs.deployHookURL
                   ? 'prefs.advanced.deploy_hook.url_saved'
@@ -47,7 +58,7 @@
     </p>
     <div role="none">
       <Switch
-        bind:checked={$prefs.devModeEnabled}
+        bind:checked={devModeEnabled}
         label={$_('prefs.advanced.developer_mode.switch_label')}
       />
     </div>

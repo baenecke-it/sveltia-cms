@@ -2,7 +2,7 @@
   import { SearchBar } from '@sveltia/ui';
   import { _ } from 'svelte-i18n';
   import { goBack, goto, parseLocation } from '$lib/services/app/navigation';
-  import { selectedCollection } from '$lib/services/contents';
+  import { selectedCollection } from '$lib/services/contents/collection';
   import { searchTerms } from '$lib/services/search';
 
   /**
@@ -28,7 +28,7 @@
    */
   let wrapper;
   /**
-   * @type {SearchBar}
+   * @type {any}
    */
   let searchBar;
 
@@ -47,7 +47,7 @@
     showInlineLabel={true}
     aria-label={$_('search_placeholder')}
     --sui-textbox-placeholder-text-align="center"
-    on:input={({ target }) => {
+    oninput={({ target }) => {
       // @todo Implement quick search dropdown.
       navigate(/** @type {HTMLInputElement} */ (target).value.trim());
     }}

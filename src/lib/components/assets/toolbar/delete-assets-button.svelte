@@ -1,6 +1,5 @@
 <script>
   import { Button, ConfirmationDialog } from '@sveltia/ui';
-  import { createEventDispatcher } from 'svelte';
   import { _ } from 'svelte-i18n';
   import { deleteAssets } from '$lib/services/assets/data';
 
@@ -16,8 +15,12 @@
    * @type {string}
    */
   export let dialogDescription = '';
+  /**
+   * Custom `delete` event handler.
+   * @type {(() => void) | undefined}
+   */
+  export let onDelete = undefined;
 
-  const dispatch = createEventDispatcher();
   let showDialog = false;
 </script>
 
@@ -26,7 +29,7 @@
   disabled={!assets.length}
   label={$_('delete')}
   aria-label={buttonDescription}
-  on:click={() => {
+  onclick={() => {
     showDialog = true;
   }}
 />
@@ -35,9 +38,9 @@
   bind:open={showDialog}
   title={assets.length === 1 ? $_('delete_asset') : $_('delete_assets')}
   okLabel={$_('delete')}
-  on:ok={() => {
+  onOk={() => {
     deleteAssets(assets);
-    dispatch('delete');
+    onDelete?.();
   }}
 >
   {dialogDescription}

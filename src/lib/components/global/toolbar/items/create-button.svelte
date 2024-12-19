@@ -5,6 +5,11 @@
   import { goto } from '$lib/services/app/navigation';
   import { showUploadAssetsDialog } from '$lib/services/assets/view';
   import { siteConfig } from '$lib/services/config';
+
+  $: folderCollections = ($siteConfig?.collections ?? []).filter(
+    ({ folder, create = false, hide = false, divider = false }) =>
+      typeof folder === 'string' && create && !hide && !divider,
+  );
 </script>
 
 <MenuButton
@@ -13,35 +18,30 @@
   popupPosition="bottom-right"
   aria-label={$_('create_entry_or_assets')}
 >
-  <Icon slot="start-icon" name="add" />
-  <Menu slot="popup" aria-label={$_('create_entry_or_assets')}>
-    {#each $siteConfig?.collections ?? [] as collection (collection.name)}
-      {@const {
-        name,
-        label,
-        label_singular: labelSingular,
-        folder,
-        hide = false,
-        create = false,
-      } = collection}
-      {#if folder && !hide}
-        <MenuItem
-          label={labelSingular || label || name}
-          disabled={!create}
-          on:click={() => {
-            goto(`/collections/${name}/new`);
-          }}
-        />
+  {#snippet endIcon()}
+    <Icon name="add" />
+  {/snippet}
+  {#snippet popup()}
+    <Menu aria-label={$_('create_entry_or_assets')}>
+      {#if folderCollections.length}
+        {#each folderCollections as { name, label, label_singular: labelSingular } (name)}
+          <MenuItem
+            label={labelSingular || label || name}
+            onclick={() => {
+              goto(`/collections/${name}/new`);
+            }}
+          />
+        {/each}
+        <Divider />
       {/if}
-    {/each}
-    <Divider />
-    <MenuItem
-      label={$_('assets')}
-      on:click={async () => {
-        goto('/assets');
-        await sleep(100);
-        $showUploadAssetsDialog = true;
-      }}
-    />
-  </Menu>
+      <MenuItem
+        label={$_('assets')}
+        onclick={async () => {
+          goto('/assets');
+          await sleep(100);
+          $showUploadAssetsDialog = true;
+        }}
+      />
+    </Menu>
+  {/snippet}
 </MenuButton>

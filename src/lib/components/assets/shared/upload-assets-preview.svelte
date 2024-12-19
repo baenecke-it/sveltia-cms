@@ -1,8 +1,9 @@
 <script>
   import { Button, Icon } from '@sveltia/ui';
+  import { getPathInfo } from '@sveltia/utils/file';
   import { _, locale as appLocale } from 'svelte-i18n';
-  import Image from '$lib/components/common/image.svelte';
   import { formatSize } from '$lib/services/utils/file';
+  import Image from '$lib/components/common/image.svelte';
 
   /**
    * @type {File[]}
@@ -13,7 +14,7 @@
 <div role="none" class="files">
   {#each files as file, index}
     {@const { name, type, size } = file}
-    {@const [, extension = ''] = name.match(/\.([^.]+)$/) ?? []}
+    {@const { extension = '' } = getPathInfo(name)}
     <div role="none" class="file">
       {#if type.startsWith('image/')}
         <Image src={URL.createObjectURL(file)} variant="icon" checkerboard={true} />
@@ -23,7 +24,7 @@
         </span>
       {/if}
       <div role="none" class="meta">
-        <div role="none" class="name">{name}</div>
+        <div role="none" class="name">{name.normalize()}</div>
         <div role="none" class="size">
           {$appLocale ? formatSize(size) : ''}
           ·
@@ -35,7 +36,7 @@
         iconic
         aria-label={$_('remove')}
         hidden={files.length === 1}
-        on:click={(event) => {
+        onclick={(event) => {
           event.stopPropagation();
           files.splice(index, 1);
           files = files;
@@ -77,6 +78,7 @@
       display: flex;
       flex-direction: column;
       gap: 4px;
+      text-align: left;
 
       .size {
         font-size: var(--sui-font-size-small);

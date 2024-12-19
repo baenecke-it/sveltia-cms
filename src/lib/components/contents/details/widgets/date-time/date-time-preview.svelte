@@ -4,15 +4,16 @@
   @see https://decapcms.org/docs/widgets/#datetime
 -->
 <script>
-  import { getDate } from '$lib/components/contents/details/widgets/date-time/helper';
   import { getCanonicalLocale } from '$lib/services/contents/i18n';
+  import { getDate, parseDateTimeConfig } from '$lib/services/contents/widgets/date-time/helper';
+  import { dateFormatOptions, timeFormatOptions } from '$lib/services/utils/date';
 
   /**
    * @type {LocaleCode}
    */
   export let locale;
   /**
-   * @type {string}
+   * @type {FieldKeyPath}
    */
   // svelte-ignore unused-export-let
   export let keyPath;
@@ -25,26 +26,16 @@
    */
   export let currentValue;
 
-  $: ({
-    // i18n,
-    // Widget-specific options
-    date_format: dateFormat,
-    time_format: timeFormat,
-    picker_utc: pickerUTC = false,
-  } = fieldConfig);
-  $: dateOnly = timeFormat === false;
-  $: timeOnly = dateFormat === false;
+  $: ({ dateOnly, timeOnly, utc } = parseDateTimeConfig(fieldConfig));
   $: date = getDate(currentValue, fieldConfig);
   $: canonicalLocale = getCanonicalLocale(locale);
 
-  /** @type {Intl.DateTimeFormatOptions} */
-  const dateFormatOptions = { year: 'numeric', month: 'short', day: 'numeric' };
-  /** @type {Intl.DateTimeFormatOptions} */
-  const timeFormatOptions = { hour: 'numeric', minute: 'numeric', hour12: true };
+  const dateRegex = /^\d{4}-[01]\d-[0-3]\d$/;
+  const timeSuffixRegex = /T00:00(?::00)?(?:\.000)?Z$/;
 </script>
 
 {#if date}
-  <p>
+  <p lang={locale} dir="auto">
     {#if timeOnly}
       {date.toLocaleTimeString(canonicalLocale, timeFormatOptions)}
     {:else}
@@ -53,9 +44,9 @@
           {date.toLocaleDateString(canonicalLocale, {
             ...dateFormatOptions,
             timeZone:
-              pickerUTC ||
-              (dateOnly && !!currentValue?.match(/^\d{4}-[01]\d-[0-3]\d$/)) ||
-              (dateOnly && !!currentValue?.match(/T00:00(?::00)?(?:\.000)?Z$/))
+              utc ||
+              (dateOnly && !!currentValue?.match(dateRegex)) ||
+              (dateOnly && !!currentValue?.match(timeSuffixRegex))
                 ? 'UTC'
                 : undefined,
           })}
@@ -63,10 +54,14 @@
           {date.toLocaleString(canonicalLocale, {
             ...dateFormatOptions,
             ...timeFormatOptions,
-            timeZone: pickerUTC ? 'UTC' : undefined,
+            timeZone: utc ? 'UTC' : undefined,
+            timeZoneName: utc ? undefined : 'short',
           })}
         {/if}
       </time>
+    {/if}
+    {#if utc}
+      UTC
     {/if}
   </p>
 {/if}

@@ -1,10 +1,18 @@
 <script>
   import { Icon, Listbox, Option } from '@sveltia/ui';
+  import { sleep } from '@sveltia/utils/misc';
   import { _, locale as appLocale } from 'svelte-i18n';
   import { goto } from '$lib/services/app/navigation';
-  import { allAssetFolders, selectedAssetFolder } from '$lib/services/assets';
+  import {
+    allAssetFolders,
+    allAssets,
+    getAssetsByFolder,
+    selectedAssetFolder,
+  } from '$lib/services/assets';
   import { getFolderLabelByCollection } from '$lib/services/assets/view';
-  import { getCollection } from '$lib/services/contents';
+  import { getCollection } from '$lib/services/contents/collection';
+
+  $: numberFormatter = Intl.NumberFormat($appLocale ?? undefined);
 
   $: folders = [
     {
@@ -24,29 +32,29 @@
       <!-- Can’t upload assets if collection assets are saved at entry-relative paths -->
       {@const uploadDisabled = entryRelative}
       {@const selected =
-        (!internalPath && !$selectedAssetFolder) ||
+        (internalPath === undefined && !$selectedAssetFolder) ||
         internalPath === $selectedAssetFolder?.internalPath}
       <Option
         {selected}
         label={$appLocale ? getFolderLabelByCollection(collectionName) : ''}
-        on:select={() => {
+        onSelect={() => {
           goto(internalPath ? `/assets/${internalPath}` : '/assets');
         }}
-        on:dragover={(event) => {
+        ondragover={(event) => {
           event.preventDefault();
 
           if (uploadDisabled) {
             return;
           }
 
-          if (!internalPath || selected) {
+          if (internalPath === undefined || selected) {
             /** @type {DataTransfer} */ (event.dataTransfer).dropEffect = 'none';
           } else {
             /** @type {DataTransfer} */ (event.dataTransfer).dropEffect = 'move';
             /** @type {HTMLElement} */ (event.target).classList.add('dragover');
           }
         }}
-        on:dragleave={(event) => {
+        ondragleave={(event) => {
           event.preventDefault();
 
           if (uploadDisabled) {
@@ -55,7 +63,7 @@
 
           /** @type {HTMLElement} */ (event.target).classList.remove('dragover');
         }}
-        on:dragend={(event) => {
+        ondragend={(event) => {
           event.preventDefault();
 
           if (uploadDisabled) {
@@ -64,7 +72,7 @@
 
           /** @type {HTMLElement} */ (event.target).classList.remove('dragover');
         }}
-        on:drop={(event) => {
+        ondrop={(event) => {
           event.preventDefault();
 
           if (uploadDisabled) {
@@ -76,7 +84,25 @@
           // confirmation dialog.
         }}
       >
-        <Icon slot="start-icon" name={collection?.icon || 'folder'} />
+        {#snippet startIcon()}
+          <Icon name={collection?.icon || 'folder'} />
+        {/snippet}
+        {#snippet endIcon()}
+          {#key $allAssets}
+            {#await sleep(0) then}
+              {@const count = (internalPath ? getAssetsByFolder(internalPath) : $allAssets).length}
+              <span
+                class="count"
+                aria-label="({$_(
+                  count > 1 ? 'many_assets' : count === 1 ? 'one_asset' : 'no_assets',
+                  { values: { count } },
+                )})"
+              >
+                {numberFormatter.format(count)}
+              </span>
+            {/await}
+          {/key}
+        {/snippet}
       </Option>
     {/each}
   </Listbox>

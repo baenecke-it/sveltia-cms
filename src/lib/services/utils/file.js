@@ -1,6 +1,15 @@
-import { escapeRegExp } from '@sveltia/utils/string';
+import { getPathInfo } from '@sveltia/utils/file';
+import { compare, escapeRegExp } from '@sveltia/utils/string';
 import { _, locale as appLocale } from 'svelte-i18n';
 import { get } from 'svelte/store';
+
+/**
+ * Check if the user’s browsing environment supports drag & drop operation. Assume drag & drop is
+ * supported if the pointer is mouse (on desktop).
+ * @returns {boolean} Result.
+ */
+export const canDragDrop = () =>
+  (globalThis.matchMedia('(pointer: fine)')?.matches ?? false) && 'ondrop' in globalThis;
 
 /**
  * Format the given file size in bytes, KB, MB, GB or TB.
@@ -48,21 +57,21 @@ export const renameIfNeeded = (name, otherNames) => {
     return name;
   }
 
-  const [, slug, extension] = name.match(/(.+?)(?:\.([a-zA-Z0-9]+?))?$/) ?? [];
+  const { filename: slug, extension } = getPathInfo(name);
 
   const regex = new RegExp(
-    `^${escapeRegExp(slug)}(?:-(\\d+?))?${extension ? `\\.${extension}` : ''}$`,
+    `^${escapeRegExp(slug)}(?:-(?<num>\\d+?))?${extension ? `\\.${extension}` : ''}$`,
   );
 
   const dupName = otherNames
-    .sort((a, b) => a.split('.')[0].localeCompare(b.split('.')[0]))
-    .findLast((p) => p.match(regex));
+    .sort((a, b) => compare(a.split('.')[0], b.split('.')[0]))
+    .findLast((p) => regex.test(p));
 
   if (!dupName) {
     return name;
   }
 
-  const number = Number((dupName.match(regex) ?? [])[1] ?? 0) + 1;
+  const number = Number(dupName.match(regex)?.groups?.num ?? 0) + 1;
 
   return `${slug}-${number}${extension ? `.${extension}` : ''}`;
 };

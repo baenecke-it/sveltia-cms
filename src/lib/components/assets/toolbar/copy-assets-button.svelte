@@ -1,5 +1,5 @@
 <script>
-  import { Alert, Icon, Menu, MenuButton, MenuItem, Toast } from '@sveltia/ui';
+  import { Alert, Menu, MenuButton, MenuItem, Toast } from '@sveltia/ui';
   import { isTextFileType } from '@sveltia/utils/file';
   import { _ } from 'svelte-i18n';
   import { convertImage } from '$lib/services/utils/media';
@@ -124,30 +124,36 @@
   })();
 </script>
 
-<MenuButton variant="ghost" disabled={!assets.length} label={$_('copy')}>
-  <Menu slot="popup" aria-label={$_('copy_options')}>
-    <MenuItem
-      label={singleAsset ? $_('public_url') : $_('public_urls')}
-      disabled={!publicURLs.length}
-      on:click={() => {
-        doCopyAction(copyPublicURLs, $_('asset_url_copied'), $_('asset_urls_copied'));
-      }}
-    />
-    <MenuItem
-      label={singleAsset ? $_('file_path') : $_('file_paths')}
-      on:click={() => {
-        doCopyAction(copyFilePaths, $_('asset_path_copied'), $_('asset_paths_copied'));
-      }}
-    />
-    <MenuItem
-      label={$_('file_data')}
-      disabled={!canCopyFileData}
-      on:click={() => {
-        doCopyAction(copyFileData, $_('asset_data_copied'), $_('asset_data_copied'));
-      }}
-    />
-  </Menu>
-  <Icon slot="end-icon" name="arrow_drop_down" />
+<MenuButton
+  variant="ghost"
+  disabled={!assets.length}
+  label={$_('copy')}
+  popupPosition="bottom-right"
+>
+  {#snippet popup()}
+    <Menu aria-label={$_('copy_options')}>
+      <MenuItem
+        label={singleAsset ? $_('public_url') : $_('public_urls')}
+        disabled={!publicURLs.length}
+        onclick={() => {
+          doCopyAction(copyPublicURLs, $_('asset_url_copied'), $_('asset_urls_copied'));
+        }}
+      />
+      <MenuItem
+        label={singleAsset ? $_('file_path') : $_('file_paths')}
+        onclick={() => {
+          doCopyAction(copyFilePaths, $_('asset_path_copied'), $_('asset_paths_copied'));
+        }}
+      />
+      <MenuItem
+        label={$_('file_data')}
+        disabled={!canCopyFileData}
+        onclick={() => {
+          doCopyAction(copyFileData, $_('asset_data_copied'), $_('asset_data_copied'));
+        }}
+      />
+    </Menu>
+  {/snippet}
 </MenuButton>
 
 <Toast bind:show={toast.show}>

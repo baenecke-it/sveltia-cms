@@ -1,11 +1,15 @@
 <script>
   import { Button } from '@sveltia/ui';
+  import { getPathInfo } from '@sveltia/utils/file';
   import mime from 'mime';
   import { _, locale as appLocale } from 'svelte-i18n';
   import AssetPreview from '$lib/components/assets/shared/asset-preview.svelte';
   import { goto } from '$lib/services/app/navigation';
-  import { getAssetDetails } from '$lib/services/assets';
-  import { getCollection } from '$lib/services/contents';
+  import { getAssetDetails, isMediaKind } from '$lib/services/assets';
+  import { getFilesByEntry } from '$lib/services/contents/collection/files';
+  import { getAssociatedCollections } from '$lib/services/contents/entry';
+  import { getEntrySummary } from '$lib/services/contents/entry/summary';
+  import { dateFormatOptions, timeFormatOptions } from '$lib/services/utils/date';
   import { formatSize } from '$lib/services/utils/file';
   import { formatDuration } from '$lib/services/utils/media';
 
@@ -19,22 +23,26 @@
    */
   export let showPreview = false;
 
-  $: ({ path, size, kind, commitAuthor, commitDate, repoFileURL } = asset);
-  $: [, extension = ''] = path.match(/\.([^.]+)$/) ?? [];
-  $: canPreview = ['image', 'audio', 'video'].includes(kind) || path.endsWith('.pdf');
+  $: ({ path, size, kind, commitAuthor, commitDate } = asset);
+  $: ({ extension = '' } = getPathInfo(path));
+  $: canPreview = isMediaKind(kind) || path.endsWith('.pdf');
 
   /**
    * @type {string | undefined}
    */
-  let publicURL;
+  let publicURL = undefined;
+  /**
+   * @type {string | undefined}
+   */
+  let repoBlobURL = undefined;
   /**
    * @type {{ width: number, height: number } | undefined}
    */
-  let dimensions;
+  let dimensions = undefined;
   /**
    * @type {number | undefined}
    */
-  let duration;
+  let duration = undefined;
   /**
    * @type {Entry[]}
    */
@@ -44,7 +52,13 @@
    * Update the properties above.
    */
   const updateProps = async () => {
-    ({ publicURL, dimensions, duration, usedEntries } = await getAssetDetails(asset));
+    ({
+      publicURL = undefined,
+      repoBlobURL = undefined,
+      dimensions = undefined,
+      duration = undefined,
+      usedEntries = [],
+    } = asset ? await getAssetDetails(asset) : {});
   };
 
   $: {
@@ -52,6 +66,16 @@
     updateProps();
   }
 </script>
+
+{#snippet usedEntryLink(
+  /** @type {Record<string, string>} */ { link, collectionLabel, entryLabel },
+)}
+  <p>
+    <Button role="link" variant="link" onclick={() => goto(link)}>
+      <span role="none">{collectionLabel} › {entryLabel}</span>
+    </Button>
+  </p>
+{/snippet}
 
 <div role="none" class="detail">
   {#if showPreview && canPreview}
@@ -61,7 +85,7 @@
         {asset}
         variant="tile"
         checkerboard={kind === 'image'}
-        controls={kind === 'audio' || kind === 'video'}
+        controls={['audio', 'video'].includes(kind)}
       />
     </div>
   {/if}
@@ -93,7 +117,7 @@
     <h4>{$_('public_url')}</h4>
     <p>
       {#if publicURL}
-        <a href={publicURL}>{publicURL}</a>
+        <a href={publicURL} target="_blank">{publicURL}</a>
       {:else}
         –
       {/if}
@@ -102,8 +126,8 @@
   <section>
     <h4>{$_('file_path')}</h4>
     <p>
-      {#if repoFileURL}
-        <a href={repoFileURL}>/{path}</a>
+      {#if repoBlobURL}
+        <a href={repoBlobURL}>/{path}</a>
       {:else}
         /{path}
       {/if}
@@ -118,38 +142,33 @@
   {#if commitDate}
     <section>
       <h4>{$_('sort_keys.commit_date')}</h4>
-      <p>{commitDate.toLocaleString($appLocale ?? undefined)}</p>
+      <p>
+        {commitDate.toLocaleString($appLocale ?? undefined, {
+          ...dateFormatOptions,
+          ...timeFormatOptions,
+        })}
+      </p>
     </section>
   {/if}
   <section>
     <h4>{$_('used_in')}</h4>
-    {#each usedEntries as { sha, slug, locales, collectionName, fileName } (sha)}
-      {@const collection = /** @type {Collection} */ (getCollection(collectionName))}
-      {@const collectionFile = fileName ? collection._fileMap?.[fileName] : undefined}
-      {@const { defaultLocale } = (collectionFile ?? collection)._i18n}
-      {@const locale = defaultLocale in locales ? defaultLocale : Object.keys(locales)[0]}
-      {@const { content } = locales[locale]}
-      <p>
-        <Button
-          role="link"
-          variant="link"
-          on:click={() => {
-            goto(`/collections/${collectionName}/entries/${fileName || slug}`);
-          }}
-        >
-          <span role="none">
-            {collection.label || collection.name} »
-            {#if collectionFile}
-              {collectionFile.label || collectionFile.name}
-            {:else if content}
-              {content[collection.identifier_field ?? ''] ||
-                content.title ||
-                content.name ||
-                content.label}
-            {/if}
-          </span>
-        </Button>
-      </p>
+    {#each usedEntries as entry (entry.sha)}
+      {#each getAssociatedCollections(entry) as collection (collection.name)}
+        {@const collectionLabel = collection.label || collection.name}
+        {#each getFilesByEntry(collection, entry) as collectionFile (collectionFile.name)}
+          {@render usedEntryLink({
+            link: `/collections/${collection.name}/entries/${collectionFile.name}`,
+            collectionLabel,
+            entryLabel: collectionFile.label || collectionFile.name,
+          })}
+        {:else}
+          {@render usedEntryLink({
+            link: `/collections/${collection.name}/entries/${entry.subPath}`,
+            collectionLabel,
+            entryLabel: getEntrySummary(collection, entry, { useTemplate: true }),
+          })}
+        {/each}
+      {/each}
     {:else}
       <p>{$_('sort_keys.none')}</p>
     {/each}
@@ -173,18 +192,17 @@
 
     section {
       margin: 0 0 16px;
+
+      & > :global(*) {
+        margin: 0 0 4px;
+        word-break: break-all;
+      }
     }
 
     h4 {
       font-size: var(--sui-font-size-small);
-      font-weight: 600;
+      font-weight: var(--sui-font-weight-bold);
       color: var(--sui-secondary-foreground-color);
-    }
-
-    h4,
-    p {
-      margin: 0 0 4px;
-      word-break: break-all;
     }
   }
 </style>

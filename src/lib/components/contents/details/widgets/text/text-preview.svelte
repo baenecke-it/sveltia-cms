@@ -7,10 +7,9 @@
   /**
    * @type {LocaleCode}
    */
-  // svelte-ignore unused-export-let
   export let locale;
   /**
-   * @type {string}
+   * @type {FieldKeyPath}
    */
   // svelte-ignore unused-export-let
   export let keyPath;
@@ -26,7 +25,7 @@
 </script>
 
 {#if typeof currentValue === 'string' && currentValue.trim()}
-  <p>{currentValue}</p>
+  <p lang={locale} dir="auto">{currentValue}</p>
 {/if}
 
 <style lang="scss">

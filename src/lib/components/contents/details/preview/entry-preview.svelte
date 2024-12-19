@@ -1,8 +1,9 @@
 <script>
+  import { sleep } from '@sveltia/utils/misc';
   import { _ } from 'svelte-i18n';
   import FieldPreview from '$lib/components/contents/details/preview/field-preview.svelte';
   import NewsletterPreview from '$lib/components/newsletters/details/preview/newsletter-preview.svelte';
-  import { entryDraft } from '$lib/services/contents/editor';
+  import { entryDraft } from '$lib/services/contents/draft';
 
   /**
    * @type {LocaleCode}
@@ -17,11 +18,13 @@
 {#if collection.name === 'newsletter'}
   <NewsletterPreview {locale}/>
 {:else}
-<div role="document" aria-label={$_('content_preview')}>
-  {#each fields as fieldConfig (fieldConfig.name)}
-    <FieldPreview keyPath={fieldConfig.name} {locale} {fieldConfig} />
-  {/each}
-</div>
+  <div role="document" aria-label={$_('content_preview')}>
+    {#each fields as fieldConfig (fieldConfig.name)}
+      {#await sleep(0) then }
+        <FieldPreview keyPath={fieldConfig.name} {locale} {fieldConfig}/>
+      {/await}
+    {/each}
+  </div>
 {/if}
 
 <style lang="scss">

@@ -7,20 +7,6 @@ export const strings = {
   media: 'メディア',
   workflow: 'ワークフロー',
   editorial_workflow: '編集ワークフロー',
-  notifications: '通知',
-  site_config: 'サイト設定',
-  settings: '設定',
-  account: 'アカウント',
-  live_site: '管理対象サイト',
-  git_repository: 'Git レポジトリ',
-  help: {
-    keyboard_shortcuts: 'キーボードショートカット',
-    documentation: 'ドキュメンテーション',
-    release_notes: 'リリースノート',
-    release_notes_version_x: 'リリースノート (v{version})',
-    issue: '問題を報告',
-    feedback: 'フィードバックを共有',
-  },
 
   // Account
   user_name: 'ユーザー名',
@@ -34,7 +20,6 @@ export const strings = {
   create: '新規作成',
   select: '選択',
   select_all: 'すべて選択',
-  clear_selection: '選択を解除',
   upload: 'アップロード',
   copy: 'コピー',
   download: 'ダウンロード',
@@ -42,13 +27,18 @@ export const strings = {
   delete: '削除',
   save: '保存',
   saving: '保存中…',
+  rename: '名前を変更',
   replace: '差し替え',
   remove: '削除',
   remove_x: '{name} を削除',
   clear: 'クリア',
   expand: '広げる',
+  expand_all: 'すべて広げる',
   collapse: '折り畳む',
+  collapse_all: 'すべて折り畳む',
   insert: '挿入',
+  restore: '復元',
+  discard: '破棄',
   searching: '検索中…',
   global: 'グローバル',
   primary: 'プライマリー',
@@ -68,6 +58,7 @@ export const strings = {
   loading_site_data_error: 'サイトデータの読み込み中にエラーが発生しました。',
   sign_in_with_x: '{service} でログイン',
   authorizing: '認証中…',
+  signing_in: 'ログイン中…',
   work_with_local_repo: 'ローカルレポジトリで作業',
   work_with_local_repo_description:
     'ボタンをクリックして「{repo}」レポジトリのルートディレクトリを選択してください。',
@@ -88,10 +79,17 @@ export const strings = {
     TOKEN_REQUEST_FAILED: 'アクセストークンを要求できませんでした。後で再度お試しください。',
     MALFORMED_RESPONSE: 'サーバーから不正なデータが返されました。後で再度お試しください。',
   },
+  repository_no_access: 'あなたには「{repo}」レポジトリへのアクセス権がありません。',
   repository_not_found: '「{repo}」レポジトリは存在しません。',
   repository_empty: '「{repo}」レポジトリにはブランチがありません。',
   branch_not_found: '「{repo}」レポジトリに「{branch}」ブランチは存在しません。',
   unexpected_error: '予期せぬエラー',
+
+  // Parser errors
+  entry_parse_error:
+    'エントリーファイルの読み込み中にエラーが発生しました。詳しくはブラウザーのコンソールを確認してください。',
+  entry_parse_errors:
+    'エントリーファイルの読み込み中にエラーが発生しました。詳しくはブラウザーのコンソールを確認してください。',
 
   // Global toolbar
   visit_live_site: '管理対象サイトを開く',
@@ -102,7 +100,23 @@ export const strings = {
   publishing_changes: '変更を公開しています…',
   publishing_changes_failed: '変更を公開できませんでした。後で再度お試しください。',
   show_notifications: '通知を表示',
+  notifications: '通知',
   show_account_menu: 'アカウントメニューを表示',
+  account: 'アカウント',
+  live_site: '管理対象サイト',
+  git_repository: 'Git レポジトリ',
+  settings: '設定',
+  site_config: 'サイト設定',
+  show_help_menu: 'ヘルプメニューを表示',
+  help: 'ヘルプ',
+  keyboard_shortcuts: 'キーボードショートカット',
+  documentation: 'ドキュメンテーション',
+  release_notes: 'リリースノート',
+  version_x: 'バージョン {version}',
+  report_issue: '問題を報告',
+  share_feedback: 'フィードバックを共有',
+  get_help: 'サポート',
+  join_discord: 'Discord チャンネルに参加',
 
   // Update notification
   update_available: 'Sveltia CMS の最新版が利用可能です。',
@@ -113,13 +127,14 @@ export const strings = {
     minor_incident:
       '{service} で軽微な障害が発生しています。ワークフローに潜在的な影響が及ぶ可能性があります。',
     major_incident:
-      '{service} で重大な障害が発生しています。状況が改善されるまで待った方が良いでしょう。',
+      '{service} で重大な障害が発生しています。状況が改善されるまで待った方が良いかもしれません。',
   },
 
   // Library
   content_library: 'コンテンツライブラリ',
   asset_library: 'アセットライブラリ',
   collection_assets: 'コレクションアセット',
+  entry_assets: 'エントリーアセット',
   entry_list: 'エントリーリスト',
   file_list: 'ファイルリスト',
   asset_list: 'アセットリスト',
@@ -139,6 +154,7 @@ export const strings = {
     '「{folder}」アセットフォルダーを表示しています。ここにはまだアセットがありません。',
   collection_not_found: 'コレクションが見つかりませんでした',
   file_not_found: 'ファイルが見つかりませんでした',
+  x_of_x_selected: '{total} 個のうち {selected} 個を選択中',
   switch_view: 'ビューを切り替え',
   list_view: 'リストビュー',
   grid_view: 'グリッドビュー',
@@ -158,7 +174,7 @@ export const strings = {
   filtering_options: '絞り込みオプション',
   group: 'グループ化', // Verb
   grouping_options: 'グループ化オプション',
-  file_type: 'ファイル形式',
+  type: '種類',
   all: 'すべて',
   image: '画像',
   video: '動画',
@@ -189,10 +205,26 @@ export const strings = {
   edit_asset: 'アセットを編集',
   edit_x: '{name} を編集',
   wrap_long_lines: '長い行を折り返す',
+  rename_asset: 'アセットの名前を変更',
+  rename_x: '{name} の名前を変更',
+  enter_new_name_for_asset: '新しい名前を以下に入力してください。',
+  enter_new_name_for_asset_with_one_entry:
+    '新しい名前を以下に入力してください。このアセットを使用している 1 個のエントリーも更新されます。',
+  enter_new_name_for_asset_with_many_entries:
+    '新しい名前を以下に入力してください。このアセットを使用している {count} 個のエントリーも更新されます。',
+  enter_new_name_for_asset_error: {
+    empty: 'ファイル名を空白にすることはできません。',
+    character: 'ファイル名に特別な文字を含めることはできません。',
+    duplicate: 'このファイル名は他のアセットに使われています。',
+  },
   replace_asset: 'アセットを差し替え',
   replace_x: '{name} を差し替え',
-  drop_file_or_browse: 'ここにファイルをドロップするか下のボタンをクリックして参照:',
-  drop_files_or_browse: 'ここにファイルをドロップするか下のボタンをクリックして参照:',
+  browse_file: 'クリックして参照',
+  drop_or_browse_file: 'ここにファイルをドロップするかクリックして参照',
+  drop_or_browse_files: 'ここにファイルをドロップするかクリックして参照',
+  drop_or_browse_image_file: 'ここに画像ファイルをドロップするかクリックして参照',
+  drop_or_browse_image_files: 'ここに画像ファイルをドロップするかクリックして参照',
+  drop_file_here: 'ここにファイルをドロップ',
   drop_files_here: 'ここにファイルをドロップ',
   drop_files_type_mismatch:
     'ドロップされたファイルは「{type}」形式ではありません。再度お試しください。',
@@ -253,15 +285,25 @@ export const strings = {
   asset_data_copied: 'アセットファイルがクリップボードにコピーされました。',
   asset_downloaded: 'アセットファイルがダウンロードされました。',
   assets_downloaded: 'アセットファイルがダウンロードされました。',
+  asset_moved: 'アセットが移動されました。',
+  assets_moved: '{count} 個のアセットが移動されました。',
+  asset_renamed: 'アセットの名前が変更されました。',
+  assets_renamed: '{count} 個のアセットの名前が変更されました。',
   asset_deleted: 'アセットが削除されました。',
   assets_deleted: '{count} 個のアセットが削除されました。',
 
   // Content editor
   content_editor: 'コンテンツエディター',
+  restore_backup_title: '下書きを復元',
+  restore_backup_description:
+    'このエントリーには {datetime} に保存されたバックアップがあります。その編集済みの下書きを復元しますか？',
+  draft_backup_saved: '下書きのバックアップが保存されました。',
+  draft_backup_restored: '下書きのバックアップが復元されました。',
+  draft_backup_deleted: '下書きのバックアップが削除されました。',
   cancel_editing: '編集をキャンセル',
   creating_x: '{name} を作成',
   creating_x_collection_entry: '「{collection}」コレクションの新しいエントリーを作成しています。',
-  editing_x_in_x: '{collection} / {entry} を編集',
+  editing_x_in_x: '{collection} › {entry} を編集',
   editing_x_collection_entry:
     '「{collection}」コレクションの「{entry}」エントリーを編集しています。',
   editing_x_collection_file: '「{collection}」コレクションの「{file}」ファイルを編集しています。',
@@ -290,8 +332,15 @@ export const strings = {
   locale_x_has_been_disabled: '{locale} コンテンツは無効化されています。',
   locale_x_now_disabled:
     '{locale} コンテンツは無効化されました。エントリーを保存する際に削除されます。',
+  view_in_repository: 'レポジトリ内で見る',
+  view_on_x: '{service} で見る',
+  view_on_live_site: '管理対象サイトで見る',
   copy_from: '他の言語からコピー…',
   copy_from_x: '{locale} からコピー',
+  translation_options: '翻訳オプション',
+  translate: '翻訳',
+  translate_field: 'フィールドを翻訳',
+  translate_fields: 'フィールドを翻訳',
   translate_from: '他の言語から翻訳…',
   translate_from_x: '{locale} から翻訳',
   revert_changes: '変更を取り消す',
@@ -328,6 +377,14 @@ export const strings = {
       select_one: '選択できるのは最大で {max} 項目です。',
       add_many: '追加できるのは最大で {max} 項目です。',
       add_one: '追加できるのは最大で {max} 項目です。',
+    },
+    too_short: {
+      one: '少なくとも {min} 文字は入力してください。',
+      many: '少なくとも {min} 文字は入力してください。',
+    },
+    too_long: {
+      one: '{max} 文字を超える入力はできません。',
+      many: '{max} 文字を超える入力はできません。',
     },
     type_mismatch: {
       email: '正しいメールアドレスを入力してください。',
@@ -369,6 +426,7 @@ export const strings = {
   add_x: '{name} を追加',
   select_list_type: 'リストタイプを選択',
   opacity: '透明度',
+  unselected_option: '(なし)',
   assets_dialog: {
     title: {
       file: 'ファイルを選択',
@@ -402,6 +460,29 @@ export const strings = {
       description: '可能であれば以下のクレジットを使ってください:',
     },
   },
+  character_counter: {
+    min_max: {
+      one: '{count} 文字入力されています。最小: {min}。最大 {max}。',
+      many: '{count} 文字入力されています。最小: {min}。最大 {max}。',
+    },
+    min: {
+      one: '{count} 文字入力されています。最小: {min}。',
+      many: '{count} 文字入力されています。最小: {min}。',
+    },
+    max: {
+      one: '{count} 文字入力されています。最大: {max}。',
+      many: '{count} 文字入力されています。最大: {max}。',
+    },
+  },
+  youtube_video_player: 'YouTube 動画プレーヤー',
+  today: '今日',
+  now: '現在時刻',
+  editor_components: {
+    image: '画像',
+    src: 'ソース',
+    alt: '代替テキスト',
+    title: 'タイトル',
+  },
 
   // Content preview
   boolean: {
@@ -422,6 +503,7 @@ export const strings = {
   // Configuration
   config: {
     error: {
+      no_secure_context: 'Sveltia CMS は HTTPS またはローカルホスト URL でのみ動作します。',
       fetch_failed: '設定ファイルを読み込めませんでした。',
       fetch_failed_not_ok: 'HTTP レスポンスがステータス {status} で返されました。',
       parse_failed: '設定ファイルを解析できませんでした。',
@@ -439,9 +521,11 @@ export const strings = {
   },
 
   // Backends
-  unsupported: {
-    browser:
+  local_backend: {
+    unsupported_browser:
       'お使いのブラウザーはローカル開発に対応していません。代わりに Chrome か Edge を使ってください。',
+    disabled:
+      'お使いのブラウザーではローカル開発が無効化されています。<a>有効化する方法はこちら</a>。',
   },
 
   // Editorial Workflow
@@ -485,6 +569,15 @@ export const strings = {
           '<a {homeHref}>{service} API</a> にユーザー登録して、<a {apiKeyHref}>発行された認証キー</a> をここに入力すると、テキストエントリー項目の素早い翻訳が可能となります。',
       },
     },
+    contents: {
+      title: 'コンテンツ',
+      editor: {
+        title: 'エディター',
+        close_on_save: {
+          switch_label: '下書き保存後にエディターを閉じる',
+        },
+      },
+    },
     media: {
       title: 'メディア',
       stock_photos: {
@@ -493,6 +586,15 @@ export const strings = {
         description:
           '<a {homeHref}>{service} API</a> にユーザー登録して、<a {apiKeyHref}>発行された API キー</a> をここに入力すると、画像エントリー項目に無料のストックフォトを挿入できます。',
         credit: '写真提供: {service}',
+      },
+    },
+    accessibility: {
+      title: 'アクセシビリティ',
+      underline_links: {
+        title: 'リンクに下線を付ける',
+        description:
+          'エントリープレビューやユーザーインターフェイスラベル内のリンクに下線を表示します。',
+        switch_label: '常に下線を付ける',
       },
     },
     advanced: {
@@ -515,12 +617,13 @@ export const strings = {
   },
 
   // Keyboard shortcuts
-  keyboard_shortcuts: {
+  keyboard_shortcuts_: {
     view_content_library: 'コンテンツライブラリを表示',
     view_asset_library: 'アセットライブラリを表示',
     search: 'エントリーとアセットを検索',
     create_entry: '新しいエントリーを作成',
     save_entry: 'エントリーを保存',
+    cancel_editing: 'エントリーの編集をキャンセル',
   },
 
   // File types
@@ -563,6 +666,13 @@ export const strings = {
     rtf: 'リッチテキストドキュメント',
     xls: 'Excel スプレッドシート',
     xlsx: 'Excel スプレッドシート',
+    html: 'HTML テキスト',
+    js: 'JavaScript',
+    json: 'JSON テキスト',
+    md: 'Markdown テキスト',
+    toml: 'TOML テキスト',
+    yaml: 'YAML テキスト',
+    yml: 'YAML テキスト',
   },
 
   // file size units

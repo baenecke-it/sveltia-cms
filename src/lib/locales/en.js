@@ -7,20 +7,6 @@ export const strings = {
   media: 'Media',
   workflow: 'Workflow',
   editorial_workflow: 'Editorial Workflow',
-  notifications: 'Notifications',
-  site_config: 'Site Configuration',
-  settings: 'Settings',
-  account: 'Account',
-  live_site: 'Live Site',
-  git_repository: 'Git Repository',
-  help: {
-    keyboard_shortcuts: 'Keyboard Shortcuts',
-    documentation: 'Documentation',
-    release_notes: 'Release Notes',
-    release_notes_version_x: 'Release Notes (v{version})',
-    issue: 'Report Issue',
-    feedback: 'Share Feedback',
-  },
 
   // Account
   user_name: 'User Name',
@@ -34,7 +20,6 @@ export const strings = {
   create: 'New',
   select: 'Select',
   select_all: 'Select All',
-  clear_selection: 'Clear Selection',
   upload: 'Upload',
   copy: 'Copy',
   download: 'Download',
@@ -42,13 +27,18 @@ export const strings = {
   delete: 'Delete',
   save: 'Save',
   saving: 'Saving…',
+  rename: 'Rename',
   replace: 'Replace',
   remove: 'Remove',
   remove_x: 'Remove {name}',
   clear: 'Clear',
   expand: 'Expand',
+  expand_all: 'Expand All',
   collapse: 'Collapse',
+  collapse_all: 'Collapse All',
   insert: 'Insert',
+  restore: 'Restore',
+  discard: 'Discard',
   searching: 'Searching…',
   global: 'Global',
   primary: 'Primary',
@@ -68,6 +58,7 @@ export const strings = {
   loading_site_data_error: 'There was an error while loading site data.',
   sign_in_with_x: 'Sign In with {service}',
   authorizing: 'Authorizing…',
+  signing_in: 'Signing in…',
   work_with_local_repo: 'Work with Local Repository',
   work_with_local_repo_description:
     'Click the button to select the root directory of the “{repo}” repository.',
@@ -88,10 +79,17 @@ export const strings = {
     TOKEN_REQUEST_FAILED: 'Failed to request an access token. Please try again later.',
     MALFORMED_RESPONSE: 'Server responded with malformed data. Please try again later.',
   },
+  repository_no_access: 'You don’t have access to the “{repo}” repository.',
   repository_not_found: 'The “{repo}” repository doesn’t exist.',
   repository_empty: 'The “{repo}” repository has no branches.',
   branch_not_found: 'The “{repo}” repository doesn’t have the “{branch}” branch.',
   unexpected_error: 'Unexpected Error',
+
+  // Parser errors
+  entry_parse_error:
+    'There was an error while parsing an entry file. Check the browser console for details.',
+  entry_parse_errors:
+    'There were errors while parsing entry files. Check the browser console for details.',
 
   // Global toolbar
   visit_live_site: 'Visit Live Site',
@@ -102,7 +100,23 @@ export const strings = {
   publishing_changes: 'Publishing Changes…',
   publishing_changes_failed: 'Changes could not be published. Please try again later.',
   show_notifications: 'Show Notifications',
+  notifications: 'Notifications',
   show_account_menu: 'Show Account Menu',
+  account: 'Account',
+  live_site: 'Live Site',
+  git_repository: 'Git Repository',
+  settings: 'Settings',
+  site_config: 'Site Configuration',
+  show_help_menu: 'Show Help Menu',
+  help: 'Help',
+  keyboard_shortcuts: 'Keyboard Shortcuts',
+  documentation: 'Documentation',
+  release_notes: 'Release Notes',
+  version_x: 'Version {version}',
+  report_issue: 'Report Issue',
+  share_feedback: 'Share Feedback',
+  get_help: 'Get Help',
+  join_discord: 'Join Us on Discord',
 
   // Update notification
   update_available: 'The latest version of Sveltia CMS is available.',
@@ -120,6 +134,7 @@ export const strings = {
   content_library: 'Content Library',
   asset_library: 'Asset Library',
   collection_assets: 'Collection Assets',
+  entry_assets: 'Entry Assets',
   entry_list: 'Entry List',
   file_list: 'File List',
   asset_list: 'Asset List',
@@ -139,6 +154,7 @@ export const strings = {
     'You’re now viewing the “{folder}” asset folder, which has no assets yet.',
   collection_not_found: 'Collection not found',
   file_not_found: 'File not found.',
+  x_of_x_selected: '{selected} of {total} selected',
   switch_view: 'Switch View',
   list_view: 'List View',
   grid_view: 'Grid View',
@@ -158,7 +174,7 @@ export const strings = {
   filtering_options: 'Filtering Options',
   group: 'Group', // Verb
   grouping_options: 'Grouping Options',
-  file_type: 'File Type',
+  type: 'Type',
   all: 'All',
   image: 'Image',
   video: 'Video',
@@ -189,10 +205,26 @@ export const strings = {
   edit_asset: 'Edit Asset',
   edit_x: 'Edit {name}',
   wrap_long_lines: 'Wrap Long Lines',
+  rename_asset: 'Rename Asset',
+  rename_x: 'Rename {name}',
+  enter_new_name_for_asset: 'Enter a new name below.',
+  enter_new_name_for_asset_with_one_entry:
+    'Enter a new name below. An entry using the asset will also be updated.',
+  enter_new_name_for_asset_with_many_entries:
+    'Enter a new name below. {count} entries using the asset will also be updated.',
+  enter_new_name_for_asset_error: {
+    empty: 'File name cannot be empty.',
+    character: 'File name cannot contain special characters.',
+    duplicate: 'This file name is used for another asset.',
+  },
   replace_asset: 'Replace Asset',
   replace_x: 'Replace {name}',
-  drop_file_or_browse: 'Drop a file here or click to browse:',
-  drop_files_or_browse: 'Drop files here or click to browse:',
+  browse_file: 'Click to browse',
+  drop_or_browse_file: 'Drop a file here or click to browse',
+  drop_or_browse_files: 'Drop files here or click to browse',
+  drop_or_browse_image_file: 'Drop an image file here or click to browse',
+  drop_or_browse_image_files: 'Drop image files here or click to browse',
+  drop_file_here: 'Drop a file here',
   drop_files_here: 'Drop files here',
   drop_files_type_mismatch: 'The dropped file is not the “{type}” type. Please try again.',
   choose_file: 'Choose File',
@@ -249,15 +281,25 @@ export const strings = {
   asset_data_copied: 'Asset file has been copied to clipboard.',
   asset_downloaded: 'Asset file has been downloaded.',
   assets_downloaded: 'Asset files have been downloaded.',
+  asset_moved: 'Asset has been moved.',
+  assets_moved: '{count} assets have been moved.',
+  asset_renamed: 'Asset has been renamed.',
+  assets_renamed: '{count} assets have been renamed.',
   asset_deleted: 'Asset has been deleted.',
   assets_deleted: '{count} assets have been deleted.',
 
   // Content editor
   content_editor: 'Content Editor',
+  restore_backup_title: 'Restore Draft',
+  restore_backup_description:
+    'This entry has a backup from {datetime}. Do you want to restore the edited draft?',
+  draft_backup_saved: 'Draft backup has been saved.',
+  draft_backup_restored: 'Draft backup has been restored.',
+  draft_backup_deleted: 'Draft backup has been deleted.',
   cancel_editing: 'Cancel Editing',
   creating_x: 'Creating {name}',
   creating_x_collection_entry: 'You’re now creating a new entry in the “{collection}” collection.',
-  editing_x_in_x: 'Editing {collection} / {entry}',
+  editing_x_in_x: 'Editing {collection} › {entry}',
   editing_x_collection_entry:
     'You’re now editing the “{entry}” entry in the “{collection}” collection.',
   editing_x_collection_file:
@@ -287,8 +329,15 @@ export const strings = {
   locale_x_has_been_disabled: 'The {locale} content has been disabled.',
   locale_x_now_disabled:
     'The {locale} content is now disabled. It will be deleted when you save the entry.',
+  view_in_repository: 'View in Repository',
+  view_on_x: 'View on {service}',
+  view_on_live_site: 'View on Live Site',
   copy_from: 'Copy from…',
   copy_from_x: 'Copy from {locale}',
+  translation_options: 'Translation Options',
+  translate: 'Translate',
+  translate_field: 'Translate Field',
+  translate_fields: 'Translate Fields',
   translate_from: 'Translate from…',
   translate_from_x: 'Translate from {locale}',
   revert_changes: 'Revert Changes',
@@ -325,6 +374,14 @@ export const strings = {
       select_one: 'You cannot select more than {max} item.',
       add_many: 'You cannot add more than {max} items.',
       add_one: 'You cannot add more than {max} item.',
+    },
+    too_short: {
+      one: 'You must enter at least {min} character.',
+      many: 'You must enter at least {min} characters.',
+    },
+    too_long: {
+      one: 'You cannot enter more than {max} character.',
+      many: 'You cannot enter more than {max} characters.',
     },
     type_mismatch: {
       email: 'Please enter a valid email.',
@@ -366,6 +423,7 @@ export const strings = {
   add_x: 'Add {name}',
   select_list_type: 'Select List Type',
   opacity: 'Opacity',
+  unselected_option: '(None)',
   assets_dialog: {
     title: {
       file: 'Select File',
@@ -399,6 +457,29 @@ export const strings = {
       description: 'Use the following credit if possible:',
     },
   },
+  character_counter: {
+    min_max: {
+      one: '{count} character entered. Minimum: {min}. Maximum: {max}.',
+      many: '{count} characters entered. Minimum: {min}. Maximum: {max}.',
+    },
+    min: {
+      one: '{count} character entered. Minimum: {min}.',
+      many: '{count} characters entered. Minimum: {min}.',
+    },
+    max: {
+      one: '{count} character entered. Maximum: {max}.',
+      many: '{count} characters entered. Maximum: {max}.',
+    },
+  },
+  youtube_video_player: 'YouTube video player',
+  today: 'Today',
+  now: 'Now',
+  editor_components: {
+    image: 'Image',
+    src: 'Source',
+    alt: 'Alt Text',
+    title: 'Title',
+  },
 
   // Content preview
   boolean: {
@@ -419,6 +500,7 @@ export const strings = {
   // Configuration
   config: {
     error: {
+      no_secure_context: 'Sveltia CMS only works with HTTPS or localhost URLs.',
       fetch_failed: 'The configuration file could not be retrieved.',
       fetch_failed_not_ok: 'HTTP response returned with status {status}.',
       parse_failed: 'The configuration file could not be parsed.',
@@ -436,9 +518,10 @@ export const strings = {
   },
 
   // Backends
-  unsupported: {
-    browser:
+  local_backend: {
+    unsupported_browser:
       'Local development is not supported in your browser. Please use Chrome or Edge instead.',
+    disabled: 'Local development is disabled in your browser. <a>Here’s how to enable it</a>.',
   },
 
   // Editorial Workflow
@@ -482,6 +565,15 @@ export const strings = {
           'Sign up for <a {homeHref}>{service} API</a> and enter <a {apiKeyHref}>your Authentication Key</a> here to enable quick translation of text entry fields.',
       },
     },
+    contents: {
+      title: 'Contents',
+      editor: {
+        title: 'Editor',
+        close_on_save: {
+          switch_label: 'Close the editor after saving a draft',
+        },
+      },
+    },
     media: {
       title: 'Media',
       stock_photos: {
@@ -490,6 +582,14 @@ export const strings = {
         description:
           'Sign up for <a {homeHref}>{service} API</a> and enter <a {apiKeyHref}>your API Key</a> here to insert free stock photos to image entry fields.',
         credit: 'Photos provided by {service}',
+      },
+    },
+    accessibility: {
+      title: 'Accessibility',
+      underline_links: {
+        title: 'Underline Links',
+        description: 'Show underline for links in the entry preview and user interface labels.',
+        switch_label: 'Always Underline Links',
       },
     },
     advanced: {
@@ -512,12 +612,13 @@ export const strings = {
   },
 
   // Keyboard shortcuts
-  keyboard_shortcuts: {
+  keyboard_shortcuts_: {
     view_content_library: 'View Content Library',
     view_asset_library: 'View Asset Library',
     search: 'Search for entries and assets',
     create_entry: 'Create a new entry',
     save_entry: 'Save an entry',
+    cancel_editing: 'Cancel entry editing',
   },
 
   // File types
@@ -560,6 +661,13 @@ export const strings = {
     rtf: 'Rich text document',
     xls: 'Excel spreadsheet',
     xlsx: 'Excel spreadsheet',
+    html: 'HTML text',
+    js: 'JavaScript',
+    json: 'JSON text',
+    md: 'Markdown text',
+    toml: 'TOML text',
+    yaml: 'YAML text',
+    yml: 'YAML text',
   },
 
   // file size units

@@ -1,19 +1,34 @@
 <script>
   import { Group } from '@sveltia/ui';
   import { isTextFileType } from '@sveltia/utils/file';
-  import { onMount } from 'svelte';
+  import DOMPurify from 'isomorphic-dompurify';
+  import { marked } from 'marked';
+  import { onMount, tick } from 'svelte';
   import { _ } from 'svelte-i18n';
-  import Toolbar from '$lib/components/assets/details/toolbar.svelte';
-  import AssetPreview from '$lib/components/assets/shared/asset-preview.svelte';
-  import InfoPanel from '$lib/components/assets/shared/info-panel.svelte';
+  import { getAssetBlob, isMediaKind, overlaidAsset, showAssetOverlay } from '$lib/services/assets';
   import EmptyState from '$lib/components/common/empty-state.svelte';
-  import { getAssetBlob, overlaidAsset } from '$lib/services/assets';
+  import InfoPanel from '$lib/components/assets/shared/info-panel.svelte';
+  import AssetPreview from '$lib/components/assets/shared/asset-preview.svelte';
+  import Toolbar from '$lib/components/assets/details/toolbar.svelte';
 
   /**
    * A reference to the wrapper element.
    * @type {HTMLElement}
    */
   let wrapper;
+  /**
+   * A reference to the group element.
+   * @type {HTMLElement}
+   */
+  let group;
+  /**
+   * @type {boolean}
+   */
+  let hiding = false;
+  /**
+   * @type {boolean}
+   */
+  let hidden = true;
   /**
    * @type {Blob | undefined}
    */
@@ -27,60 +42,114 @@
     }
   })();
 
-  onMount(() => {
-    const group = /** @type {HTMLElement} */ (wrapper.closest('[role="group"]'));
+  /**
+   * Move focus to the wrapper once the overlay is loaded.
+   */
+  const moveFocus = async () => {
+    // Wait until `inert` is updated
+    await tick();
 
-    // Move the focus once the overlay is loaded
     group.tabIndex = 0;
     group.focus();
+  };
 
-    // onUnmount
-    return () => {
-      $overlaidAsset = undefined;
-    };
+  onMount(() => {
+    group = /** @type {HTMLElement} */ (wrapper.querySelector('[role="group"]'));
+
+    group.addEventListener('transitionend', () => {
+      if (!$showAssetOverlay) {
+        hiding = false;
+        hidden = true;
+      }
+    });
   });
+
+  $: {
+    if (wrapper) {
+      if ($showAssetOverlay) {
+        hiding = false;
+        hidden = false;
+        moveFocus();
+      } else {
+        hiding = true;
+      }
+    }
+  }
 </script>
 
-<Group aria-label={$_('asset_editor')}>
-  <div role="none" class="wrapper" bind:this={wrapper}>
-    <Toolbar />
-    <div role="none" class="row">
-      <div role="none" class="preview">
-        {#if ['image', 'audio', 'video'].includes(kind)}
-          <AssetPreview
-            {kind}
-            asset={$overlaidAsset}
-            blurBackground={kind === 'image' || kind === 'video'}
-            checkerboard={kind === 'image'}
-            alt={kind === 'image' ? name : undefined}
-            controls={kind === 'audio' || kind === 'video'}
-          />
-        {:else if blob?.type === 'application/pdf'}
-          <iframe src={blobURL} title={name} />
-        {:else if blob?.type && isTextFileType(blob?.type)}
-          {#await $overlaidAsset?.text ?? blob?.text() then text}
-            <pre role="figure">{text}</pre>
-          {/await}
-        {:else}
-          <EmptyState>
-            <span role="alert">{$_('preview_unavailable')}</span>
-          </EmptyState>
+<div
+  role="none"
+  class="wrapper"
+  class:hiding
+  {hidden}
+  inert={!$showAssetOverlay}
+  bind:this={wrapper}
+>
+  <Group aria-label={$_('asset_editor')}>
+    {#key $overlaidAsset?.sha}
+      <Toolbar />
+      <div role="none" class="row">
+        <div role="none" class="preview">
+          {#if isMediaKind(kind)}
+            <AssetPreview
+              {kind}
+              asset={$overlaidAsset}
+              blurBackground={['image', 'video'].includes(kind)}
+              checkerboard={kind === 'image'}
+              alt={kind === 'image' ? name : undefined}
+              controls={['audio', 'video'].includes(kind)}
+            />
+          {:else if blob?.type === 'application/pdf'}
+            <iframe src={blobURL} title={name}></iframe>
+          {:else if blob?.type && isTextFileType(blob.type)}
+            {#await $overlaidAsset?.text ?? blob.text() then text}
+              {#if name.endsWith('.md')}
+                {#await marked.parse(text, { breaks: true, async: true }) then rawHTML}
+                  <div role="figure" class="markdown">
+                    {@html DOMPurify.sanitize(rawHTML)}
+                  </div>
+                {:catch}
+                  <pre role="figure">{text}</pre>
+                {/await}
+              {:else}
+                <pre role="figure">{text}</pre>
+              {/if}
+            {/await}
+          {:else}
+            <EmptyState>
+              <span role="alert">{$_('preview_unavailable')}</span>
+            </EmptyState>
+          {/if}
+        </div>
+        {#if $overlaidAsset}
+          <InfoPanel asset={$overlaidAsset} />
         {/if}
       </div>
-      {#if $overlaidAsset}
-        <InfoPanel asset={$overlaidAsset} />
-      {/if}
-    </div>
-  </div>
-</Group>
+    {/key}
+  </Group>
+</div>
 
 <style lang="scss">
   .wrapper {
-    position: fixed;
-    inset: 0;
-    display: flex;
-    flex-direction: column;
-    background-color: var(--sui-primary-background-color);
+    display: contents;
+
+    &[hidden] {
+      display: none;
+    }
+
+    & > :global(.sui.group) {
+      position: absolute;
+      inset: 0;
+      z-index: 100;
+      display: flex;
+      flex-direction: column;
+      background-color: var(--sui-primary-background-color);
+      transition: filter 250ms;
+    }
+
+    &[inert] > :global(.sui.group) {
+      filter: opacity(0);
+    }
 
     .row {
       flex: auto;
@@ -93,16 +162,22 @@
         border-right: 1px solid var(--sui-primary-border-color);
 
         iframe,
-        pre {
+        pre,
+        .markdown {
           display: block;
           width: 100%;
           height: 100%;
         }
 
-        pre {
+        pre,
+        .markdown {
           margin: 0;
           padding: 16px;
           overflow: auto;
+        }
+
+        pre {
+          white-space: pre-wrap;
         }
       }
     }

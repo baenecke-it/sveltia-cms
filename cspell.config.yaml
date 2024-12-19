@@ -20,42 +20,55 @@ ignorePaths:
   - admin/**
   - .gitignore
 words:
+  - astrolicious
   - astros
+  - brotlied
   - camelcase
   - Cloudinary
+  - CVEs
   - danurbanowicz
   - Decap
   - DeepL
   - deepmerge
   - dompurify
+  - embeddable
+  - Flavored
+  - Forgejo
   - Gitea
-  - gzipped
   - hotlinking
+  - hugolify
   - iarna
   - IIFE
   - indexeddb
   - infobars
   - jsdoc
   - kyoshino
+  - mdwn
+  - mkdn
+  - Mullvad
   - pexels
   - Photoshop
   - Pixabay
   - PKCE
   - plusplus
   - pnpm
+  - popups
   - postcss
   - prefs
   - previewable
   - privatemaker
+  - proxified
   - proxify
-  - proxyfied
   - Ragdoll
   - reimagined
   - Roadmap
   - safesearch
+  - sebousan
+  - sindresorhus
   - singleline
   - singtonic
   - smol
+  - strikethrough
   - stylelint
   - Sveitia
   - sveltejs
@@ -65,9 +78,12 @@ words:
   - unadded
   - uncategorized
   - unflatten
+  - unflattened
+  - unflattening
   - unlinkable
   - unproxify
   - Uploadcare
+  - videoseries
   - Vite
   - WCAG
   - weba

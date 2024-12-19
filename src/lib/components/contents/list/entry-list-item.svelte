@@ -2,45 +2,23 @@
   import { Checkbox, GridCell, GridRow } from '@sveltia/ui';
   import Image from '$lib/components/common/image.svelte';
   import { goto } from '$lib/services/app/navigation';
-  import { getMediaFieldURL } from '$lib/services/assets';
-  import { selectedCollection, selectedEntries } from '$lib/services/contents';
-  import { formatSummary, listedEntries } from '$lib/services/contents/view';
+  import { selectedEntries } from '$lib/services/contents/collection/entries';
+  import { listedEntries } from '$lib/services/contents/collection/view';
+  import { getEntryThumbnail } from '$lib/services/contents/entry/assets';
+  import { getEntrySummary } from '$lib/services/contents/entry/summary';
 
+  /**
+   * @type {EntryCollection}
+   */
+  export let collection;
   /**
    * @type {Entry}
    */
   export let entry;
   /**
-   * @type {EntryContent}
-   */
-  export let content;
-  /**
-   * @type {string}
-   */
-  /**
-   * @type {LocaleCode}
-   */
-  export let locale;
-  /**
    * @type {ViewType}
    */
   export let viewType;
-  /**
-   * @type {Field | undefined}
-   */
-  export let firstImageField;
-
-  /**
-   * @type {string | undefined}
-   */
-  let src;
-
-  $: (async () => {
-    src =
-      content && firstImageField
-        ? await getMediaFieldURL(content[firstImageField.name], entry, { thumbnail: true })
-        : undefined;
-  })();
 
   /**
    * Update the entry selection.
@@ -65,11 +43,11 @@
 
 <GridRow
   aria-rowindex={$listedEntries.indexOf(entry)}
-  on:change={(event) => {
+  onChange={(event) => {
     updateSelection(/** @type {CustomEvent} */ (event).detail.selected);
   }}
-  on:click={() => {
-    goto(`/collections/${$selectedCollection?.name}/entries/${entry.slug}`);
+  onclick={() => {
+    goto(`/collections/${collection.name}/entries/${entry.subPath}`);
   }}
 >
   <GridCell class="checkbox">
@@ -77,23 +55,23 @@
       role="none"
       tabindex="-1"
       checked={$selectedEntries.includes(entry)}
-      on:change={({ detail: { checked } }) => {
+      onChange={({ detail: { checked } }) => {
         updateSelection(checked);
       }}
     />
   </GridCell>
-  {#if firstImageField}
+  {#if collection._thumbnailFieldName}
     <GridCell class="image">
-      {#if src}
-        <Image {src} variant={viewType === 'list' ? 'icon' : 'tile'} cover />
-      {/if}
+      {#await getEntryThumbnail(collection, entry) then src}
+        {#if src}
+          <Image {src} variant={viewType === 'list' ? 'icon' : 'tile'} cover />
+        {/if}
+      {/await}
     </GridCell>
   {/if}
   <GridCell class="title">
     <span role="none">
-      {#if $selectedCollection}
-        {formatSummary($selectedCollection, entry, locale)}
-      {/if}
+      {@html getEntrySummary(collection, entry, { useTemplate: true, allowMarkdown: true })}
     </span>
   </GridCell>
 </GridRow>

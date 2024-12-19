@@ -3,43 +3,38 @@
   import { _ } from 'svelte-i18n';
   import FilterMenu from '$lib/components/common/page-toolbar/filter-menu.svelte';
   import GroupMenu from '$lib/components/common/page-toolbar/group-menu.svelte';
+  import ItemSelector from '$lib/components/common/page-toolbar/item-selector.svelte';
   import SortMenu from '$lib/components/common/page-toolbar/sort-menu.svelte';
   import ViewSwitcher from '$lib/components/common/page-toolbar/view-switcher.svelte';
-  import { selectedCollection, selectedEntries } from '$lib/services/contents';
-  import { currentView, entryGroups, listedEntries, sortFields } from '$lib/services/contents/view';
+  import { selectedCollection } from '$lib/services/contents/collection';
+  import { selectedEntries } from '$lib/services/contents/collection/entries';
+  import {
+    currentView,
+    entryGroups,
+    listedEntries,
+    sortFields,
+  } from '$lib/services/contents/collection/view';
 
-  $: ({ fields } = $selectedCollection ?? /** @type {Collection} */ ({}));
-  $: allEntries = $entryGroups.map(({ entries }) => entries).flat(1);
-  $: firstImageField = fields?.find(({ widget }) => widget === 'image');
+  $: ({ name: collectionName, _thumbnailFieldName } =
+    $selectedCollection?._type === 'entry'
+      ? /** @type {EntryCollection} */ ($selectedCollection)
+      : /** @type {EntryCollection} */ ({}));
   $: hasListedEntries = !!$listedEntries.length;
   $: hasMultipleEntries = $listedEntries.length > 1;
 </script>
 
-{#if $selectedCollection?.folder}
+{#if $selectedCollection?._type === 'entry'}
   <Toolbar variant="secondary" aria-label={$_('entry_list')}>
-    <Button
-      variant="ghost"
-      disabled={$selectedEntries.length === allEntries.length}
-      label={$_('select_all')}
-      aria-controls="entry-list"
-      on:click={() => {
-        $selectedEntries = allEntries;
-      }}
-    />
-    <Button
-      variant="ghost"
-      disabled={!$selectedEntries.length}
-      label={$_('clear_selection')}
-      aria-controls="entry-list"
-      on:click={() => {
-        $selectedEntries = [];
-      }}
+    <ItemSelector
+      allItems={$entryGroups.map(({ entries }) => entries).flat(1)}
+      selectedItems={selectedEntries}
     />
     <Spacer flex />
     <SortMenu
       disabled={!hasMultipleEntries || !$sortFields.length}
       {currentView}
       fields={$sortFields}
+      {collectionName}
       aria-controls="entry-list"
     />
     {#if $selectedCollection.view_filters?.length}
@@ -60,7 +55,7 @@
       />
     {/if}
     <ViewSwitcher
-      disabled={!hasListedEntries || !firstImageField}
+      disabled={!hasListedEntries || !_thumbnailFieldName}
       {currentView}
       aria-controls="entry-list"
     />
@@ -73,14 +68,16 @@
       aria-controls="collection-assets"
       aria-expanded={$currentView.showMedia}
       aria-label={$_($currentView.showMedia ? 'hide_assets' : 'show_assets')}
-      on:click={() => {
+      onclick={() => {
         currentView.update((view) => ({
           ...view,
           showMedia: !$currentView.showMedia,
         }));
       }}
     >
-      <Icon slot="start-icon" name="photo_library" />
+      {#snippet startIcon()}
+        <Icon name="photo_library" />
+      {/snippet}
     </Button>
   </Toolbar>
 {/if}

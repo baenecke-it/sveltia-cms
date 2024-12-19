@@ -4,7 +4,9 @@
   import EmptyState from '$lib/components/common/empty-state.svelte';
   import EntryEditor from '$lib/components/contents/details/editor/entry-editor.svelte';
   import EntryPreview from '$lib/components/contents/details/preview/entry-preview.svelte';
-  import { entryDraft, entryEditorSettings, toggleLocale } from '$lib/services/contents/editor';
+  import { entryDraft } from '$lib/services/contents/draft';
+  import { entryEditorSettings } from '$lib/services/contents/draft/editor';
+  import { toggleLocale } from '$lib/services/contents/draft/update';
   import { getLocaleLabel } from '$lib/services/contents/i18n';
 
   /**
@@ -25,8 +27,8 @@
    */
   export let thatPaneContentArea;
 
-  $: ({ syncScrolling } = $entryEditorSettings);
-  $: ({ currentLocales, currentValues } = $entryDraft ?? /** @type {EntryDraft} */ ({}));
+  $: ({ syncScrolling } = $entryEditorSettings ?? {});
+  $: ({ currentLocales = {}, currentValues = {} } = $entryDraft ?? /** @type {EntryDraft} */ ({}));
   $: ({ locale, mode } = $thisPane ?? /** @type {EntryEditorPane} */ ({}));
   $: hasContent = !!currentValues[locale];
   $: labelOptions = { values: { locale: getLocaleLabel(locale) } };
@@ -96,7 +98,7 @@
       <Button
         variant="tertiary"
         label={$_(hasContent ? 'reenable_x_locale' : 'enable_x_locale', labelOptions)}
-        on:click={() => {
+        onclick={() => {
           toggleLocale(locale);
         }}
       />

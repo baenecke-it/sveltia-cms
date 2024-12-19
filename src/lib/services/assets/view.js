@@ -1,9 +1,11 @@
-import { LocalStorage } from '@sveltia/utils/storage';
+import { IndexedDB } from '@sveltia/utils/storage';
+import { compare } from '@sveltia/utils/string';
 import equal from 'fast-deep-equal';
 import { _, locale as appLocale } from 'svelte-i18n';
 import { derived, get, writable } from 'svelte/store';
 import { prefs } from '$lib/services/prefs';
 import { siteConfig } from '$lib/services/config';
+import { backend } from '$lib/services/backends';
 import {
   allAssetFolders,
   allAssets,
@@ -13,13 +15,10 @@ import {
   uploadingAssets,
 } from '$lib/services/assets';
 
-const storageKey = 'sveltia-cms.assets-view';
-
 /**
  * Whether to show the Upload Assets dialog.
  */
 export const showUploadAssetsDialog = writable(false);
-
 /**
  * @type {import('svelte/store').Readable<boolean>}
  */
@@ -91,7 +90,7 @@ const sortAssets = (assets, { key, order } = {}) => {
 
   const type =
     { commit_author: String, commit_date: Date }[key] ||
-    /** @type {{ [key: string]: any }} */ (_assets[0])?.[key]?.constructor ||
+    /** @type {Record<string, any>} */ (_assets[0])?.[key]?.constructor ||
     String;
 
   /**
@@ -116,7 +115,7 @@ const sortAssets = (assets, { key, order } = {}) => {
       return asset.name.split('.')[0];
     }
 
-    return /** @type {{ [key: string]: any }} */ (asset)[key] ?? '';
+    return /** @type {Record<string, any>} */ (asset)[key] ?? '';
   };
 
   _assets.sort((a, b) => {
@@ -124,7 +123,7 @@ const sortAssets = (assets, { key, order } = {}) => {
     const bValue = getValue(b);
 
     if (type === String) {
-      return aValue.localeCompare(bValue);
+      return compare(aValue, bValue);
     }
 
     if (type === Date) {
@@ -155,18 +154,18 @@ const filterAssets = (assets, { field, pattern } = { field: '', pattern: '' }) =
   if (field === 'fileType') {
     return assets.filter(({ path }) =>
       pattern === 'other'
-        ? !Object.values(assetExtensions).some((regex) => path.match(regex))
-        : path.match(assetExtensions[/** @type {string} */ (pattern)]),
+        ? !Object.values(assetExtensions).some((regex) => regex.test(path))
+        : assetExtensions[/** @type {string} */ (pattern)].test(path),
     );
   }
 
   const regex = typeof pattern === 'string' ? new RegExp(pattern) : undefined;
 
   return assets.filter((asset) => {
-    const value = /** @type {{ [key: string]: any }} */ (asset)[field];
+    const value = /** @type {Record<string, any>} */ (asset)[field];
 
     if (regex) {
-      return String(value ?? '').match(regex);
+      return regex.test(String(value ?? ''));
     }
 
     return value === pattern;
@@ -177,7 +176,7 @@ const filterAssets = (assets, { field, pattern } = { field: '', pattern: '' }) =
  * Group the given assets.
  * @param {Asset[]} assets - Asset list.
  * @param {GroupingConditions} [conditions] - Grouping conditions.
- * @returns {{ [key: string]: Asset[] }} Grouped assets, where key is a group label and value is an
+ * @returns {Record<string, Asset[]>} Grouped assets, where key is a group label and value is an
  * asset list.
  */
 const groupAssets = (assets, { field, pattern } = { field: '', pattern: undefined }) => {
@@ -186,12 +185,12 @@ const groupAssets = (assets, { field, pattern } = { field: '', pattern: undefine
   }
 
   const regex = typeof pattern === 'string' ? new RegExp(pattern) : undefined;
-  /** @type {{ [key: string]: Asset[] }} */
+  /** @type {Record<string, Asset[]>} */
   const groups = {};
   const otherKey = get(_)('other');
 
   assets.forEach((asset) => {
-    const value = /** @type {{ [key: string]: any }} */ (asset)[field];
+    const value = /** @type {Record<string, any>} */ (asset)[field];
     /**
      * @type {string}
      */
@@ -211,9 +210,7 @@ const groupAssets = (assets, { field, pattern } = { field: '', pattern: undefine
   });
 
   // Sort groups by key
-  return Object.fromEntries(
-    Object.entries(groups).sort(([aKey], [bKey]) => aKey.localeCompare(bKey)),
-  );
+  return Object.fromEntries(Object.entries(groups).sort(([aKey], [bKey]) => compare(aKey, bKey)));
 };
 
 /**
@@ -237,46 +234,27 @@ export const currentView = writable({ type: 'grid', showInfo: true });
 
 /**
  * View settings for all the asset collection.
- * @type {import('svelte/store').Writable<{ [key: string]: AssetListView }>}
+ * @type {import('svelte/store').Writable<Record<string, AssetListView> | undefined>}
  */
-const assetListSettings = writable({}, (set) => {
-  (async () => {
-    try {
-      set((await LocalStorage.get(storageKey)) ?? {});
-
-      selectedAssetFolder.subscribe((folder) => {
-        const view =
-          get(assetListSettings)[folder?.internalPath || '*'] ?? structuredClone(defaultView);
-
-        if (!equal(view, get(currentView))) {
-          currentView.set(view);
-        }
-      });
-    } catch {
-      //
-    }
-  })();
-});
+const assetListSettings = writable();
 
 /**
  * List of sort fields for the selected asset collection.
  * @type {import('svelte/store').Readable<{ key: string, label: string }[]>}
  */
 export const sortFields = derived([allAssets, appLocale], ([_allAssets], set) => {
-  const { commitAuthor, commitDate } = _allAssets?.[0] ?? {};
   const _sortFields = ['name'];
 
-  if (commitAuthor) {
+  if (_allAssets.every((asset) => !!asset.commitAuthor)) {
     _sortFields.push('commit_author');
   }
 
-  if (commitDate) {
+  if (_allAssets.every((asset) => !!asset.commitDate)) {
     _sortFields.push('commit_date');
   }
 
   set(_sortFields.map((key) => ({ key, label: get(_)(`sort_keys.${key}`) })));
 });
-
 /**
  * List of all the assets for the selected asset collection.
  * @type {import('svelte/store').Readable<Asset[]>}
@@ -291,10 +269,9 @@ export const listedAssets = derived(
     }
   },
 );
-
 /**
  * Sorted, filtered and grouped assets for the selected asset collection.
- * @type {import('svelte/store').Readable<{ [key: string]: Asset[] }>}
+ * @type {import('svelte/store').Readable<Record<string, Asset[]>>}
  */
 export const assetGroups = derived(
   [listedAssets, currentView],
@@ -307,9 +284,61 @@ export const assetGroups = derived(
     assets = sortAssets(assets, _currentView?.sort);
     assets = filterAssets(assets, _currentView?.filter);
 
-    set(groupAssets(assets, _currentView?.group));
+    const groups = groupAssets(assets, _currentView?.group);
+
+    if (!equal(get(assetGroups), groups)) {
+      set(groups);
+    }
   },
 );
+
+/**
+ * Initialize {@link assetListSettings} and relevant subscribers.
+ * @param {BackendService} _backend - Backend service.
+ */
+const initSettings = async ({ repository }) => {
+  const { databaseName } = repository ?? {};
+  const settingsDB = databaseName ? new IndexedDB(databaseName, 'ui-settings') : null;
+  const storageKey = 'assets-view';
+
+  assetListSettings.set((await settingsDB?.get(storageKey)) ?? {});
+
+  assetListSettings.subscribe((_settings) => {
+    (async () => {
+      try {
+        if (!equal(_settings, await settingsDB?.get(storageKey))) {
+          await settingsDB?.set(storageKey, _settings);
+        }
+      } catch {
+        //
+      }
+    })();
+  });
+
+  selectedAssetFolder.subscribe((folder) => {
+    const view =
+      get(assetListSettings)?.[folder?.internalPath || '*'] ?? structuredClone(defaultView);
+
+    if (!equal(view, get(currentView))) {
+      currentView.set(view);
+    }
+  });
+
+  currentView.subscribe((view) => {
+    const path = get(selectedAssetFolder)?.internalPath || '*';
+    const savedView = get(assetListSettings)?.[path] ?? {};
+
+    if (!equal(view, savedView)) {
+      assetListSettings.update((_settings) => ({ ..._settings, [path]: view }));
+    }
+  });
+};
+
+backend.subscribe((_backend) => {
+  if (_backend && !get(assetListSettings)) {
+    initSettings(_backend);
+  }
+});
 
 listedAssets.subscribe((assets) => {
   selectedAssets.set([]);
@@ -318,29 +347,4 @@ listedAssets.subscribe((assets) => {
     // eslint-disable-next-line no-console
     console.info('listedAssets', assets);
   }
-});
-
-currentView.subscribe((view) => {
-  const path = get(selectedAssetFolder)?.internalPath || '*';
-  const savedView = get(assetListSettings)[path] ?? {};
-
-  if (!equal(view, savedView)) {
-    assetListSettings.update((settings) => ({ ...settings, [path]: view }));
-  }
-});
-
-assetListSettings.subscribe((settings) => {
-  if (!settings || !Object.keys(settings).length) {
-    return;
-  }
-
-  (async () => {
-    try {
-      if (!equal(settings, await LocalStorage.get(storageKey))) {
-        await LocalStorage.set(storageKey, settings);
-      }
-    } catch {
-      //
-    }
-  })();
 });

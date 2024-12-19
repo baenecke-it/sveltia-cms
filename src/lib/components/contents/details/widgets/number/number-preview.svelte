@@ -11,7 +11,7 @@
    */
   export let locale;
   /**
-   * @type {string}
+   * @type {FieldKeyPath}
    */
   // svelte-ignore unused-export-let
   export let keyPath;
@@ -34,7 +34,7 @@
 </script>
 
 {#if currentValue !== undefined && currentValue !== ''}
-  <p>
+  <p lang={locale} dir="auto">
     {#if valueType === 'int' || valueType === 'float'}
       {numberFormatter.format(Number(currentValue))}
     {:else}

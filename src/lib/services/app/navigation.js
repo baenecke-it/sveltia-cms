@@ -1,7 +1,7 @@
 import { derived, get, writable } from 'svelte/store';
-import { overlaidAsset } from '$lib/services/assets';
+import { showAssetOverlay } from '$lib/services/assets';
 import { siteConfig } from '$lib/services/config';
-import { entryDraft } from '$lib/services/contents/editor';
+import { showContentOverlay } from '$lib/services/contents/draft/editor';
 
 /**
  * Whether the app has an overlay. Some elements have to be `inert` while an overlay is displayed.
@@ -9,15 +9,14 @@ import { entryDraft } from '$lib/services/contents/editor';
  * including the toast notifications and announced page title.
  * @type {import('svelte/store').Readable<boolean>}
  */
-export const hasOverlay = derived([entryDraft, overlaidAsset], ([draft, asset], set) => {
-  set(!!(draft || asset));
-});
-
+export const hasOverlay = derived(
+  [showContentOverlay, showAssetOverlay],
+  ([_showContentOverlay, _showAssetOverlay]) => _showContentOverlay || _showAssetOverlay,
+);
 /**
  * @type {import('svelte/store').Writable<string>}
  */
 export const selectedPageName = writable('');
-
 /**
  * Page status to be announced by screen readers.
  * @type {import('svelte/store').Writable<string>}
@@ -27,7 +26,7 @@ export const announcedPageStatus = writable('');
 /**
  * Parse the URL and return the decoded result.
  * @param {Location} [loc] - URL. Omit this to use the current URL.
- * @returns {{ path: string, params: { [key: string]: string } }} Path and search params.
+ * @returns {{ path: string, params: Record<string, string> }} Path and search params.
  */
 export const parseLocation = (loc = window.location) => {
   const { pathname, searchParams } = new URL(`${loc.origin}${loc.hash.substring(1)}`);

@@ -5,14 +5,15 @@
 -->
 <script>
   import { isURL } from '@sveltia/utils/string';
+  import YouTubeEmbed from '$lib/components/contents/details/widgets/string/youtube-embed.svelte';
+  import { isYouTubeVideoURL } from '$lib/services/utils/media';
 
   /**
    * @type {LocaleCode}
    */
-  // svelte-ignore unused-export-let
   export let locale;
   /**
-   * @type {string}
+   * @type {FieldKeyPath}
    */
   // svelte-ignore unused-export-let
   export let keyPath;
@@ -30,15 +31,17 @@
     // Widget-specific options
     type = 'text',
   } = fieldConfig);
-
-  $: isEmail = type === 'email';
 </script>
 
 {#if typeof currentValue === 'string' && currentValue.trim()}
-  <p class:title={fieldName === 'title'}>
+  <p lang={locale} dir="auto" class:title={fieldName === 'title'}>
     {#if type === 'url' || isURL(currentValue)}
-      <a href={encodeURI(currentValue)}>{currentValue}</a>
-    {:else if isEmail}
+      {#if isYouTubeVideoURL(currentValue)}
+        <YouTubeEmbed url={currentValue} />
+      {:else}
+        <a href={encodeURI(currentValue)}>{currentValue}</a>
+      {/if}
+    {:else if type === 'email'}
       <a href="mailto:{encodeURI(currentValue)}">{currentValue}</a>
     {:else}
       {currentValue}
@@ -49,6 +52,6 @@
 <style lang="scss">
   .title {
     font-size: var(--sui-font-size-xxx-large);
-    font-weight: 600;
+    font-weight: var(--sui-font-weight-bold);
   }
 </style>

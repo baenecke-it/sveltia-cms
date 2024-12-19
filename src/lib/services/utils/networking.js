@@ -4,7 +4,7 @@ import { isObject } from '@sveltia/utils/object';
  * A `fetch` wrapper to send an HTTP request to an API endpoint, parse the response as JSON or other
  * specified format, and handle errors gracefully.
  * @param {string} url - URL.
- * @param {{ method?: string, headers?: any, body?: any }} [init] - Request options.
+ * @param {RequestInit} [init] - Request options.
  * @param {object} [options] - Options.
  * @param {'json' | 'text' | 'blob' | 'raw'} [options.responseType] - Response parser type. The
  * default is `json`. Use `raw` to return a `Response` object as is.
@@ -16,6 +16,7 @@ export const sendRequest = async (url, init = {}, { responseType = 'json' } = {}
   /** @type {Response} */
   let response;
 
+  init.cache = 'no-cache';
   init.headers = new Headers(init.headers);
 
   if (responseType === 'json') {
@@ -31,6 +32,10 @@ export const sendRequest = async (url, init = {}, { responseType = 'json' } = {}
     response = await fetch(url, init);
   } catch (ex) {
     throw new Error('Failed to send the request', { cause: ex });
+  }
+
+  if (responseType === 'raw') {
+    return response;
   }
 
   const { ok, status } = response;
@@ -69,10 +74,6 @@ export const sendRequest = async (url, init = {}, { responseType = 'json' } = {}
     }
 
     throw new Error('Server responded with an error', { cause: { status, message } });
-  }
-
-  if (responseType === 'raw') {
-    return response;
   }
 
   try {

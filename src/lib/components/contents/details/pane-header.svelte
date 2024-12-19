@@ -14,14 +14,15 @@
   import { _ } from 'svelte-i18n';
   import { writable } from 'svelte/store';
   import CopyMenuItems from '$lib/components/contents/details/editor/copy-menu-items.svelte';
+  import TranslateButton from '$lib/components/contents/details/editor/translate-button.svelte';
+  import { backend } from '$lib/services/backends';
   import { siteConfig } from '$lib/services/config';
-  import {
-    entryDraft,
-    entryEditorSettings,
-    revertChanges,
-    toggleLocale,
-  } from '$lib/services/contents/editor';
+  import { entryDraft } from '$lib/services/contents/draft';
+  import { entryEditorSettings } from '$lib/services/contents/draft/editor';
+  import { revertChanges, toggleLocale } from '$lib/services/contents/draft/update';
+  import { getEntryPreviewURL, getEntryRepoBlobURL } from '$lib/services/contents/entry';
   import { defaultI18nConfig, getLocaleLabel } from '$lib/services/contents/i18n';
+  import { prefs } from '$lib/services/prefs';
   import {selectedCollection} from "$lib/services/contents/index.js";
 
   /**
@@ -39,13 +40,17 @@
    */
   export let thatPane = writable(null);
 
-  /** @type {MenuButton} */
-  let menuButton;
-
   $: ({ editor: { preview: showPreviewPane = true } = {} } =
     $siteConfig ?? /** @type {SiteConfig} */ ({}));
-  $: ({ collection, collectionFile, currentLocales, currentValues, originalValues, validities } =
-    $entryDraft ?? /** @type {EntryDraft} */ ({}));
+  $: ({
+    collection,
+    collectionFile,
+    originalEntry,
+    currentLocales = {},
+    currentValues = {},
+    originalValues = {},
+    validities = {},
+  } = $entryDraft ?? /** @type {EntryDraft} */ ({}));
   $: ({ i18nEnabled, saveAllLocales, locales, defaultLocale } =
     (collectionFile ?? collection)?._i18n ?? defaultI18nConfig);
   $: isLocaleEnabled = currentLocales[$thisPane?.locale ?? ''];
@@ -56,6 +61,10 @@
   $: canRevert =
     $thisPane?.locale &&
     !equal(currentValues[$thisPane?.locale], originalValues[$thisPane?.locale]);
+  $: previewURL =
+    originalEntry && $thisPane?.locale
+      ? getEntryPreviewURL(originalEntry, $thisPane?.locale, collection, collectionFile)
+      : undefined;
 </script>
 
 <div role="none" {id} class="header">
@@ -76,7 +85,7 @@
               size="small"
               class={invalid ? 'error' : ''}
               label={localeLabel}
-              on:select={() => {
+              onSelect={() => {
                 $thisPane = { mode: 'edit', locale };
 
                 if ($thatPane?.mode === 'preview') {
@@ -84,19 +93,21 @@
                 }
               }}
             >
-              {#if invalid}
-                <Icon slot="end-icon" name="error" aria-label={$_('locale_content_errors')} />
-              {/if}
+              {#snippet endIcon()}
+                {#if invalid}
+                  <Icon name="error" aria-label={$_('locale_content_errors')} />
+                {/if}
+              {/snippet}
             </SelectButton>
           {/if}
         {/each}
-        {#if $thatPane?.mode === 'edit' && canPreview && $entryEditorSettings.showPreview}
+        {#if $thatPane?.mode === 'edit' && canPreview && $entryEditorSettings?.showPreview}
           <SelectButton
             selected={$thisPane?.mode === 'preview'}
             variant="tertiary"
             size="small"
             label={$_('preview')}
-            on:select={() => {
+            onSelect={() => {
               $thisPane = { mode: 'preview', locale: $thatPane?.locale ?? '' };
             }}
           />
@@ -108,52 +119,71 @@
     <Spacer flex />
     {#if $thisPane?.mode === 'edit'}
       {@const localeLabel = getLocaleLabel($thisPane?.locale)}
+      {#if canCopy}
+        <TranslateButton locale={$thisPane?.locale} {otherLocales} />
+      {/if}
       <MenuButton
         variant="ghost"
         iconic
         popupPosition="bottom-right"
         aria-label={$_('show_content_options_x_locale', { values: { locale: localeLabel } })}
-        bind:this={menuButton}
       >
-        <Icon slot="start-icon" name="more_vert" />
-        <Menu
-          slot="popup"
-          aria-label={$_('content_options_x_locale', { values: { locale: localeLabel } })}
-        >
-          {#if canCopy}
-            <CopyMenuItems anchor={menuButton} locale={$thisPane?.locale} translate={true} />
-            {#if otherLocales.length > 1}
-              <Divider />
+        {#snippet popup()}
+          <Menu aria-label={$_('content_options_x_locale', { values: { locale: localeLabel } })}>
+            {#if canCopy && $thisPane?.locale}
+              <CopyMenuItems locale={$thisPane.locale} {otherLocales} />
             {/if}
-            <CopyMenuItems anchor={menuButton} locale={$thisPane?.locale} />
-            <Divider />
-          {/if}
-          <MenuItem
-            label={$_('revert_changes')}
-            disabled={!canRevert}
-            on:click={() => {
-              revertChanges($thisPane?.locale);
-            }}
-          />
-          {#if !saveAllLocales && $thisPane?.locale !== defaultLocale}
-            <Divider />
             <MenuItem
-              label={$_(
-                // eslint-disable-next-line no-nested-ternary
-                isLocaleEnabled
-                  ? 'disable_x_locale'
-                  : currentValues[$thisPane?.locale]
-                    ? 'reenable_x_locale'
-                    : 'enable_x_locale',
-                { values: { locale: localeLabel } },
-              )}
-              disabled={isLocaleEnabled && isOnlyLocale}
-              on:click={() => {
-                toggleLocale($thisPane?.locale ?? '');
+              label={$_('revert_changes')}
+              disabled={!canRevert}
+              onclick={() => {
+                revertChanges($thisPane?.locale);
               }}
             />
-          {/if}
-        </Menu>
+            {#if !saveAllLocales && $thisPane?.locale}
+              <Divider />
+              <MenuItem
+                label={$_(
+                  isLocaleEnabled
+                    ? 'disable_x_locale'
+                    : currentValues[$thisPane.locale]
+                      ? 'reenable_x_locale'
+                      : 'enable_x_locale',
+                  { values: { locale: localeLabel } },
+                )}
+                disabled={$thisPane.locale === defaultLocale || (isLocaleEnabled && isOnlyLocale)}
+                onclick={() => {
+                  toggleLocale($thisPane?.locale ?? '');
+                }}
+              />
+            {/if}
+            {#if originalEntry && (previewURL || $prefs.devModeEnabled)}
+              <Divider />
+              {#if previewURL}
+                <MenuItem
+                  label={$_('view_on_live_site')}
+                  onclick={() => {
+                    window.open(previewURL);
+                  }}
+                />
+              {/if}
+              {#if $prefs.devModeEnabled}
+                <MenuItem
+                  disabled={!$backend?.repository?.blobBaseURL}
+                  label={$_('view_on_x', {
+                    values: { service: $backend?.repository?.label },
+                    default: $_('view_in_repository'),
+                  })}
+                  onclick={() => {
+                    if (originalEntry && $thisPane) {
+                      window.open(getEntryRepoBlobURL(originalEntry, $thisPane.locale));
+                    }
+                  }}
+                />
+              {/if}
+            {/if}
+          </Menu>
+        {/snippet}
       </MenuButton>
     {/if}
   </Toolbar>

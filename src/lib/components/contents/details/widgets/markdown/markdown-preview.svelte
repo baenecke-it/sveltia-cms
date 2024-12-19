@@ -6,8 +6,9 @@
 <script>
   import DOMPurify from 'isomorphic-dompurify';
   import { marked } from 'marked';
+  import markedBidi from 'marked-bidi';
+  import { entryDraft } from '$lib/services/contents/draft';
   import { getMediaFieldURL } from '$lib/services/assets';
-  import { entryDraft } from '$lib/services/contents/editor';
 
   /**
    * @type {LocaleCode}
@@ -15,7 +16,7 @@
   // svelte-ignore unused-export-let
   export let locale;
   /**
-   * @type {string}
+   * @type {FieldKeyPath}
    */
   // svelte-ignore unused-export-let
   export let keyPath;
@@ -32,6 +33,8 @@
     // Widget-specific options
     sanitize_preview: sanitize = false,
   } = fieldConfig);
+
+  marked.use(markedBidi());
 
   /** @type {import("marked").MarkedOptions} */
   const markedOptions = {
@@ -58,7 +61,7 @@
 
 <div role="none">
   {#if typeof currentValue === 'string' && currentValue.trim()}
-    {@html sanitize ? DOMPurify.sanitize(/** @type {string} */ (rawHTML)) : rawHTML}
+    {@html sanitize ? DOMPurify.sanitize(rawHTML) : rawHTML}
   {/if}
 </div>
 

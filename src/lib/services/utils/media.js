@@ -1,3 +1,5 @@
+import { isURL } from '@sveltia/utils/string';
+
 /**
  * PDF.js distribution URL. We don’t bundle this because most users probably don’t have PDF files.
  * @see https://github.com/mozilla/pdf.js
@@ -113,19 +115,48 @@ export const convertImage = async (
     source = await createImageBitmap(blob);
     ({ width, height } = source);
   } catch {
-    // Fall back to `<img>` when thrown, possibly by SVG
+    // Fall back to `<img>` or `<video>` when thrown; this includes SVG
+    const blobURL = URL.createObjectURL(blob);
+
     source = await new Promise((resolve) => {
-      const image = new Image();
-      const blobURL = URL.createObjectURL(blob);
+      if (blob.type.startsWith('video/')) {
+        const video = document.createElement('video');
 
-      image.addEventListener('load', () => {
-        ({ naturalWidth: width, naturalHeight: height } = image);
-        resolve(image);
-        URL.revokeObjectURL(blobURL);
-      });
+        video.addEventListener(
+          'canplay',
+          async () => {
+            video.pause();
+            ({ videoWidth: width, videoHeight: height } = video);
+            resolve(video);
+          },
+          { once: true },
+        );
 
-      image.src = blobURL;
+        video.muted = true;
+        video.autoplay = true;
+        video.playsInline = true;
+        video.src = blobURL;
+
+        // Add `<video>` to DOM or it won’t be rendered on canvas
+        video.style.opacity = '0';
+        document.body.appendChild(video);
+      } else {
+        const image = new Image();
+
+        image.addEventListener(
+          'load',
+          () => {
+            ({ naturalWidth: width, naturalHeight: height } = image);
+            resolve(image);
+          },
+          { once: true },
+        );
+
+        image.src = blobURL;
+      }
     });
+
+    URL.revokeObjectURL(blobURL);
   }
 
   const canvas = new OffscreenCanvas(512, 512);
@@ -133,6 +164,11 @@ export const convertImage = async (
 
   resizeCanvas(canvas, width, height, dimension);
   context.drawImage(source, 0, 0, canvas.width, canvas.height);
+
+  // Clean up
+  if (source instanceof HTMLVideoElement) {
+    document.body.removeChild(source);
+  }
 
   return canvas.convertToBlob({ type: `image/${format}`, quality });
 };
@@ -164,12 +200,13 @@ export const renderPDF = async (
     }
   }
 
+  const blobURL = URL.createObjectURL(blob);
   const canvas = new OffscreenCanvas(512, 512);
   const context = /** @type {OffscreenCanvasRenderingContext2D} */ (canvas.getContext('2d'));
 
   try {
     const pdfDocument = await pdfjs.getDocument({
-      url: URL.createObjectURL(blob),
+      url: blobURL,
       isEvalSupported: false,
       disableAutoFetch: true,
     }).promise;
@@ -183,9 +220,73 @@ export const renderPDF = async (
       canvasContext: context,
       viewport: scale === 1 ? viewport : pdfPage.getViewport({ scale }),
     }).promise;
+
+    URL.revokeObjectURL(blobURL);
   } catch {
     throw new Error('Failed to render PDF');
   }
 
   return canvas.convertToBlob({ type: `image/${format}`, quality });
+};
+
+/**
+ * Check if the given string is a YouTube video URL.
+ * @param {string} string - URL-like string.
+ * @returns {boolean} Result.
+ */
+export const isYouTubeVideoURL = (string) => {
+  if (!isURL(string)) {
+    return false;
+  }
+
+  const { origin, pathname, searchParams } = new URL(string);
+
+  if (
+    (origin === 'https://www.youtube.com' || origin === 'https://www.youtube-nocookie.com') &&
+    ((pathname === '/watch' && searchParams.has('v')) ||
+      (pathname === '/playlist' && searchParams.has('list')) ||
+      pathname.startsWith('/embed/'))
+  ) {
+    return true;
+  }
+
+  if (origin === 'https://youtu.be' && !!pathname) {
+    return true;
+  }
+
+  return false;
+};
+
+/**
+ * Get an embeddable YouTube video URL from the given string.
+ * @param {string} string - URL-like string.
+ * @returns {string} URL with privacy-enhanced mode enabled.
+ */
+export const getYouTubeEmbedURL = (string) => {
+  const origin = 'https://www.youtube-nocookie.com';
+  const { pathname, search, searchParams } = new URL(string);
+
+  if (pathname === '/watch') {
+    const params = new URLSearchParams(searchParams);
+    let src = `${origin}/embed/${params.get('v')}`;
+
+    if (params.get('list')) {
+      params.delete('v');
+      params.set('listType', 'playlist');
+      src += `?${params.toString()}`;
+    }
+
+    return src;
+  }
+
+  if (pathname === '/playlist') {
+    return `${origin}/embed/videoseries${search}`;
+  }
+
+  if (pathname.startsWith('/embed/')) {
+    return `${origin}${pathname}${search}`;
+  }
+
+  // https://youtu.be
+  return `${origin}/embed${pathname}${search}`;
 };

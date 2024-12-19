@@ -6,12 +6,13 @@
 <script>
   import { Button, Option, PasswordInput, TextInput } from '@sveltia/ui';
   import DOMPurify from 'isomorphic-dompurify';
-  import { createEventDispatcher, onMount } from 'svelte';
+  import { onMount } from 'svelte';
   import { _ } from 'svelte-i18n';
   import AssetPreview from '$lib/components/assets/shared/asset-preview.svelte';
   import SimpleImageGrid from '$lib/components/assets/shared/simple-image-grid.svelte';
   import EmptyState from '$lib/components/common/empty-state.svelte';
-  import { selectAssetsView } from '$lib/services/contents/editor';
+  import InfiniteScroll from '$lib/components/common/infinite-scroll.svelte';
+  import { selectAssetsView } from '$lib/services/contents/draft/editor';
   import { prefs } from '$lib/services/prefs';
 
   /**
@@ -31,6 +32,11 @@
    * @type {string | undefined}
    */
   export let gridId = undefined;
+  /**
+   * Custom `select` event handler.
+   * @type {((detail: SelectedAsset) => void) | undefined}
+   */
+  export let onSelect = undefined;
 
   $: ({
     serviceType = 'stock_photos',
@@ -46,7 +52,6 @@
     search,
   } = serviceProps);
 
-  const dispatch = createEventDispatcher();
   const input = { userName: '', password: '' };
   let hasConfig = true;
   let hasAuthInfo = false;
@@ -93,7 +98,7 @@
     const { downloadURL, fileName, credit } = asset;
 
     if (hotlinking) {
-      dispatch('select', { url: downloadURL, credit });
+      onSelect?.({ url: downloadURL, credit });
 
       return;
     }
@@ -109,7 +114,7 @@
       const blob = await response.blob();
       const file = new File([blob], fileName, { type: blob.type });
 
-      dispatch('select', { file, credit });
+      onSelect?.({ file, credit });
     } catch (/** @type {any} */ ex) {
       error = 'image_fetch_failed';
       // eslint-disable-next-line no-console
@@ -167,8 +172,7 @@
     <SimpleImageGrid
       {gridId}
       viewType={$selectAssetsView?.type}
-      on:change={(event) => {
-        const { value } = /** @type {CustomEvent} */ (event).detail;
+      onChange={({ value }) => {
         const asset = searchResults?.find(({ id }) => id === value);
 
         if (asset) {
@@ -176,12 +180,15 @@
         }
       }}
     >
-      {#each searchResults as { id, previewURL, description, kind: _kind } (id)}
-        <Option label="" value={id}>
-          <AssetPreview kind={_kind} src={previewURL} variant="tile" crossorigin="anonymous" />
-          <span role="none" class="name">{description}</span>
-        </Option>
-      {/each}
+      <InfiniteScroll items={searchResults} itemKey="id">
+        {#snippet renderItem(/** @type {ExternalAsset} */ asset)}
+          {@const { id, previewURL, description, kind: _kind } = asset}
+          <Option label="" value={id}>
+            <AssetPreview kind={_kind} src={previewURL} variant="tile" crossorigin="anonymous" />
+            <span role="none" class="name">{description}</span>
+          </Option>
+        {/snippet}
+      </InfiniteScroll>
     </SimpleImageGrid>
   {/if}
 {:else if hasConfig}
@@ -218,10 +225,10 @@
           aria-label={$_('prefs.media.stock_photos.field_label', {
             values: { service: serviceLabel },
           })}
-          on:input={(event) => {
+          oninput={(event) => {
             const _value = /** @type {HTMLInputElement} */ (event.target).value.trim();
 
-            if (apiKeyPattern && _value.match(apiKeyPattern)) {
+            if (apiKeyPattern?.test(_value)) {
               apiKey = _value;
               hasAuthInfo = true;
               $prefs.apiKeys ??= {};
@@ -254,7 +261,7 @@
           variant="secondary"
           label={$_('sign_in')}
           disabled={!input.userName || !input.password || authState === 'requested'}
-          on:click={async () => {
+          onclick={async () => {
             authState = 'requested';
             input.userName = input.userName.trim();
             input.password = input.password.trim();

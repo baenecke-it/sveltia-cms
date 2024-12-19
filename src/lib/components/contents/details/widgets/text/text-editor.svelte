@@ -5,14 +5,15 @@
 -->
 <script>
   import { TextArea } from '@sveltia/ui';
+  import { getContext } from 'svelte';
+  import CharacterCounter from '$lib/components/contents/details/widgets/string/character-counter.svelte';
 
   /**
    * @type {LocaleCode}
    */
-  // svelte-ignore unused-export-let
   export let locale;
   /**
-   * @type {string}
+   * @type {FieldKeyPath}
    */
   // svelte-ignore unused-export-let
   export let keyPath;
@@ -46,10 +47,47 @@
    * @type {boolean}
    */
   export let invalid = false;
+
+  /**
+   * @type {string}
+   */
+  let inputValue = '';
+
+  /**
+   * Update {@link inputValue} based on {@link currentValue} while avoiding a cycle dependency.
+   * @param {string} newValue - New value to be set.
+   */
+  const setInputValue = (newValue) => {
+    if (inputValue !== newValue) {
+      inputValue = newValue;
+    }
+  };
+
+  /**
+   * Update {@link currentValue} based on {@link inputValue} while avoiding a cycle dependency.
+   * @param {string} newValue - New value to be set.
+   */
+  const setCurrentValue = (newValue) => {
+    if (currentValue !== newValue) {
+      currentValue = newValue;
+    }
+  };
+
+  $: setInputValue(typeof currentValue === 'string' ? currentValue : '');
+  $: setCurrentValue(inputValue ?? '');
+
+  const { extraHint } = getContext('field-editor') ?? {};
+
+  $: {
+    if (extraHint) {
+      $extraHint = CharacterCounter;
+    }
+  }
 </script>
 
 <TextArea
-  bind:value={currentValue}
+  lang={locale}
+  bind:value={inputValue}
   flex
   {readonly}
   {required}

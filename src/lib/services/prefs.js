@@ -9,7 +9,6 @@ const storageKey = 'sveltia-cms.prefs';
  * @type {import('svelte/store').Writable<{ type: string } | undefined>}
  */
 export const prefsError = writable();
-
 /**
  * @type {import('svelte/store').Writable<Preferences>}
  */
@@ -21,6 +20,8 @@ export const prefs = writable({}, (set) => {
       const _prefs = (await LocalStorage.get(storageKey)) ?? {};
 
       _prefs.apiKeys ??= {};
+      _prefs.closeOnSave ??= true;
+      _prefs.underlineLinks ??= true;
       set(_prefs);
     } catch {
       prefsError.set({ type: 'permission_denied' });
@@ -28,20 +29,22 @@ export const prefs = writable({}, (set) => {
   })();
 });
 
-prefs.subscribe(async (newPrefs) => {
+prefs.subscribe((newPrefs) => {
   if (!newPrefs || !Object.keys(newPrefs).length) {
     return;
   }
 
-  try {
-    if (!equal(newPrefs, await LocalStorage.get(storageKey))) {
-      await LocalStorage.set(storageKey, newPrefs);
+  (async () => {
+    try {
+      if (!equal(newPrefs, await LocalStorage.get(storageKey))) {
+        await LocalStorage.set(storageKey, newPrefs);
+      }
+    } catch {
+      //
     }
-  } catch {
-    //
-  }
+  })();
 
-  const { locale, theme, devModeEnabled = false } = newPrefs;
+  const { locale, theme, underlineLinks = true, devModeEnabled = false } = newPrefs;
 
   if (locale && get(appLocales).includes(locale)) {
     appLocale.set(locale);
@@ -53,6 +56,7 @@ prefs.subscribe(async (newPrefs) => {
   Object.assign(document.documentElement.dataset, {
     theme: autoTheming ? autoTheme : theme,
     autoTheming,
+    underlineLinks,
     env: devModeEnabled ? 'dev' : 'prod',
   });
 });

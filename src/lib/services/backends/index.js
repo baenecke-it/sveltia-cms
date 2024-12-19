@@ -5,7 +5,7 @@ import local from '$lib/services/backends/local';
 
 /**
  * List of all the supported backend services.
- * @type {{ [name: string]: BackendService }}
+ * @type {Record<string, BackendService>}
  * @see https://decapcms.org/docs/backends-overview/
  */
 export const allBackendServices = {
@@ -13,12 +13,10 @@ export const allBackendServices = {
   gitlab,
   local,
 };
-
 /**
  * @type {import('svelte/store').Writable<string | undefined>}
  */
 export const backendName = writable();
-
 /**
  * @type {import('svelte/store').Readable<BackendService | undefined>}
  */
@@ -33,3 +31,8 @@ export const backend = derived([backendName], ([name], _set, update) => {
     return newService;
   });
 });
+
+/**
+ * @type {import('svelte/store').Writable<boolean>}
+ */
+export const isLastCommitPublished = writable(true);

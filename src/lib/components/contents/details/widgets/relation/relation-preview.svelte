@@ -4,16 +4,17 @@
   @see https://decapcms.org/docs/widgets/#relation
 -->
 <script>
-  import { getOptions } from '$lib/components/contents/details/widgets/relation/helper';
-  import { getEntriesByCollection, getFile } from '$lib/services/contents';
-  import { getCanonicalLocale } from '$lib/services/contents/i18n';
+  import { getEntriesByCollection } from '$lib/services/contents/collection/entries';
+  import { getFile } from '$lib/services/contents/collection/files';
+  import { getListFormatter } from '$lib/services/contents/i18n';
+  import { getOptions } from '$lib/services/contents/widgets/relation/helper';
 
   /**
    * @type {LocaleCode}
    */
   export let locale;
   /**
-   * @type {string}
+   * @type {FieldKeyPath}
    */
   // svelte-ignore unused-export-let
   export let keyPath;
@@ -57,10 +58,9 @@
       return value;
     });
 
-  $: canonicalLocale = getCanonicalLocale(locale);
-  $: listFormatter = new Intl.ListFormat(canonicalLocale, { style: 'narrow', type: 'conjunction' });
+  $: listFormatter = getListFormatter(locale);
 </script>
 
-{#if refValues?.length}
-  <p>{listFormatter.format(refValues)}</p>
+{#if refValues.length}
+  <p lang={locale} dir="auto">{listFormatter.format(refValues)}</p>
 {/if}

@@ -5,7 +5,7 @@
   @todo Replace the native `<input>` with a custom component.
 -->
 <script>
-  import { Button, Icon, Slider, TextInput } from '@sveltia/ui';
+  import { Button, Slider, TextInput } from '@sveltia/ui';
   import { generateElementId } from '@sveltia/utils/element';
   import { _ } from 'svelte-i18n';
 
@@ -15,7 +15,7 @@
   // svelte-ignore unused-export-let
   export let locale;
   /**
-   * @type {string}
+   * @type {FieldKeyPath}
    */
   // svelte-ignore unused-export-let
   export let keyPath;
@@ -56,6 +56,8 @@
   } = fieldConfig);
 
   const id = generateElementId('color');
+  const rgbRegex = /^#[0-9a-f]{6}$/;
+  const rgbaRegex = /^(?<rgb>#[0-9a-f]{6})(?<a>[0-9a-f]{2})?$/;
   let inputValue = '';
   let inputAlphaValue = 255;
 
@@ -67,8 +69,8 @@
       return;
     }
 
-    const [, newValue, newAlphaHexValue] =
-      currentValue.match(/(^#[0-9a-f]{6})([0-9a-f]{2})?$/) ?? [];
+    const { rgb: newValue, a: newAlphaHexValue = 'ff' } =
+      currentValue.match(rgbaRegex)?.groups ?? {};
 
     // Avoid a cycle dependency & infinite loop
     if (newValue && inputValue !== newValue) {
@@ -76,7 +78,7 @@
     }
 
     if (newValue && enableAlpha) {
-      const newAlphaIntValue = Number.parseInt(`0x${newAlphaHexValue ?? 'ff'}`, 16);
+      const newAlphaIntValue = Number.parseInt(`0x${newAlphaHexValue}`, 16);
 
       // Avoid a cycle dependency & infinite loop
       if (inputAlphaValue !== newAlphaIntValue) {
@@ -89,7 +91,7 @@
    * Update {@link currentValue} based on {@link inputValue} and {@link inputAlphaValue}.
    */
   const setCurrentValue = () => {
-    let newValue = inputValue.match(/^#[0-9a-f]{6}$/) ? inputValue : '';
+    let newValue = rgbRegex.test(inputValue) ? inputValue : '';
 
     if (newValue && enableAlpha) {
       newValue += inputAlphaValue.toString(16).padStart(2, '0');
@@ -125,42 +127,43 @@
     aria-labelledby="{fieldId}-label"
     aria-errormessage="{fieldId}-error"
   />
-  <span role="none" class="value">
-    {#if allowInput}
-      <TextInput
-        id="{id}-input"
-        bind:value={inputValue}
-        {invalid}
-        {readonly}
-        {required}
-        aria-labelledby="{fieldId}-label"
-        aria-errormessage="{fieldId}-error"
-      />
-    {/if}
-    {#if enableAlpha}
-      {$_('opacity')}
-      <Slider
-        min={0}
-        max={255}
-        disabled={!inputValue}
-        bind:value={inputAlphaValue}
-        aria-label={$_('opacity')}
-      />
-    {/if}
-  </span>
-  <Button
-    variant="tertiary"
-    iconic
-    disabled={!inputValue}
-    aria-label={$_('clear')}
-    aria-controls={`${id}-picker ${allowInput ? `${id}-input` : ''}`}
-    on:click={() => {
-      inputValue = '';
-      inputAlphaValue = 255;
-    }}
-  >
-    <Icon slot="start-icon" name="delete" />
-  </Button>
+  {#if allowInput || enableAlpha}
+    <span role="none" class="value">
+      {#if allowInput}
+        <TextInput
+          id="{id}-input"
+          bind:value={inputValue}
+          {invalid}
+          {readonly}
+          {required}
+          aria-labelledby="{fieldId}-label"
+          aria-errormessage="{fieldId}-error"
+        />
+      {/if}
+      {#if enableAlpha}
+        {$_('opacity')}
+        <Slider
+          min={0}
+          max={255}
+          disabled={!inputValue}
+          bind:value={inputAlphaValue}
+          aria-label={$_('opacity')}
+        />
+      {/if}
+    </span>
+  {/if}
+  {#if !readonly && !required}
+    <Button
+      variant="tertiary"
+      label={$_('clear')}
+      disabled={!inputValue}
+      aria-controls={`${id}-picker ${allowInput ? `${id}-input` : ''}`}
+      onclick={() => {
+        inputValue = '';
+        inputAlphaValue = 255;
+      }}
+    />
+  {/if}
 </div>
 
 <style lang="scss">
@@ -170,7 +173,6 @@
     gap: 8px;
 
     .value {
-      flex: auto;
       display: flex;
       align-items: center;
       gap: 8px;

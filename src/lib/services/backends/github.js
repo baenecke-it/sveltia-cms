@@ -1,21 +1,50 @@
 import { getBase64 } from '@sveltia/utils/file';
+import { sleep } from '@sveltia/utils/misc';
 import { stripSlashes } from '@sveltia/utils/string';
 import mime from 'mime';
 import { _ } from 'svelte-i18n';
 import { get } from 'svelte/store';
 import { initServerSideAuth } from '$lib/services/backends/shared/auth';
 import { createCommitMessage } from '$lib/services/backends/shared/commits';
-import { fetchAndParseFiles, repositoryProps } from '$lib/services/backends/shared/data';
+import { fetchAndParseFiles } from '$lib/services/backends/shared/data';
 import { siteConfig } from '$lib/services/config';
+import { dataLoadedProgress } from '$lib/services/contents';
 import { user } from '$lib/services/user';
 import { sendRequest } from '$lib/services/utils/networking';
 
 const backendName = 'github';
 const label = 'GitHub';
-/** @type {RepositoryInfo} */
-const repository = { ...repositoryProps };
 const statusDashboardURL = 'https://www.githubstatus.com/';
 const statusCheckURL = 'https://www.githubstatus.com/api/v2/status.json';
+
+/**
+ * @type {RepositoryInfo}
+ */
+const repository = new Proxy(/** @type {any} */ ({}), {
+  /**
+   * Define the getter.
+   * @param {Record<string, any>} obj - Object itself.
+   * @param {string} key - Property name.
+   * @returns {any} Property value.
+   */
+  get: (obj, key) => {
+    if (key in obj) {
+      return obj[key];
+    }
+
+    const { baseURL, branch } = obj;
+
+    if (key === 'treeBaseURL') {
+      return branch ? `${baseURL}/tree/${branch}` : baseURL;
+    }
+
+    if (key === 'blobBaseURL') {
+      return branch ? `${baseURL}/blob/${branch}` : '';
+    }
+
+    return undefined;
+  },
+});
 
 /**
  * Check the GitHub service status.
@@ -109,10 +138,10 @@ const fetchGraphQL = async (query, variables = {}) => {
 };
 
 /**
- * Initialize the GitHub backend.
- * @throws {Error} When the backend is not configured properly.
+ * Get the configured repository’s basic information.
+ * @returns {RepositoryInfo} Repository info.
  */
-const init = () => {
+const getRepositoryInfo = () => {
   const {
     repo: projectPath,
     branch,
@@ -120,14 +149,24 @@ const init = () => {
   } = /** @type {SiteConfig} */ (get(siteConfig)).backend;
 
   const [owner, repo] = /** @type {string} */ (projectPath).split('/');
+  const origin = apiRoot ? new URL(apiRoot).origin : 'https://github.com';
 
-  if (!repository.owner) {
-    const origin = apiRoot ? new URL(apiRoot).origin : 'https://github.com';
-    const baseURL = `${origin}/${owner}/${repo}`;
-    const branchURL = branch ? `${baseURL}/tree/${branch}` : baseURL;
+  return Object.assign(repository, {
+    service: backendName,
+    label,
+    owner,
+    repo,
+    branch,
+    baseURL: `${origin}/${owner}/${repo}`,
+    databaseName: `${backendName}:${owner}/${repo}`,
+  });
+};
 
-    Object.assign(repository, { service: backendName, owner, repo, branch, baseURL, branchURL });
-  }
+/**
+ * Initialize the GitHub backend.
+ */
+const init = () => {
+  getRepositoryInfo();
 };
 
 /**
@@ -160,6 +199,7 @@ const signIn = async ({ token: cachedToken, auto = false }) => {
     }));
 
   const {
+    id,
     name,
     login,
     email,
@@ -170,6 +210,7 @@ const signIn = async ({ token: cachedToken, auto = false }) => {
   return {
     backendName,
     token,
+    id,
     name,
     login,
     email,
@@ -183,6 +224,30 @@ const signIn = async ({ token: cachedToken, auto = false }) => {
  * @returns {Promise<void>}
  */
 const signOut = async () => void 0;
+
+/**
+ * Check if the user has access to the current repository.
+ * @throws {Error} If the user is not a collaborator of the repository.
+ * @see https://docs.github.com/en/rest/collaborators/collaborators#check-if-a-user-is-a-repository-collaborator
+ */
+const checkRepositoryAccess = async () => {
+  const { owner, repo } = repository;
+  const userName = /** @type {string} */ (get(user)?.login);
+
+  const { ok } = /** @type {Response} */ (
+    await fetchAPI(
+      `/repos/${owner}/${repo}/collaborators/${encodeURIComponent(userName)}`,
+      { headers: { Accept: 'application/json' } },
+      { responseType: 'raw' },
+    )
+  );
+
+  if (!ok) {
+    throw new Error('Not a collaborator of the repository', {
+      cause: new Error(get(_)('repository_no_access', { values: { repo } })),
+    });
+  }
+};
 
 /**
  * Fetch the repository’s default branch name, which is typically `master` or `main`.
@@ -220,20 +285,31 @@ const fetchDefaultBranchName = async () => {
 };
 
 /**
- * Fetch the latest commit’s SHA-1 hash.
- * @returns {Promise<string>} Hash.
+ * Fetch the last commit on the repository.
+ * @returns {Promise<{ hash: string, message: string }>} Commit’s SHA-1 hash and message.
  * @throws {Error} When the branch could not be found.
  */
-const fetchLastCommitHash = async () => {
+const fetchLastCommit = async () => {
   const { owner, repo, branch } = repository;
 
-  const result = /** @type {{ repository: { ref: { target: { oid: string } } } }} */ (
+  /**
+   * @type {{ repository: { ref: { target: { history: { nodes: [{ oid: string, message: string }] }
+   * } } } }}
+   */
+  const result = /** @type {any} */ (
     await fetchGraphQL(`
       query {
         repository(owner: "${owner}", name: "${repo}") {
           ref(qualifiedName: "${branch}") {
             target {
-              oid
+              ... on Commit {
+                history(first: 1) {
+                  nodes {
+                    oid
+                    message
+                  }
+                }
+              }
             }
           }
         }
@@ -241,25 +317,34 @@ const fetchLastCommitHash = async () => {
     `)
   );
 
+  if (!result.repository) {
+    throw new Error('Failed to retrieve the last commit hash.', {
+      cause: new Error(get(_)('repository_not_found', { values: { repo } })),
+    });
+  }
+
   if (!result.repository.ref) {
     throw new Error('Failed to retrieve the last commit hash.', {
       cause: new Error(get(_)('branch_not_found', { values: { repo, branch } })),
     });
   }
 
-  return result.repository.ref.target.oid;
+  const { oid: hash, message } = result.repository.ref.target.history.nodes[0];
+
+  return { hash, message };
 };
 
 /**
  * Fetch the repository’s complete file list, and return it in the canonical format.
+ * @param {string} [lastHash] - The last commit’s SHA-1 hash.
  * @returns {Promise<BaseFileListItem[]>} File list.
  */
-const fetchFileList = async () => {
+const fetchFileList = async (lastHash) => {
   const { owner, repo, branch } = repository;
 
   const result =
     /** @type {{ tree: { type: string, path: string, sha: string, size: number }[] }} */ (
-      await fetchAPI(`/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`)
+      await fetchAPI(`/repos/${owner}/${repo}/git/trees/${lastHash ?? branch}?recursive=1`)
     );
 
   return result.tree
@@ -273,70 +358,110 @@ const fetchFileList = async () => {
  * @returns {Promise<RepositoryContentsMap>} Fetched contents map.
  */
 const fetchFileContents = async (fetchingFiles) => {
-  const { owner, repo, branch, baseURL } = repository;
+  const { owner, repo, branch } = repository;
+  const fetchingFileList = structuredClone(fetchingFiles);
+  /** @type {any[][]} */
+  const chunks = [];
+  const chunkSize = 250;
+  /** @type {any} */
+  const results = {};
 
-  const query = fetchingFiles
-    .map(({ type, path, sha }, index) => {
-      const str = [];
+  /**
+   * Get a query string for a new API request.
+   * @param {any[]} chunk - Sliced `fetchingFileList`.
+   * @param {number} startIndex - Start index.
+   * @returns {string} Query string.
+   */
+  const getQuery = (chunk, startIndex) => {
+    const innerQuery = chunk
+      .map(({ type, path, sha }, i) => {
+        const str = [];
+        const index = startIndex + i;
 
-      if (type === 'entry') {
+        if (type === 'entry') {
+          str.push(`
+            content_${index}: object(oid: "${sha}") {
+              ... on Blob { text }
+            }
+          `);
+        }
+
         str.push(`
-          content_${index}: object(oid: "${sha}") {
-            ... on Blob { text }
-          }
-        `);
-      }
-
-      str.push(`
-        commit_${index}: ref(qualifiedName: "${branch}") {
-          target {
-            ... on Commit {
-              history(first: 1, path: "${path}") {
-                nodes {
-                  author {
-                    name
-                    email
-                    user {
-                      id: databaseId
-                      login
+          commit_${index}: ref(qualifiedName: "${branch}") {
+            target {
+              ... on Commit {
+                history(first: 1, path: "${path}") {
+                  nodes {
+                    author {
+                      name
+                      email
+                      user {
+                        id: databaseId
+                        login
+                      }
                     }
+                    committedDate
                   }
-                  committedDate
                 }
               }
             }
           }
-        }
-      `);
+        `);
 
-      return str.join('');
-    })
-    .join('');
+        return str.join('');
+      })
+      .join('');
 
-  // Fetch all the text contents with the GraphQL API
-  const result = /** @type {{ repository: { [key: string]: any } }} */ (
-    await fetchGraphQL(`
+    return `
       query {
         repository(owner: "${owner}", name: "${repo}") {
-          ${query}
+          ${innerQuery}
         }
       }
-    `)
+    `;
+  };
+
+  dataLoadedProgress.set(0);
+
+  // Show a fake progressbar because the request waiting time is long
+  const dataLoadedProgressInterval = window.setInterval(() => {
+    dataLoadedProgress.update((progress = 0) => progress + 1);
+  }, fetchingFileList.length / 10);
+
+  for (let i = 0; i < fetchingFileList.length; i += chunkSize) {
+    chunks.push(fetchingFileList.slice(i, i + chunkSize));
+  }
+
+  // Split the file list into chunks and repeat requests to avoid API timeout
+  await Promise.all(
+    chunks.map(async (chunk, index) => {
+      // Add a short delay to avoid Too Many Requests error
+      await sleep(index * 500);
+
+      const result = /** @type {{ repository: Record<string, any> }} */ (
+        await fetchGraphQL(getQuery(chunk, index * chunkSize))
+      );
+
+      Object.assign(results, result.repository);
+    }),
   );
+
+  window.clearInterval(dataLoadedProgressInterval);
+  dataLoadedProgress.set(undefined);
 
   return Object.fromEntries(
     fetchingFiles.map(({ path, sha, size }, index) => {
       const {
         author: { name, email, user: _user },
         committedDate,
-      } = result.repository[`commit_${index}`].target.history.nodes[0];
+      } = results[`commit_${index}`].target.history.nodes[0];
 
       const data = {
         sha,
-        size,
-        text: result.repository[`content_${index}`]?.text,
+        // eslint-disable-next-line object-shorthand
+        size: /** @type {number} */ (size),
+        text: results[`content_${index}`]?.text,
         meta: {
-          repoFileURL: `${baseURL}/blob/${branch}/${path}`,
           commitAuthor: {
             name,
             email,
@@ -357,10 +482,12 @@ const fetchFileContents = async (fetchingFiles) => {
  * the {@link allEntries} and {@link allAssets} stores.
  */
 const fetchFiles = async () => {
+  await checkRepositoryAccess();
+
   await fetchAndParseFiles({
     repository,
     fetchDefaultBranchName,
-    fetchLastCommitHash,
+    fetchLastCommit,
     fetchFileList,
     fetchFileContents,
   });
@@ -405,7 +532,7 @@ const commitChanges = async (changes, options) => {
 
   const additions = await Promise.all(
     changes
-      .filter(({ action }) => ['create', 'update'].includes(action))
+      .filter(({ action }) => ['create', 'update', 'move'].includes(action))
       .map(async ({ path, data, base64 }) => ({
         path,
         contents: base64 ?? (await getBase64(data ?? '')),
@@ -413,8 +540,8 @@ const commitChanges = async (changes, options) => {
   );
 
   const deletions = changes
-    .filter(({ action }) => action === 'delete')
-    .map(({ path }) => ({ path }));
+    .filter(({ action }) => ['move', 'delete'].includes(action))
+    .map(({ previousPath, path }) => ({ path: previousPath ?? path }));
 
   const result = /** @type {{ createCommitOnBranch: { commit: { url: string }} }} */ (
     await fetchGraphQL(
@@ -433,7 +560,7 @@ const commitChanges = async (changes, options) => {
             repositoryNameWithOwner: `${owner}/${repo}`,
             branchName: branch,
           },
-          expectedHeadOid: await fetchLastCommitHash(),
+          expectedHeadOid: (await fetchLastCommit()).hash,
           fileChanges: { additions, deletions },
           message: { headline: createCommitMessage(changes, options) },
         },
@@ -473,6 +600,7 @@ export default {
   repository,
   statusDashboardURL,
   checkStatus,
+  getRepositoryInfo,
   init,
   signIn,
   signOut,
