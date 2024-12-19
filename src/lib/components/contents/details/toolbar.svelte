@@ -265,7 +265,7 @@
     <!--        <pre>{JSON.stringify(currentValues)}</pre>-->
     <Button
       variant="primary"
-      disabled={!!currentValues[defaultLocale].sent || !originalEntry}
+      disabled={!!currentValues[defaultLocale]?.sent || !originalEntry}
       label={$_('newsletter.send')}
       on:click={async () => {
         showSendNewsletterDialog = true;
