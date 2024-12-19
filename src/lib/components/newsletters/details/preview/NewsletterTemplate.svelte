@@ -608,8 +608,6 @@
         }</style>
 </svelte:head>
 
-<svelte:body style="height: 100%;margin: 0;padding: 0;width: 100%;background-color: #333333;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;"></svelte:body>
-
 <center style="min-width: fit-content;">
     {#if (slug)}
         <a href="/newsletter/{slug}" style="color: #cc2944;">Zur Webansicht</a>
