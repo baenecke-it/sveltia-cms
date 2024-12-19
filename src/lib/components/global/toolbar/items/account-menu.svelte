@@ -57,26 +57,26 @@
   {#each additionalLinks as additionalLink}
     <MenuItem
       label={additionalLink.label}
-      onclick={async () => {
-          const userCache =
-          (await LocalStorage.get('sveltia-cms.user')) ||
-          (await LocalStorage.get('decap-cms-user')) ||
-          (await LocalStorage.get('netlify-cms-user'));
+      on:click={async () => {
+            const userCache =
+            (await LocalStorage.get('sveltia-cms.user')) ||
+            (await LocalStorage.get('decap-cms-user')) ||
+            (await LocalStorage.get('netlify-cms-user'));
 
-          fetch(additionalLink.url, {
-            headers: {
-              Authorization: `Bearer ${userCache?.token}`,
-            },
-          }) // FETCH BLOB FROM IT
-            .then((response) => response.blob())
-            .then((blob) => { // RETRIEVE THE BLOB AND CREATE LOCAL URL
-              const _url = window.URL.createObjectURL(blob);
+            fetch(additionalLink.url, {
+              headers: {
+                Authorization: `Bearer ${userCache?.token}`,
+              },
+            }) // FETCH BLOB FROM IT
+              .then((response) => response.blob())
+              .then((blob) => { // RETRIEVE THE BLOB AND CREATE LOCAL URL
+                const _url = window.URL.createObjectURL(blob);
 
-              window.open(_url, '_blank')?.focus(); // window.open + focus
-          }).catch((err) => {
-            console.log(err);
-          });
-        }}
+                window.open(_url, '_blank')?.focus(); // window.open + focus
+            }).catch((err) => {
+              console.log(err);
+            });
+          }}
     />
   {/each}
   {#if $prefs.devModeEnabled}
