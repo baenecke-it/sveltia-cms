@@ -18,6 +18,7 @@
   import BackButton from '$lib/components/common/page-toolbar/back-button.svelte';
   import EditSlugDialog from '$lib/components/contents/details/edit-slug-dialog.svelte';
   import {LocalStorage} from '@sveltia/utils/storage';
+  import {mount} from 'svelte';
   import NewsletterContent from '../../newsletters/details/preview/NewsletterContent.svelte';
   import { goBack, goto } from '$lib/services/app/navigation';
   import { getAssetFolder } from '$lib/services/assets';
@@ -404,7 +405,7 @@
 
           /* eslint-disable */
           const elem = document.createElement('div');
-          new NewsletterContent({ target: elem, props: { newsletter, generateBlobSrc: false } });
+          mount(NewsletterContent, { target: elem, props: { newsletter, generateBlobSrc: false } });
           const html = elem.innerHTML;
           /* eslint-enable */
 
