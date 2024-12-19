@@ -238,7 +238,7 @@
         <!--        <pre>{JSON.stringify(currentValues)}</pre>-->
         <Button
                 variant="primary"
-                disabled={!!currentValues[defaultLocale].sent}
+                disabled={!!currentValues[defaultLocale].sent || !originalEntry}
                 label={$_('newsletter.send')}
                 on:click={async () => {
                   showSendNewsletterDialog = true;
@@ -325,6 +325,11 @@
             (await LocalStorage.get('sveltia-cms.user')) ||
             (await LocalStorage.get('decap-cms-user')) ||
             (await LocalStorage.get('netlify-cms-user'));
+
+          if (!originalEntry) {
+            showSendNewsletterErrorDialog = true;
+            return;
+          }
 
           const response = await fetch('https://api.singtonic.net/newsletter', {
             method: 'POST',
