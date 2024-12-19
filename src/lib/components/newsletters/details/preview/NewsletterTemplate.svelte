@@ -616,24 +616,28 @@
     {/if}
     <table align="center" border="0" cellpadding="0" cellspacing="0" height="100%" width="100%" id="bodyTable"
            style="border-collapse: collapse;mso-table-lspace: 0pt;mso-table-rspace: 0pt;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;height: 100%;margin: 0;padding: 0;width: 100%;background-color: #333333;">
+        <tbody>
         <tr>
             <td align="center" valign="top" id="bodyCell"
                 style="mso-line-height-rule: exactly;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;height: 100%;margin: 0;padding: 0;width: 100%;background-color: #333333;">
                 <!-- BEGIN TEMPLATE // -->
                 <table border="0" cellpadding="0" cellspacing="0" width="100%"
                        style="border-collapse: collapse;mso-table-lspace: 0pt;mso-table-rspace: 0pt;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;min-height: 100vh">
+                    <tbody>
                     <tr>
                         <td align="center" valign="top" id="templateHeader" data-template-container
                             style="mso-line-height-rule: exactly;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;background-color: #333333;background-image: none;background-repeat: no-repeat;background-position: center;background-size: cover;border-top: 0;border-bottom: 0;padding-top: 36px;padding-bottom: 36px;">
                             <!--[if (gte mso 9)|(IE)]>
                             <table align="center" border="0" cellspacing="0" cellpadding="0" width="600"
                                    style="width:600px;">
+                                <tbody>
                                 <tr>
                                     <td align="center" valign="top" width="600" style="width:600px;">
                             <![endif]-->
                             <table align="center" border="0" cellpadding="0" cellspacing="0" width="100%"
                                    class="templateContainer"
                                    style="border-collapse: collapse;mso-table-lspace: 0pt;mso-table-rspace: 0pt;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;max-width: 600px !important;">
+                                <tbody>
                                 <tr>
                                     <td valign="top" class="headerContainer"
                                         style="mso-line-height-rule: exactly;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;background-color: #transparent;background-image: none;background-repeat: no-repeat;background-position: center;background-size: cover;border-top: 0;border-bottom: 0;padding-top: 0;padding-bottom: 0;">
@@ -676,6 +680,7 @@
                                                     <table align="left" border="0" cellspacing="0" cellpadding="0"
                                                            width="100%"
                                                            style="width:100%;">
+                                                        <tbody>
                                                         <tr>
                                                     <![endif]-->
                                                     <!--[if mso]>
@@ -695,11 +700,12 @@
                                                         </tr>
                                                         </tbody>
                                                     </table>
+                                                            <!--[if mso]>
+                                                            </td>
+                                                            <![endif]-->
                                                     <!--[if mso]>
-                                                    </td>
-                                                    <![endif]-->
-                                                    <!--[if mso]>
-                                                    </tr>
+                                                        </tr>
+                                                        </tbody>
                                                     </table>
                                                     <![endif]-->
                                                 </td>
@@ -708,10 +714,12 @@
                                         </table>
                                     </td>
                                 </tr>
+                                </tbody>
                             </table>
                             <!--[if (gte mso 9)|(IE)]>
-                            </td>
-                            </tr>
+                                    </td>
+                                </tr>
+                                </tbody>
                             </table>
                             <![endif]-->
                         </td>
@@ -722,12 +730,14 @@
                             <!--[if (gte mso 9)|(IE)]>
                             <table align="center" border="0" cellspacing="0" cellpadding="0" width="600"
                                    style="width:600px;">
+                                <tbody>
                                 <tr>
                                     <td align="center" valign="top" width="600" style="width:600px;">
                             <![endif]-->
                             <table align="center" border="0" cellpadding="0" cellspacing="0" width="100%"
                                    class="templateContainer"
                                    style="border-collapse: collapse;mso-table-lspace: 0pt;mso-table-rspace: 0pt;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;max-width: 600px !important;">
+                                <tbody>
                                 <tr>
                                     <td valign="top" class="bodyContainer"
                                         style="mso-line-height-rule: exactly;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;background-color: #transparent;background-image: none;background-repeat: no-repeat;background-position: center;background-size: cover;border-top: 0;border-bottom: 0;padding-top: 0;padding-bottom: 0;">
@@ -742,6 +752,7 @@
                                                     <table align="left" border="0" cellspacing="0" cellpadding="0"
                                                            width="100%"
                                                            style="width:100%;">
+                                                        <tbody>
                                                         <tr>
                                                     <![endif]-->
                                                     <!--[if mso]>
@@ -759,11 +770,12 @@
                                                         </tr>
                                                         </tbody>
                                                     </table>
+                                                            <!--[if mso]>
+                                                            </td>
+                                                            <![endif]-->
                                                     <!--[if mso]>
-                                                    </td>
-                                                    <![endif]-->
-                                                    <!--[if mso]>
-                                                    </tr>
+                                                        </tr>
+                                                        </tbody>
                                                     </table>
                                                     <![endif]-->
                                                 </td>
@@ -772,10 +784,12 @@
                                         </table>
                                     </td>
                                 </tr>
+                                </tbody>
                             </table>
                             <!--[if (gte mso 9)|(IE)]>
-                            </td>
-                            </tr>
+                                    </td>
+                                </tr>
+                                </tbody>
                             </table>
                             <![endif]-->
                         </td>
@@ -786,12 +800,14 @@
                             <!--[if (gte mso 9)|(IE)]>
                             <table align="center" border="0" cellspacing="0" cellpadding="0" width="600"
                                    style="width:600px;">
+                                <tbody>
                                 <tr>
                                     <td align="center" valign="top" width="600" style="width:600px;">
                             <![endif]-->
                             <table align="center" border="0" cellpadding="0" cellspacing="0" width="100%"
                                    class="templateContainer"
                                    style="border-collapse: collapse;mso-table-lspace: 0pt;mso-table-rspace: 0pt;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;max-width: 600px !important;">
+                                <tbody>
                                 <tr>
                                     <td valign="top" class="footerContainer"
                                         style="mso-line-height-rule: exactly;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;background-color: #transparent;background-image: none;background-repeat: no-repeat;background-position: center;background-size: cover;border-top: 0;border-bottom: 0;padding-top: 0;padding-bottom: 0;">
@@ -858,6 +874,7 @@
                                                                                                border="0"
                                                                                                cellspacing="0"
                                                                                                cellpadding="0">
+                                                                                            <tbody>
                                                                                             <tr>
                                                                                         <![endif]-->
                                                                                         <!--[if mso]>
@@ -1109,11 +1126,12 @@
                                                                                             </tr>
                                                                                             </tbody>
                                                                                         </table>
+                                                                                                <!--[if mso]>
+                                                                                                </td>
+                                                                                                <![endif]-->
                                                                                         <!--[if mso]>
-                                                                                        </td>
-                                                                                        <![endif]-->
-                                                                                        <!--[if mso]>
-                                                                                        </tr>
+                                                                                            </tr>
+                                                                                            </tbody>
                                                                                         </table>
                                                                                         <![endif]-->
                                                                                     </td>
@@ -1169,6 +1187,7 @@
                                                     <table align="left" border="0" cellspacing="0" cellpadding="0"
                                                            width="100%"
                                                            style="width:100%;">
+                                                        <tbody>
                                                         <tr>
                                                     <![endif]-->
                                                     <!--[if mso]>
@@ -1187,11 +1206,12 @@
                                                         </tr>
                                                         </tbody>
                                                     </table>
+                                                            <!--[if mso]>
+                                                            </td>
+                                                            <![endif]-->
                                                     <!--[if mso]>
-                                                    </td>
-                                                    <![endif]-->
-                                                    <!--[if mso]>
-                                                    </tr>
+                                                        </tr>
+                                                        </tbody>
                                                     </table>
                                                     <![endif]-->
                                                 </td>
@@ -1200,17 +1220,21 @@
                                         </table>
                                     </td>
                                 </tr>
+                                </tbody>
                             </table>
                             <!--[if (gte mso 9)|(IE)]>
-                            </td>
-                            </tr>
+                                    </td>
+                                </tr>
+                                </tbody>
                             </table>
                             <![endif]-->
                         </td>
                     </tr>
+                    </tbody>
                 </table>
                 <!-- // END TEMPLATE -->
             </td>
         </tr>
+        </tbody>
     </table>
 </center>
