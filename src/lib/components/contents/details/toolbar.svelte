@@ -34,7 +34,7 @@
   import { getEntrySummary } from '$lib/services/contents/entry/summary';
   import { defaultI18nConfig, getLocaleLabel } from '$lib/services/contents/i18n';
   import { prefs } from '$lib/services/prefs';
-  import {selectedCollection} from '$lib/services/contents/index.js';
+  import {selectedCollection} from '$lib/services/contents/collection';
 
   let showValidationToast = false;
   let showDeleteDialog = false;

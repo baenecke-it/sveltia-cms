@@ -23,7 +23,7 @@
   import { getEntryPreviewURL, getEntryRepoBlobURL } from '$lib/services/contents/entry';
   import { defaultI18nConfig, getLocaleLabel } from '$lib/services/contents/i18n';
   import { prefs } from '$lib/services/prefs';
-  import {selectedCollection} from "$lib/services/contents/index.js";
+  import {selectedCollection} from '$lib/services/contents/collection';
 
   /**
    * The wrapper element’s `id` attribute.
