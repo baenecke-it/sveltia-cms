@@ -58,7 +58,7 @@
         {#each additionalLinks as additionalLink}
             <MenuItem
                     label={additionalLink.label}
-                    on:click={async () => {
+                    onclick={async () => {
           const userCache =
           (await LocalStorage.get('sveltia-cms.user')) ||
           (await LocalStorage.get('decap-cms-user')) ||
