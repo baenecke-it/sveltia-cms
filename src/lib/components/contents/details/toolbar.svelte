@@ -327,7 +327,7 @@
                 variant="primary"
                 disabled={!!currentValues[defaultLocale]?.sent || !originalEntry}
                 label={$_('newsletter.send')}
-                on:click={async () => {
+                onclick={async () => {
                   showSendNewsletterDialog = true;
             }}
     >
@@ -400,7 +400,7 @@
         bind:open={showSendNewsletterDialog}
         title={$_('newsletter.send')}
         okLabel={$_('newsletter.send')}
-        on:ok={async () => {
+        onOk={async () => {
           const newsletter = currentValues[defaultLocale];
 
           /* eslint-disable */
@@ -448,7 +448,7 @@
           $entryDraft.currentValues[defaultLocale].sent = true;
           await save();
   }}
-        on:close={() => {
+        onClose={() => {
     menuButton.focus();
   }}
 >
@@ -458,7 +458,7 @@
 <AlertDialog
         bind:open={showSendNewsletterErrorDialog}
         title={$_('newsletter.error.send_failed.title')}
-        on:close={() => {
+        onClose={() => {
     menuButton.focus();
   }}
 >
@@ -468,7 +468,7 @@
 <AlertDialog
         bind:open={updateNewsletterSentStateErrorDialog}
         title={$_('newsletter.error.update_failed.title')}
-        on:close={() => {
+        onClose={() => {
     menuButton.focus();
   }}
 >
