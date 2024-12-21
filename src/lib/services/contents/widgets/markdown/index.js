@@ -55,7 +55,7 @@ export const buttonNameMap = {
 /**
  * The default `editor_components` property options.
  */
-export const defaultComponents = ['image'];
+export const defaultComponents = [];
 
 /**
  * Custom components registered using `CMS.registerEditorComponent`.
