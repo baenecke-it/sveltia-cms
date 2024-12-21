@@ -10,12 +10,12 @@
   import { signOut, user } from '$lib/services/user';
   import { siteConfig } from '$lib/services/config';
 
-  /** @type {any} */
-  let menuButton;
-  let showPrefsDialog = false;
+  /** @type {MenuButton | undefined} */
+  let menuButton = $state();
+  let showPrefsDialog = $state(false);
 
-  $: hasAvatar = !!$user?.avatarURL;
-  $: isLocal = $backendName === 'local';
+  const hasAvatar = $derived(!!$user?.avatarURL);
+  const isLocal = $derived($backendName === 'local');
 
   /** @type {{url: string, label: string}[]} */
   const additionalLinks = get(siteConfig)?.links ?? [];
@@ -120,7 +120,7 @@
 <PrefsDialog
   bind:open={showPrefsDialog}
   onClose={() => {
-    menuButton.focus();
+    menuButton?.focus();
   }}
 />
 

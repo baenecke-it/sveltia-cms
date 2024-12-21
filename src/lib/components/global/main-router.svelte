@@ -26,6 +26,8 @@
     config: ConfigPage,
   };
 
+  const SelectedPage = $derived(pages[$selectedPageName]);
+
   /**
    * Select one of the pages given the URL path.
    * @todo Show Not Found page.
@@ -53,13 +55,13 @@
 </script>
 
 <svelte:window
-  on:hashchange={() => {
+  onhashchange={() => {
     selectPage();
   }}
 />
 
 <GlobalToolbar />
-<svelte:component this={pages[$selectedPageName]} />
+<SelectedPage />
 
 <UploadAssetsDialog />
 <UploadAssetsConfirmDialog />

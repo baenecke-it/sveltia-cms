@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script>
   import { Group } from '@sveltia/ui';
   import { _ } from 'svelte-i18n';
@@ -102,6 +104,7 @@
       flex: none;
       margin: 0 0 8px;
       color: var(--sui-secondary-foreground-color);
+      font-size: var(--sui-font-size-large);
 
       & + div {
         overflow: auto;

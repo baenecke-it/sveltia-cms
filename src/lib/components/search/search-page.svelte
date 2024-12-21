@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script>
   import { onMount } from 'svelte';
   import { _ } from 'svelte-i18n';
@@ -48,7 +50,7 @@
 </script>
 
 <svelte:window
-  on:hashchange={() => {
+  onhashchange={() => {
     navigate();
   }}
 />
@@ -57,5 +59,7 @@
   class="content"
   aria-label={$_('search_results_for_x', { values: { terms: $searchTerms } })}
 >
-  <SearchResults slot="main" />
+  {#snippet main()}
+    <SearchResults />
+  {/snippet}
 </PageContainer>

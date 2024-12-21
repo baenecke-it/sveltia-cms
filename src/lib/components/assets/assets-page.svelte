@@ -27,7 +27,9 @@
   const routeRegex =
     /^\/assets(?:\/(?<folderPath>[/\-\w]+))?(?:\/(?<fileName>[^/]+\.[A-Za-z0-9]+))?$/;
 
-  $: selectedAssetFolderLabel = getFolderLabelByPath($selectedAssetFolder?.internalPath);
+  const selectedAssetFolderLabel = $derived(
+    getFolderLabelByPath($selectedAssetFolder?.internalPath),
+  );
 
   /**
    * Navigate to the asset list or asset details page given the URL hash.
@@ -88,28 +90,39 @@
 </script>
 
 <svelte:window
-  on:hashchange={() => {
+  onhashchange={() => {
     navigate();
   }}
 />
 
 <PageContainer class="media" aria-label={$_('asset_library')}>
-  <PrimarySidebar slot="primary_sidebar" />
-  <Group
-    slot="main"
-    id="assets-container"
-    class="main"
-    aria-label={$_('x_asset_folder', {
-      values: { folder: selectedAssetFolderLabel },
-    })}
-  >
-    <PageContainerMainArea>
-      <PrimaryToolbar slot="primary_toolbar" />
-      <SecondaryToolbar slot="secondary_toolbar" />
-      <AssetList slot="main_content" />
-      <SecondarySidebar slot="secondary_sidebar" />
-    </PageContainerMainArea>
-  </Group>
+  {#snippet primarySidebar()}
+    <PrimarySidebar />
+  {/snippet}
+  {#snippet main()}
+    <Group
+      id="assets-container"
+      class="main"
+      aria-label={$_('x_asset_folder', {
+        values: { folder: selectedAssetFolderLabel },
+      })}
+    >
+      <PageContainerMainArea>
+        {#snippet primaryToolbar()}
+          <PrimaryToolbar />
+        {/snippet}
+        {#snippet secondaryToolbar()}
+          <SecondaryToolbar />
+        {/snippet}
+        {#snippet mainContent()}
+          <AssetList />
+        {/snippet}
+        {#snippet secondarySidebar()}
+          <SecondarySidebar />
+        {/snippet}
+      </PageContainerMainArea>
+    </Group>
+  {/snippet}
 </PageContainer>
 
 <AssetDetailsOverlay />

@@ -85,7 +85,7 @@ Due to its unfortunate abandonment, Netlify CMS spawned 3 successors:
 
 - [Static CMS](https://github.com/StaticJsCMS/static-cms): a community fork, initial commit made in September 2022, discontinued in September 2024
 - **Sveltia CMS**: a total reboot, started in November 2022, first appeared on GitHub in March 2023
-- [Decap CMS](https://github.com/decaporg/decap-cms): a rebranded version, [announced in February 2023](https://www.netlify.com/blog/netlify-cms-to-become-decap-cms/) as the official successor, with a Netlify agency partner taking ownership, mostly inactive
+- [Decap CMS](https://github.com/decaporg/decap-cms): a rebranded version, [announced in February 2023](https://www.netlify.com/blog/netlify-cms-to-become-decap-cms/) as the official successor with a Netlify agency partner taking ownership — mostly inactive
 
 Sveltia CMS is the only project that doesn’t inherit the complexity, technical debt and numerous bugs of Netlify CMS, which was launched back in 2015. We are confident that our decision to rebuild the application from scratch was the right one, as proven by the [hundreds of improvements](#differentiators) we have already made.
 
@@ -94,8 +94,8 @@ While Sveltia CMS is specifically designed to replace legacy Netlify CMS instanc
 ### Our goals
 
 - Making Sveltia CMS a viable, definitive successor to Netlify CMS
-- Emerging as the leading open source offering in the Git-based CMS market
 - Empowering small businesses and individuals who need a simple, free, yet powerful CMS solution
+- Emerging as the leading open source offering in the Git-based CMS market
 - Extending its capabilities as digital asset management (DAM) software
 - Showcasing the power of Svelte and UX engineering
 
@@ -124,7 +124,7 @@ We are working hard to create a **tremendously better alternative to Netlify CMS
 ### Better UX
 
 - Created and maintained by an [experienced UX engineer](https://github.com/kyoshino) who loves code, design and marketing. You can expect constant improvements to the user experience (UX) and developer experience (DX) across the platform.
-- The maintainer tries to be as responsive as possible, and while there are no guarantees, reported bugs are usually fixed within 24 hours.
+- The maintainer tries to be as responsive as possible. While there are no guarantees, the typical turnaround time for bug fixes is less than 6 hours.
 - Offers a modern, intuitive user interface, including an immersive dark mode[^2], inspired in part by the Netlify CMS v3 prototype[^1].
 - We develop [our own UI library](https://github.com/sveltia/sveltia-ui) to ensure optimal usability without compromising accessibility.
 - Comes with touch device support, such as larger buttons for easier tapping. While the UI is not yet optimized for small screens, it should work well with large tablets like iPad Pro or Pixel Tablet. Mobile support and other optimizations such as swipe navigation are planned shortly after the 1.0 release.
@@ -137,7 +137,7 @@ We are working hard to create a **tremendously better alternative to Netlify CMS
 
 - Built completely from scratch with Svelte instead of forking React-based Netlify/Decap CMS. The app starts fast and stays fast. The compiled code is vanilla JavaScript — you can use it with any framework or static site generator (SSG) that can load static data files during the build process.
 - Small footprint: The bundle size is less than 450 KB when minified and brotlied, which is much lighter than Netlify CMS (1.5 MB), Decap CMS (1.8 MB) and Static CMS (2.6 MB)[^57][^64], even though we haven’t implemented some features yet. That’s the power of Svelte + Vite.
-- We have upgraded from Svelte 4 to [Svelte 5](https://svelte.dev/blog/svelte-5-is-alive) to further improve performance, including an even smaller bundle size. A full migration to the Runes reactivity API will follow.
+- We have upgraded from Svelte 4 to [Svelte 5](https://svelte.dev/blog/svelte-5-is-alive) to further improve performance, including an even smaller bundle size. A full migration to the Runes reactivity API is in progress.
 - Sveltia CMS is free of technical debt and [virtual DOM overhead](https://svelte.dev/blog/virtual-dom-is-pure-overhead).
 - Uses the GraphQL API for GitHub and GitLab to quickly fetch content at once, so that entries and assets can be listed and searched instantly[^32][^65] (the useless `search` configuration option is ignored). It also avoids the slowness and potential API rate limit violations caused by hundreds of requests with Relation widgets[^14].
 - Saving entries and assets to GitHub is also much faster thanks to the [GraphQL mutation](https://github.blog/changelog/2021-09-13-a-simpler-api-for-authoring-commits/).
@@ -175,7 +175,7 @@ We are working hard to create a **tremendously better alternative to Netlify CMS
 
 ### Better security
 
-- Avoids vulnerabilities in dependencies through constant updates, [`pnpm audit`](https://pnpm.io/cli/audit), and frequent releases[^33].
+- Avoids vulnerabilities in dependencies through constant updates, [`pnpm audit`](https://pnpm.io/cli/audit), and frequent releases, unlike Netlify/Decap CMS where a number of high severity vulnerabilities are unpatched[^33].
 - We have enabled [npm package provenance](https://github.blog/security/supply-chain-security/introducing-npm-package-provenance/).
 - We have documented how to [set up a Content Security Policy](#setting-up-content-security-policy) for the CMS to prevent any unexpected errors or otherwise insecure configuration[^108].
 - The `unsafe-eval` and `unsafe-inline` keywords are not needed in the `script-src` CSP directive[^34].
@@ -427,8 +427,8 @@ However, 100% feature parity is not planned, and some features are still missing
 
 ### Features not to be implemented
 
-- **The Bitbucket, Gitea/Forgejo and Git Gateway backends will not be supported** for performance reasons. We may implement a high-performance Git Gateway alternative in the future. We may also support the other platforms if/when their APIs improve to allow the CMS to fetch multiple entries at once.
-- **The Netlify Identity widget will not be supported**, as it’s not useful without Git Gateway. We may be able to support it in the future if/when a Git Gateway alternative is created.
+- **The Bitbucket, Gitea/Forgejo and Git Gateway backends will not be supported** for performance reasons. We may implement a high-performance Git Gateway alternative in the future. We may also support the other platforms if their APIs improve to allow the CMS to fetch multiple entries at once.
+- **The Netlify Identity widget will not be supported**, as it’s not useful without Git Gateway. We may be able to support it in the future if a Git Gateway alternative is created.
 - The deprecated client-side implicit grant for the GitLab backend will not be supported, as it has already been [removed from GitLab 15.0](https://gitlab.com/gitlab-org/gitlab/-/issues/344609). Use the client-side PKCE authorization instead.
 - The deprecated Netlify Large Media service will not be supported. Consider other storage providers.
 - The deprecated Date widget will not be supported, as it has already been removed from Decap CMS 3.0. Use the DateTime widget instead.
@@ -441,7 +441,7 @@ These limitations are expected to be resolved before or shortly after GA:
 
 | Feature | Status in Sveltia CMS |
 | --- | --- |
-| Backends | The [Test](https://decapcms.org/docs/test-backend/) backend needed for our demo site is not yet added. We’ll see if [Azure DevOps](https://decapcms.org/docs/azure-backend/) can also be supported. |
+| Backends | The [Test backend](https://decapcms.org/docs/test-backend/) needed for our demo site is not yet added. We’ll see if [Azure DevOps](https://decapcms.org/docs/azure-backend/) can also be supported. |
 | Configuration | Comprehensive config validation is not yet implemented. |
 | Localization | The application UI is only available in English and Japanese at this time. |
 | Media Libraries | [Cloudinary](https://decapcms.org/docs/cloudinary/) and [Uploadcare](https://decapcms.org/docs/uploadcare/) are not yet supported. |
@@ -937,9 +937,7 @@ See [Contributing to Sveltia CMS](https://github.com/sveltia/sveltia-cms/blob/ma
 
 ### Before the 1.0 release
 
-- [Svelte 5](https://svelte.dev/blog/svelte-5-is-alive) Runes migration
 - Enhanced [compatibility with Netlify/Decap CMS](#compatibility)
-- Partial compatibility with Static CMS, a now-discontinued community fork of Netlify CMS, specifically the [KeyValue widget](https://staticjscms.netlify.app/docs/widget-keyvalue)[^123]
 - [Localization](https://github.com/sveltia/sveltia-cms/blob/main/src/lib/locales/README.md)
 - Accessibility audit
 - Developer documentation (implementation guide)
@@ -951,7 +949,8 @@ See [Contributing to Sveltia CMS](https://github.com/sveltia/sveltia-cms/blob/ma
 ### After the 1.0 release
 
 - Implementing the remaining Netlify/Decap CMS features: Editorial Workflow, Open Authoring and nested collections
-- Tackling more Netlify/Decap CMS issues, especially the [top-voted features](https://github.com/decaporg/decap-cms/issues?q=is%3Aissue+is%3Aopen+sort%3Areactions-%2B1-desc), including MDX support[^122], manual entry sorting[^125], roles[^23], mobile optimization[^18] and config editor[^10] — Some features are already implemented in Sveltia CMS
+- Tackling more Netlify/Decap CMS issues, including MDX support[^122], manual entry sorting[^125], roles[^23], mobile optimization[^18] and config editor[^10] — Some [top-voted features](https://github.com/decaporg/decap-cms/issues?q=is%3Aissue+is%3Aopen+sort%3Areactions-%2B1-desc) are already implemented in Sveltia CMS
+- Exploring compatibility with Static CMS, a now-discontinued community fork of Netlify CMS (Note: The [KeyValue widget](https://staticjscms.netlify.app/docs/widget-keyvalue) will be supported prior to the 1.0 release[^123])
 - Advanced digital asset management (DAM) features, including image editing and tagging[^114]
 - AI integrations for image generation and content writing
 - End-user documentation
@@ -966,8 +965,10 @@ See [Contributing to Sveltia CMS](https://github.com/sveltia/sveltia-cms/blob/ma
 
 ### As seen on
 
-- [Made with Svelte](https://madewithsvelte.com/sveltia-cms)
 - [LogRocket Blog](https://blog.logrocket.com/9-best-git-based-cms-platforms/)
+- [Jamstack.org](https://jamstack.org/headless-cms/sveltia-cms/)
+- [Made with Svelte](https://madewithsvelte.com/sveltia-cms)
+- [Hugo](https://gohugo.io/tools/front-ends/)
 
 ## Disclaimer
 
@@ -1197,7 +1198,7 @@ This software is provided “as is” without any express or implied warranty. W
 
 [^112]: Netlify/Decap CMS [#5815](https://github.com/decaporg/decap-cms/issues/5815), [#6522](https://github.com/decaporg/decap-cms/issues/6522), [#6532](https://github.com/decaporg/decap-cms/issues/6532), [#6588](https://github.com/decaporg/decap-cms/issues/6588), [#6617](https://github.com/decaporg/decap-cms/issues/6617), [#6640](https://github.com/decaporg/decap-cms/issues/6640), [#6663](https://github.com/decaporg/decap-cms/issues/6663), [#6695](https://github.com/decaporg/decap-cms/issues/6695), [#6697](https://github.com/decaporg/decap-cms/issues/6697), [#6764](https://github.com/decaporg/decap-cms/issues/6764), [#6765](https://github.com/decaporg/decap-cms/issues/6765), [#6835](https://github.com/decaporg/decap-cms/issues/6835), [#6983](https://github.com/decaporg/decap-cms/issues/6983), [#7205](https://github.com/decaporg/decap-cms/issues/7205)
 
-[^113]: Netlify/Decap CMS [#5656](https://github.com/decaporg/decap-cms/issues/5656), [#5837](https://github.com/decaporg/decap-cms/issues/5837), [#5972](https://github.com/decaporg/decap-cms/issues/5972), [#6476](https://github.com/decaporg/decap-cms/issues/6476), [#6516](https://github.com/decaporg/decap-cms/issues/6516), [#6930](https://github.com/decaporg/decap-cms/issues/6930), [#6965](https://github.com/decaporg/decap-cms/issues/6965), [#7080](https://github.com/decaporg/decap-cms/issues/7080), [#7105](https://github.com/decaporg/decap-cms/issues/7105), [#7106](https://github.com/decaporg/decap-cms/issues/7106), [#7119](https://github.com/decaporg/decap-cms/issues/7119), [#7176](https://github.com/decaporg/decap-cms/issues/7176), [#7194](https://github.com/decaporg/decap-cms/issues/7194), [#7244](https://github.com/decaporg/decap-cms/issues/7244), [#7301](https://github.com/decaporg/decap-cms/issues/7301), [#7342](https://github.com/decaporg/decap-cms/issues/7342), [#7348](https://github.com/decaporg/decap-cms/issues/7348) — These `removeChild` crashes are common in React apps and seem to be caused by a [browser extension](https://github.com/facebook/react/issues/17256) or [Google Translate](https://github.com/facebook/react/issues/11538).
+[^113]: Netlify/Decap CMS [#5656](https://github.com/decaporg/decap-cms/issues/5656), [#5837](https://github.com/decaporg/decap-cms/issues/5837), [#5972](https://github.com/decaporg/decap-cms/issues/5972), [#6476](https://github.com/decaporg/decap-cms/issues/6476), [#6516](https://github.com/decaporg/decap-cms/issues/6516), [#6930](https://github.com/decaporg/decap-cms/issues/6930), [#6965](https://github.com/decaporg/decap-cms/issues/6965), [#7080](https://github.com/decaporg/decap-cms/issues/7080), [#7105](https://github.com/decaporg/decap-cms/issues/7105), [#7106](https://github.com/decaporg/decap-cms/issues/7106), [#7119](https://github.com/decaporg/decap-cms/issues/7119), [#7176](https://github.com/decaporg/decap-cms/issues/7176), [#7194](https://github.com/decaporg/decap-cms/issues/7194), [#7244](https://github.com/decaporg/decap-cms/issues/7244), [#7301](https://github.com/decaporg/decap-cms/issues/7301), [#7342](https://github.com/decaporg/decap-cms/issues/7342), [#7348](https://github.com/decaporg/decap-cms/issues/7348), [#7354](https://github.com/decaporg/decap-cms/issues/7354) — These `removeChild` crashes are common in React apps, likely caused by a [browser extension](https://github.com/facebook/react/issues/17256) or [Google Translate](https://github.com/facebook/react/issues/11538).
 
 [^114]: Netlify/Decap CMS [#5029](https://github.com/decaporg/decap-cms/issues/5029), [#5048](https://github.com/decaporg/decap-cms/issues/5048)
 

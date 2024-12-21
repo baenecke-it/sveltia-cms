@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script>
   import { Group } from '@sveltia/ui';
   import { _ } from 'svelte-i18n';
@@ -5,7 +7,7 @@
 </script>
 
 <PageContainer class="content" aria-label={$_('editorial_workflow')}>
-  <svelte:fragment slot="main">
+  {#snippet main()}
     <div role="none" class="columns">
       <Group class="column" aria-labelledby="draft-column-title">
         <header role="none">
@@ -23,7 +25,7 @@
         </header>
       </Group>
     </div>
-  </svelte:fragment>
+  {/snippet}
 </PageContainer>
 
 <style lang="scss">
@@ -49,6 +51,10 @@
       padding: 0 16px;
       height: 40px;
       background-color: var(--sui-tertiary-background-color);
+
+      h3 {
+        font-size: var(--sui-font-size-x-large);
+      }
     }
   }
 </style>

@@ -1,3 +1,5 @@
+<svelte:options runes={true} />
+
 <script>
   import { _ } from 'svelte-i18n';
   import YAML from 'yaml';
@@ -6,11 +8,11 @@
 </script>
 
 <PageContainer class="content" aria-label={$_('site_configuration_editor')}>
-  <svelte:fragment slot="main">
+  {#snippet main()}
     <div role="blockquote" aria-label={$_('site_config')}>
       <pre>{YAML.stringify($siteConfig)}</pre>
     </div>
-  </svelte:fragment>
+  {/snippet}
 </PageContainer>
 
 <style lang="scss">
