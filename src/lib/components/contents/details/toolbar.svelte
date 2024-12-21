@@ -262,7 +262,6 @@
     />
   {/if}
   {#if ($selectedCollection?.name === 'newsletter')}
-    <!--        <pre>{JSON.stringify(currentValues)}</pre>-->
     <Button
       variant="primary"
       disabled={!!currentValues[defaultLocale]?.sent || !originalEntry}
