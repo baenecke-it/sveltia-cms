@@ -103,6 +103,20 @@
       ? getEntryPreviewURL(originalEntry, defaultLocale, collection, collectionFile)
       : undefined,
   );
+  $: deployed = false;
+  $: if (originalEntry) {
+    // get deployed state from HTTP response code
+    fetch(`https://singtonic.net/newsletter/${originalEntry.slug}`, {
+      mode: 'no-cors',
+    }).then(response => {
+      console.log('response', response);
+      deployed = response.status === 200;
+    }, reason => {
+      console.error('reason', reason);
+    }).catch(error => {
+      console.error('error', error);
+    });
+  }
 
   /**
    * Go back to the previous page. If the entry is a singleton file, go to the collections list.
@@ -324,7 +338,7 @@
   {#if ($selectedCollection?.name === 'newsletter')}
         <Button
                 variant="primary"
-                disabled={!!currentValues[defaultLocale]?.sent || !originalEntry}
+                disabled={!!currentValues[defaultLocale]?.sent || !originalEntry || !deployed}
                 label={$_('newsletter.send')}
                 onclick={async () => {
                   showSendNewsletterDialog = true;
