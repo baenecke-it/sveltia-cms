@@ -62,10 +62,7 @@
   $: deployed = false;
   $: if (originalEntry) {
     // get deployed state from HTTP response code
-    fetch(`https://singtonic.net/newsletter/${originalEntry.slug}`, {
-      mode: 'no-cors',
-    }).then(response => {
-      console.log('response', response);
+    fetch(`https://singtonic.net/newsletter/${originalEntry.slug}`).then(response => {
       deployed = response.status === 200;
     }, reason => {
       console.error('reason', reason);
