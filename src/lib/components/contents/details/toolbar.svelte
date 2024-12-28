@@ -59,6 +59,21 @@
     expanderStates,
   } = $entryDraft ?? /** @type {EntryDraft} */ ({}));
 
+  $: deployed = false;
+  $: if (originalEntry) {
+    // get deployed state from HTTP response code
+    fetch(`https://singtonic.net/newsletter/${originalEntry.slug}`, {
+      mode: 'no-cors',
+    }).then(response => {
+      console.log('response', response);
+      deployed = response.status === 200;
+    }, reason => {
+      console.error('reason', reason);
+    }).catch(error => {
+      console.error('error', error);
+    });
+  }
+
   $: ({
     editor: { preview: showPreviewPane = true } = {},
     backend: { automatic_deployments: autoDeployEnabled = undefined } = {},
@@ -264,7 +279,7 @@
   {#if ($selectedCollection?.name === 'newsletter')}
     <Button
       variant="primary"
-      disabled={!!currentValues[defaultLocale]?.sent || !originalEntry}
+      disabled={!!currentValues[defaultLocale]?.sent || !originalEntry || !deployed}
       label={$_('newsletter.send')}
       onclick={async () => {
         showSendNewsletterDialog = true;
