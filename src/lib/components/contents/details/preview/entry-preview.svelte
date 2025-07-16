@@ -97,7 +97,7 @@
 
 {#if collection.name === 'newsletter'}
   <NewsletterPreview {locale}/>
-{:else useCustomPreviewStyle}
+{:else if useCustomPreviewStyle}
   <iframe class="preview" title={$_('content_preview')} bind:this={iframe}></iframe>
 {:else}
   <div role="document" aria-label={$_('content_preview')}>

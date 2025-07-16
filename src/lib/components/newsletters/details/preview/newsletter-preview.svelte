@@ -5,9 +5,20 @@
     import NewsletterContent from './NewsletterContent.svelte';
 
     /**
-     * @type {LocaleCode}
+     * @import { InternalLocaleCode } from '$lib/types/private';
      */
-    export let locale;
+
+    /**
+     * @typedef {object} Props
+     * @property {InternalLocaleCode} locale Current pane’s locale.
+     */
+
+    /** @type {Props} */
+    let {
+      /* eslint-disable prefer-const */
+      locale,
+      /* eslint-enable prefer-const */
+    } = $props();
 
     let currentValues;
     /**
@@ -18,7 +29,7 @@
      * @type {Record<string, any>}
      */
     let newsletterValues;
-    $: if ($entryDraft) {
+    if ($entryDraft) {
         ({currentValues, originalEntry} = $entryDraft);
         newsletterValues = currentValues[locale] ?? [];
     }

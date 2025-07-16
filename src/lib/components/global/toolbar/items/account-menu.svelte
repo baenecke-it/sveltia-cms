@@ -1,5 +1,6 @@
 <script>
   import { Divider, Menu, MenuItem } from '@sveltia/ui';
+  import {LocalStorage} from '@sveltia/utils/storage';
   import { _ } from 'svelte-i18n';
   import ReleaseNotesMenuItem from '$lib/components/help/release-notes-menu-item.svelte';
   import ShortcutsMenuItem from '$lib/components/help/shortcuts-menu-item.svelte';
@@ -7,12 +8,11 @@
   import { goto, openProductionSite } from '$lib/services/app/navigation';
   import { canShowMobileSignInDialog, showMobileSignInDialog } from '$lib/services/app/onboarding';
   import { backend, backendName } from '$lib/services/backends';
+  import { siteConfig } from '$lib/services/config';
   import { user } from '$lib/services/user';
   import { signOut } from '$lib/services/user/auth';
   import { isSmallScreen } from '$lib/services/user/env';
   import { prefs } from '$lib/services/user/prefs';
-  import {LocalStorage} from '@sveltia/utils/storage';
-  import { siteConfig } from '$lib/services/config';
 
   /**
    * @typedef {object} Props
@@ -32,7 +32,7 @@
   const isTestRepo = $derived($backendName === 'test-repo');
 
   /** @type {{url: string, label: string}[]} */
-  const additionalLinks = siteConfig?.links ?? [];
+  const additionalLinks = $derived($siteConfig?.links ?? []);
 </script>
 
 <Menu aria-label={$_('account')}>
@@ -57,26 +57,26 @@
   {#each additionalLinks as additionalLink}
     <MenuItem
       label={additionalLink.label}
-      on:click={async () => {
-            const userCache =
-            (await LocalStorage.get('sveltia-cms.user')) ||
-            (await LocalStorage.get('decap-cms-user')) ||
-            (await LocalStorage.get('netlify-cms-user'));
+      onclick={async () => {
+          const userCache =
+          (await LocalStorage.get('sveltia-cms.user')) ||
+          (await LocalStorage.get('decap-cms-user')) ||
+          (await LocalStorage.get('netlify-cms-user'));
 
-            fetch(additionalLink.url, {
-              headers: {
-                Authorization: `Bearer ${userCache?.token}`,
-              },
-            }) // FETCH BLOB FROM IT
-              .then((response) => response.blob())
-              .then((blob) => { // RETRIEVE THE BLOB AND CREATE LOCAL URL
-                const _url = window.URL.createObjectURL(blob);
+          fetch(additionalLink.url, {
+            headers: {
+              Authorization: `Bearer ${userCache?.token}`,
+            },
+          }) // FETCH BLOB FROM IT
+            .then((response) => response.blob())
+            .then((blob) => { // RETRIEVE THE BLOB AND CREATE LOCAL URL
+              const _url = window.URL.createObjectURL(blob);
 
-                window.open(_url, '_blank')?.focus(); // window.open + focus
-            }).catch((err) => {
-              console.log(err);
-            });
-          }}
+              window.open(_url, '_blank')?.focus(); // window.open + focus
+          }).catch((err) => {
+            console.log(err);
+          });
+        }}
     />
   {/each}
   {#if $prefs.devModeEnabled}

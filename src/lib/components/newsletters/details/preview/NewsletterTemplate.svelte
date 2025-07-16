@@ -1,5 +1,5 @@
 <script>
-    export let slug;
+    let { slug } = $props();
     /* eslint-disable */
     let unsubscribeLink = `<div style=font-family: 'Trebuchet MS', 'Lucida Grande', 'Lucida Sans Unicode', 'Lucida Sans', Tahoma, sans-serif;font-size:16px;line-height:16px;color:#fff;background-color:#333>UNSUBSCRIBE <a style=color:#cc2944;text-decoration:none;text-transform:none target=_blank>HERE</a></div>`
 </script>

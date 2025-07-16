@@ -14,17 +14,16 @@
     Toolbar,
     TruncatedText,
   } from '@sveltia/ui';
+  import { LocalStorage } from '@sveltia/utils/storage';
+  import { mount } from 'svelte';
   import { _, locale as appLocale } from 'svelte-i18n';
   import BackButton from '$lib/components/common/page-toolbar/back-button.svelte';
   import EditSlugDialog from '$lib/components/contents/details/edit-slug-dialog.svelte';
-  import {LocalStorage} from '@sveltia/utils/storage';
-  import {mount} from 'svelte';
-  import NewsletterContent from '../../newsletters/details/preview/NewsletterContent.svelte';
   import { goBack, goto } from '$lib/services/app/navigation';
   import { getAssetFolder } from '$lib/services/assets';
   import { backend } from '$lib/services/backends';
   import { siteConfig } from '$lib/services/config';
-  import { getCollectionLabel } from '$lib/services/contents/collection';
+  import { getCollectionLabel, selectedCollection } from '$lib/services/contents/collection';
   import { deleteEntries } from '$lib/services/contents/collection/data/delete';
   import { canCreateEntry } from '$lib/services/contents/collection/entries';
   import { getCollectionFileLabel } from '$lib/services/contents/collection/files';
@@ -41,7 +40,7 @@
   import { DEFAULT_I18N_CONFIG, getLocaleLabel } from '$lib/services/contents/i18n';
   import { isMediumScreen, isSmallScreen } from '$lib/services/user/env';
   import { prefs } from '$lib/services/user/prefs';
-  import {selectedCollection} from "$lib/services/contents/index.js";
+  import NewsletterContent from '../../newsletters/details/preview/NewsletterContent.svelte';
 
   /**
    * @typedef {object} Props
@@ -103,17 +102,16 @@
       ? getEntryPreviewURL(originalEntry, defaultLocale, collection, collectionFile)
       : undefined,
   );
-  $: deployed = false;
-  $: if (originalEntry) {
-    // get deployed state from HTTP response code
-    fetch(`https://singtonic.net/newsletter/${originalEntry.slug}`).then(response => {
-      deployed = response.status === 200;
-    }, reason => {
-      console.error('reason', reason);
-    }).catch(error => {
-      console.error('error', error);
-    });
-  }
+  const deployed = $derived.by(() => {
+    if (originalEntry) {
+      // get deployed state from HTTP response code
+      fetch(`https://singtonic.net/newsletter/${originalEntry.slug}`).then(response => response.status === 200, reason => {
+        console.error('reason', reason);
+      }).catch(error => {
+        console.error('error', error);
+      });
+    }
+  });
 
   /**
    * Go back to the previous page. If the entry is a singleton file, go to the collections list.
@@ -333,15 +331,15 @@
     />
   {/if}
   {#if ($selectedCollection?.name === 'newsletter')}
-        <Button
-                variant="primary"
-                disabled={!!currentValues[defaultLocale]?.sent || !originalEntry || !deployed}
-                label={$_('newsletter.send')}
-                onclick={async () => {
+    <Button
+      variant="primary"
+      disabled={!!currentValues[defaultLocale]?.sent || !originalEntry || !deployed}
+      label={$_('newsletter.send')}
+      onclick={async () => {
                   showSendNewsletterDialog = true;
             }}
     >
-      <Icon slot="start-icon" name="send"/>
+      <Icon slot="start-icon" name="send" />
     </Button>
   {/if}
 </Toolbar>
@@ -407,10 +405,10 @@
 </AlertDialog>
 
 <ConfirmationDialog
-        bind:open={showSendNewsletterDialog}
-        title={$_('newsletter.send')}
-        okLabel={$_('newsletter.send')}
-        onOk={async () => {
+  bind:open={showSendNewsletterDialog}
+  title={$_('newsletter.send')}
+  okLabel={$_('newsletter.send')}
+  onOk={async () => {
           const newsletter = currentValues[defaultLocale];
 
           /* eslint-disable */
@@ -458,7 +456,7 @@
           $entryDraft.currentValues[defaultLocale].sent = true;
           await save();
   }}
-        onClose={() => {
+  onClose={() => {
     menuButton.focus();
   }}
 >
@@ -466,9 +464,9 @@
 </ConfirmationDialog>
 
 <AlertDialog
-        bind:open={showSendNewsletterErrorDialog}
-        title={$_('newsletter.error.send_failed.title')}
-        onClose={() => {
+  bind:open={showSendNewsletterErrorDialog}
+  title={$_('newsletter.error.send_failed.title')}
+  onClose={() => {
     menuButton.focus();
   }}
 >
@@ -476,9 +474,9 @@
 </AlertDialog>
 
 <AlertDialog
-        bind:open={updateNewsletterSentStateErrorDialog}
-        title={$_('newsletter.error.update_failed.title')}
-        onClose={() => {
+  bind:open={updateNewsletterSentStateErrorDialog}
+  title={$_('newsletter.error.update_failed.title')}
+  onClose={() => {
     menuButton.focus();
   }}
 >

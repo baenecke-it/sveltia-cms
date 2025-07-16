@@ -1,29 +1,25 @@
 <script>
-  import { marked } from 'marked';
   import { unflatten } from 'flat';
+  import { marked } from 'marked';
   import { getMediaFieldURL } from '$lib/services/assets/index.js';
   import { entryDraft } from '$lib/services/contents/draft';
 
-  /**
-   * @type {Record<string, any>}
-   */
-  export let newsletter;
-  $: newsletter = unflatten(newsletter);
-
-  /**
-   * @type {boolean}
-   */
-  export let generateBlobSrc = true;
+  let {
+    /* eslint-disable prefer-const */
+    newsletter,
+    generateBlobSrc = true,
+  } = $props();
+  newsletter = unflatten(newsletter);
 
   const renderer = new marked.Renderer();
   renderer.link = function(href, title, text) {
     const link = marked.Renderer.prototype.link.call(this, href, title, text);
 
-    return link.replace('<a',"<a style='color:#cc2944;text-decoration:none;text-transform:none'");
+    return link.replace('<a', '<a style=\'color:#cc2944;text-decoration:none;text-transform:none\'');
   };
 
   marked.setOptions({
-    renderer
+    renderer,
   });
 </script>
 
