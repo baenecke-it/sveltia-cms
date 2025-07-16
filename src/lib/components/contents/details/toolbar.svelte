@@ -5,6 +5,7 @@
     Button,
     ConfirmationDialog,
     Divider,
+    Icon,
     Menu,
     MenuButton,
     MenuItem,
@@ -102,16 +103,16 @@
       ? getEntryPreviewURL(originalEntry, defaultLocale, collection, collectionFile)
       : undefined,
   );
-  const deployed = $derived.by(() => {
-    if (originalEntry) {
-      // get deployed state from HTTP response code
-      fetch(`https://singtonic.net/newsletter/${originalEntry.slug}`).then(response => response.status === 200, reason => {
-        console.error('reason', reason);
-      }).catch(error => {
-        console.error('error', error);
-      });
-    }
-  });
+  let deployed = $state(false);
+  if (originalEntry) {
+    // get deployed state from HTTP response code
+    fetch(`https://singtonic.net/newsletter/${originalEntry.slug}`).then(response => { deployed = response.status === 200 }, reason => {
+      console.error('reason', reason);
+    }).catch(error => {
+      console.error('error', error);
+    });
+  }
+
 
   /**
    * Go back to the previous page. If the entry is a singleton file, go to the collections list.
@@ -333,7 +334,7 @@
   {#if ($selectedCollection?.name === 'newsletter')}
     <Button
       variant="primary"
-      disabled={!!currentValues[defaultLocale]?.sent || !originalEntry || !deployed}
+      disabled={!!$entryDraft?.currentValues[defaultLocale]?.sent || !originalEntry || !deployed}
       label={$_('newsletter.send')}
       onclick={async () => {
                   showSendNewsletterDialog = true;
@@ -432,7 +433,7 @@
             body: JSON.stringify({
               content: {
                 slug: originalEntry.slug,
-                subject: currentValues[defaultLocale].title,
+                subject: $entryDraft?.currentValues[defaultLocale].title,
                 html,
                 text: newsletter.text,
               }

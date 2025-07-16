@@ -95,8 +95,8 @@
   {/each}
 {/snippet}
 
-{#if collection.name === 'newsletter'}
-  <NewsletterPreview {locale}/>
+{#if $entryDraft?.collection.name === 'newsletter'}
+  <NewsletterPreview {locale} />
 {:else if useCustomPreviewStyle}
   <iframe class="preview" title={$_('content_preview')} bind:this={iframe}></iframe>
 {:else}
