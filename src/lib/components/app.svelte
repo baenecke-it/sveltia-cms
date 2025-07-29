@@ -75,7 +75,7 @@
     />
   {/if}
   {#if DEV_SITE_URL}
-    <link href="{DEV_SITE_URL}admin/config.yml" type="application/yaml" rel="cms-config-url" />
+    <link href="{DEV_SITE_URL}/admin/config.yml" type="application/yaml" rel="cms-config-url" />
   {/if}
 </svelte:head>
 
