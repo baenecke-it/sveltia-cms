@@ -104,14 +104,18 @@
       : undefined,
   );
   let deployed = $state(false);
-  if (originalEntry) {
-    // get deployed state from HTTP response code
-    fetch(`https://singtonic.net/newsletter/${originalEntry.slug}`).then(response => { deployed = response.status === 200 }, reason => {
-      console.error('reason', reason);
-    }).catch(error => {
-      console.error('error', error);
-    });
-  }
+  $effect(() => {
+    if (originalEntry) {
+      // get deployed state from HTTP response code
+      fetch(`https://singtonic.net/newsletter/${originalEntry.slug}`).then(response => {
+        deployed = response.status === 200;
+      }, reason => {
+        console.error('reason', reason);
+      }).catch(error => {
+        console.error('error', error);
+      });
+    }
+  });
 
 
   /**
@@ -410,7 +414,7 @@
   title={$_('newsletter.send')}
   okLabel={$_('newsletter.send')}
   onOk={async () => {
-          const newsletter = currentValues[defaultLocale];
+          const newsletter = $entryDraft?.currentValues[defaultLocale];
 
           /* eslint-disable */
           const elem = document.createElement('div');
@@ -435,7 +439,7 @@
                 slug: originalEntry.slug,
                 subject: $entryDraft?.currentValues[defaultLocale].title,
                 html,
-                text: newsletter.text,
+                text: newsletter?.text,
               }
             }),
             headers: {
@@ -458,7 +462,7 @@
           await save();
   }}
   onClose={() => {
-    menuButton.focus();
+    menuButton?.focus();
   }}
 >
   {$_('newsletter.confirm')}
@@ -468,7 +472,7 @@
   bind:open={showSendNewsletterErrorDialog}
   title={$_('newsletter.error.send_failed.title')}
   onClose={() => {
-    menuButton.focus();
+    menuButton?.focus();
   }}
 >
   {$_('newsletter.error.send_failed.description')}
@@ -478,7 +482,7 @@
   bind:open={updateNewsletterSentStateErrorDialog}
   title={$_('newsletter.error.update_failed.title')}
   onClose={() => {
-    menuButton.focus();
+    menuButton?.focus();
   }}
 >
   {@html $_('newsletter.error.update_failed.description')}

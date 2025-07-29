@@ -1136,6 +1136,7 @@
 /**
  * Site configuration.
  * @typedef {object} SiteConfig
+ * @property {{url: string, label: string}[]} links Array of Links to add to Account Menu.
  * @property {boolean} [load_config_file] Whether to load YAML/JSON site configuration file(s) when
  * [manually initializing the CMS](https://decapcms.org/docs/manual-initialization/). This works
  * only in the `CMS.init()` method’s `config` option. Default: `true`.

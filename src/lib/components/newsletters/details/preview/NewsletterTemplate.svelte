@@ -1,5 +1,5 @@
 <script>
-    let { slug } = $props();
+    const { slug, children } = $props();
     /* eslint-disable */
     let unsubscribeLink = `<div style=font-family: 'Trebuchet MS', 'Lucida Grande', 'Lucida Sans Unicode', 'Lucida Sans', Tahoma, sans-serif;font-size:16px;line-height:16px;color:#fff;background-color:#333>UNSUBSCRIBE <a style=color:#cc2944;text-decoration:none;text-transform:none target=_blank>HERE</a></div>`
 </script>
@@ -15,7 +15,7 @@
     </xml>
     <![endif]-->
     <meta charset="UTF-8">
-    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta http-equiv="x-ua-compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Newsletter SingTonic</title>
     <style type="text/css">
@@ -612,9 +612,9 @@
     {#if (slug)}
         <a href="/newsletter/{slug}" style="color: #cc2944;">Zur Webansicht</a>
     {:else}
-        <a style="color: #cc2944;">Zur Webansicht</a>
+      <a style="color: #cc2944;">Zur Webansicht</a>
     {/if}
-    <table align="center" border="0" cellpadding="0" cellspacing="0" height="100%" width="100%" id="bodyTable"
+  <table align="center" border="0" cellpadding="0" cellspacing="0" height="100%" width="100%" id="bodyTable"
            style="border-collapse: collapse;mso-table-lspace: 0pt;mso-table-rspace: 0pt;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;height: 100%;margin: 0;padding: 0;width: 100%;background-color: #333333;">
         <tbody>
         <tr>
@@ -765,7 +765,7 @@
                                                         <tr>
                                                             <td valign="top" class="mcnTextContent"
                                                                 style="padding-top: 0;padding-right: 18px;padding-bottom: 9px;padding-left: 18px;color: #FFFFFF;text-align: center;font-family: trebuchet ms,lucida grande,lucida sans unicode,lucida sans,tahoma,sans-serif;mso-line-height-rule: exactly;-ms-text-size-adjust: 100%;-webkit-text-size-adjust: 100%;word-break: break-word;font-size: 16px;line-height: 150%;">
-                                                                <slot></slot>
+                                                              {@render children()}
                                                             </td>
                                                         </tr>
                                                         </tbody>
