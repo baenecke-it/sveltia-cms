@@ -4,6 +4,7 @@
   import VisibilityObserver from '$lib/components/common/visibility-observer.svelte';
   import EntryPreviewIframe from '$lib/components/contents/details/preview/entry-preview-iframe.svelte';
   import FieldPreview from '$lib/components/contents/details/preview/field-preview.svelte';
+  import NewsletterPreview from '$lib/components/newsletters/details/preview/newsletter-preview.svelte';
   import { entryDraft } from '$lib/services/contents/draft';
   import { customPreviewStyleRegistry } from '$lib/services/contents/editor';
 
@@ -24,6 +25,7 @@
   } = $props();
 
   const fields = $derived($entryDraft?.fields ?? []);
+  const collectionName = $derived($entryDraft?.collectionName ?? '');
 </script>
 
 {#snippet children()}
@@ -39,15 +41,19 @@
   {/each}
 {/snippet}
 
-<VisibilityObserver>
-  {#if customPreviewStyleRegistry.size}
-    <EntryPreviewIframe {locale} styleURLs={[...customPreviewStyleRegistry]} {children} />
-  {:else}
-    <div role="document" aria-label={$_('content_preview')}>
-      {@render children()}
-    </div>
-  {/if}
-</VisibilityObserver>
+{#if collectionName === 'newsletter'}
+  <NewsletterPreview {locale} />
+{:else}
+  <VisibilityObserver>
+    {#if customPreviewStyleRegistry.size}
+      <EntryPreviewIframe {locale} styleURLs={[...customPreviewStyleRegistry]} {children} />
+    {:else}
+      <div role="document" aria-label={$_('content_preview')}>
+        {@render children()}
+      </div>
+    {/if}
+  </VisibilityObserver>
+{/if}
 
 <style lang="scss">
   div {

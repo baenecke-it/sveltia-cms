@@ -1,0 +1,51 @@
+<script>
+  import { unflatten } from 'flat';
+  import { marked } from 'marked';
+
+  import { getMediaFieldURL } from '$lib/services/assets/info.js';
+  import { entryDraft } from '$lib/services/contents/draft';
+
+  /**
+   * @type {Record<string, any>}
+   * @type {boolean}
+   */
+  let { newsletter, generateBlobSrc = false } = $props();
+  newsletter = unflatten(newsletter);
+
+  const renderer = new marked.Renderer();
+  renderer.link = function(href, title, text) {
+    const link = marked.Renderer.prototype.link.call(this, href, title, text);
+
+    return link.replace('<a',"<a style='color:#cc2944;text-decoration:none;text-transform:none'");
+  };
+
+  const entry = $derived($entryDraft?.originalEntry);
+  const collectionName = $derived($entryDraft?.collectionName ?? '');
+  const fileName = $derived($entryDraft?.fileName);
+
+  marked.setOptions({
+    renderer
+  });
+</script>
+
+{#if newsletter && newsletter.content}
+  {#each newsletter.content as value, index (index)}
+    {#if value.type === 'image'}
+      {#if generateBlobSrc}
+        {#await getMediaFieldURL({ value, entry, collectionName, fileName, fieldConfig })}
+          <p>Loading...</p>
+        {:then src}
+          <img alt="" class="" src="{src ?? ''}" width="100%" />
+        {:catch error}
+          <p>{error.message}</p>
+        {/await}
+      {:else}
+        <img alt="" class="" src="https://singtonic.net{value.image}" width="100%" />
+      {/if}
+      <br />
+      <br />
+    {:else if value.type === 'text'}
+      {@html marked.parse(value.text ?? '')}
+    {/if}
+  {/each}
+{/if}

@@ -9,6 +9,7 @@
   import LocaleSwitcher from '$lib/components/contents/details/locale-switcher.svelte';
   import PreviewButton from '$lib/components/contents/details/preview-button.svelte';
   import { backend } from '$lib/services/backends';
+  import {selectedCollection} from '$lib/services/contents/collection';
   import { entryDraft } from '$lib/services/contents/draft';
   import { toggleLocale } from '$lib/services/contents/draft/update/locale';
   import { revertChanges } from '$lib/services/contents/draft/update/revert';
@@ -70,7 +71,7 @@
 </script>
 
 <div role="none" {id} class="header">
-  <Toolbar variant="secondary" aria-label={$_('secondary')}>
+  <Toolbar variant="secondary" aria-label={$_('secondary')} class={$selectedCollection?.name ?? ''}>
     {#if i18nEnabled && allLocales.length > 1}
       <LocaleSwitcher {id} {thisPane} {thatPane} />
       {#if ($isSmallScreen || $isMediumScreen) && canPreview}
@@ -161,7 +162,9 @@
     :global {
       & > .sui.toolbar {
         margin-inline: auto;
-        max-width: 800px;
+        &:not(.newsletter) {
+          max-width: 800px;
+        }
 
         @media (width < 768px) {
           padding: 0;

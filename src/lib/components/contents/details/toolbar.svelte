@@ -5,6 +5,7 @@
     Button,
     ConfirmationDialog,
     Divider,
+    Icon,
     Menu,
     MenuButton,
     MenuItem,
@@ -14,10 +15,13 @@
     Toolbar,
     TruncatedText,
   } from '@sveltia/ui';
+  import { LocalStorage } from '@sveltia/utils/storage';
+  import { mount } from 'svelte';
   import { _, locale as appLocale } from 'svelte-i18n';
 
   import BackButton from '$lib/components/common/page-toolbar/back-button.svelte';
   import EditSlugDialog from '$lib/components/contents/details/edit-slug-dialog.svelte';
+  import NewsletterContent from '$lib/components/newsletters/details/preview/NewsletterContent.svelte';
   import { goBack, goto } from '$lib/services/app/navigation';
   import { getAssetFolder } from '$lib/services/assets/folders';
   import { skipCIConfigured, skipCIEnabled } from '$lib/services/backends/git/shared/integration';
@@ -40,6 +44,7 @@
   import { isMediumScreen, isSmallScreen } from '$lib/services/user/env';
   import { prefs } from '$lib/services/user/prefs';
 
+
   /**
    * @typedef {object} Props
    * @property {boolean} [disabled] Whether to disable controls other than the Back button.
@@ -57,6 +62,9 @@
   let showDeleteDialog = $state(false);
   let showErrorDialog = $state(false);
   let errorMessage = $state('');
+  let showSendNewsletterDialog = $state(false);
+  let showSendNewsletterErrorDialog = $state(false);
+  let updateNewsletterSentStateErrorDialog = $state(false);
   let saving = $state(false);
   /** @type {MenuButton | undefined} */
   let menuButton = $state();
@@ -97,6 +105,15 @@
       ? getEntryPreviewURL(originalEntry, defaultLocale, collection, collectionFile)
       : undefined,
   );
+
+  const deployed = $derived.by(() => {
+    if (originalEntry) {
+      // get deployed state from HTTP response code
+      fetch(`https://singtonic.net/newsletter/${originalEntry.slug}`)
+        .then(response => response.status === 200, reason => console.error('reason', reason))
+        .catch(error => console.error('error', error));
+    }
+  });
 
   /**
    * Go back to the previous page. If the entry is a singleton file, go to the collections list.
@@ -322,8 +339,21 @@
       }}
     />
   {/if}
+  {#if (collection.name === 'newsletter')}
+    <Button
+      variant="primary"
+      disabled={originalEntry.locales[defaultLocale].content.sent || !originalEntry || !deployed}
+      label={$_('newsletter.send')}
+      onclick={async () => {
+        showSendNewsletterDialog = true;
+      }}
+    >
+      {#snippet endIcon()}
+        <Icon name="send" />
+      {/snippet}
+    </Button>
+  {/if}
 </Toolbar>
-
 <Toast bind:show={showValidationToast}>
   <Alert status="error">
     {$_(errorCount === 1 ? 'entry_validation_error' : 'entry_validation_errors', {
@@ -382,6 +412,84 @@
       {errorMessage}
     </div>
   {/if}
+</AlertDialog>
+
+<ConfirmationDialog
+  bind:open={showSendNewsletterDialog}
+  title={$_('newsletter.send')}
+  okLabel={$_('newsletter.send')}
+  onOk={async () => {
+          const newsletter = originalEntry.locales[defaultLocale].content;
+          /* eslint-disable */
+          const elem = document.createElement('div');
+          mount(NewsletterContent, { target: elem, props: { newsletter, generateBlobSrc: false } });
+          const html = elem.innerHTML;
+
+          /* eslint-enable */
+          const userCache =
+            (await LocalStorage.get('sveltia-cms.user')) ||
+            (await LocalStorage.get('decap-cms-user')) ||
+            (await LocalStorage.get('netlify-cms-user'));
+
+          if (!originalEntry) {
+            showSendNewsletterErrorDialog = true;
+            return;
+          }
+
+          const response = await fetch('https://api.singtonic.net/newsletter', {
+            method: 'POST',
+            body: JSON.stringify({
+              content: {
+                slug: originalEntry.slug,
+                subject: originalEntry.locales[defaultLocale].content.title,
+                html,
+                text: newsletter.text,
+              }
+            }),
+            headers: {
+              'Authorization': `Bearer ${userCache.token}`,
+              'Content-type': 'application/json; charset=UTF-8'
+            }
+          });
+
+          if (!response.ok) {
+            showSendNewsletterErrorDialog = true;
+            return;
+          }
+
+          if(!$entryDraft) {
+            updateNewsletterSentStateErrorDialog = true;
+            return;
+          }
+
+          $entryDraft.currentValues[defaultLocale].sent = true;
+          await save();
+  }}
+  onClose={() => {
+    menuButton.focus();
+  }}
+>
+  {$_('newsletter.confirm')}
+</ConfirmationDialog>
+
+<AlertDialog
+  bind:open={showSendNewsletterErrorDialog}
+  title={$_('newsletter.error.send_failed.title')}
+  onClose={() => {
+    menuButton.focus();
+  }}
+>
+  {$_('newsletter.error.send_failed.description')}
+</AlertDialog>
+
+<AlertDialog
+  bind:open={updateNewsletterSentStateErrorDialog}
+  title={$_('newsletter.error.update_failed.title')}
+  onClose={() => {
+    menuButton.focus();
+  }}
+>
+  {@html $_('newsletter.error.update_failed.description')}
 </AlertDialog>
 
 <style lang="scss">

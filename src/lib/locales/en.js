@@ -965,4 +965,21 @@ export const strings = {
     gb: '{size} GB',
     tb: '{size} TB',
   },
+
+  // Newsletter
+  newsletter: {
+    send: 'Send Newsletter',
+    confirm: 'Are you sure you want to send this newsletter?',
+    error: {
+      send_failed: {
+        title: 'Error',
+        description: 'There was an error while sending the newsletter. Please try again later.',
+      },
+      update_failed: {
+        title: 'Error (Contact Admin)',
+        description:
+          'There was an error while updating the newsletter-state.<br>Please contact an administrator.',
+      },
+    },
+  },
 };
