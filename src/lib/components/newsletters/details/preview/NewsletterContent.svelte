@@ -9,7 +9,9 @@
     newsletter,
     generateBlobSrc = true,
   } = $props();
-  newsletter = unflatten(newsletter);
+  const normalizedNewsletter = $derived(
+    newsletter ? unflatten(newsletter) : null
+  );
 
   const renderer = {
     /**
@@ -30,8 +32,8 @@
   const collectionName = $derived($entryDraft?.collectionName ?? 'newsletter')
 </script>
 
-{#if newsletter && newsletter.content}
-  {#each newsletter.content as value}
+{#if normalizedNewsletter && normalizedNewsletter.content}
+  {#each normalizedNewsletter.content as value}
     {#if value.type === 'image'}
       {#if generateBlobSrc}
         {#await getMediaFieldURL({
