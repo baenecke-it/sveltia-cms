@@ -1,6 +1,7 @@
 <script>
   import { _ } from '@sveltia/i18n';
   import { Divider, Menu, MenuItem } from '@sveltia/ui';
+  import {LocalStorage} from '@sveltia/utils/storage';
 
   import AppInstallMenuItem from '$lib/components/global/toolbar/items/app-install-menu-item.svelte';
   import ShortcutsMenuItem from '$lib/components/help/shortcuts-menu-item.svelte';
@@ -8,6 +9,7 @@
   import { goto, openProductionSite } from '$lib/services/app/navigation';
   import { canShowMobileSignInDialog, showMobileSignInDialog } from '$lib/services/app/onboarding';
   import { backend, backendName } from '$lib/services/backends';
+  import { cmsConfig } from '$lib/services/config';
   import { user } from '$lib/services/user/account.svelte';
   import { signOut } from '$lib/services/user/auth.svelte';
   import { env } from '$lib/services/user/env.svelte';
@@ -30,6 +32,9 @@
 
   const isLocalRepo = $derived(backendName.current === 'local');
   const isTestRepo = $derived(backendName.current === 'test-repo');
+
+  /** @type {{url: string, label: string}[]} */
+  const additionalLinks = cmsConfig?.current.links ?? [];
 </script>
 
 <Menu aria-label={_('account')}>
@@ -51,6 +56,31 @@
       openProductionSite();
     }}
   />
+  {#each additionalLinks as additionalLink, i (i)}
+    <MenuItem
+      label={additionalLink.label}
+      onclick={async () => {
+          const userCache =
+          (await LocalStorage.get('sveltia-cms.user')) ||
+          (await LocalStorage.get('decap-cms-user')) ||
+          (await LocalStorage.get('netlify-cms-user'));
+
+          fetch(additionalLink.url, {
+            headers: {
+              Authorization: `Bearer ${userCache?.token}`,
+            },
+          }) // FETCH BLOB FROM IT
+            .then((response) => response.blob())
+            .then((blob) => { // RETRIEVE THE BLOB AND CREATE LOCAL URL
+              const _url = window.URL.createObjectURL(blob);
+
+              window.open(_url, '_blank')?.focus(); // window.open + focus
+          }).catch((err) => {
+            console.log(err);
+          });
+        }}
+    />
+  {/each}
   {#if prefs.devModeEnabled}
     <MenuItem
       label={_('git_repository')}
