@@ -1260,6 +1260,13 @@
  */
 
 /**
+ * LinkCollection.
+ * @typedef {object} LinkCollection
+ * @property {string} label The label of this element that is shown in the UI.
+ * @property {string} url The url this Element links to when clicked.
+ */
+
+/**
  * View filter.
  * @typedef {object} ViewFilter
  * @property {string} [name] Unique identifier for the filter.
@@ -1840,6 +1847,7 @@
  * @property {string} [logout_redirect_url] URL to redirect users to after logging out.
  * @property {IssueReports} [issue_reports] Issue reporting options.
  * @property {boolean} [show_preview_links] Whether to show site preview links. Default: `true`.
+ * @property {LinkCollection[]} [links] Link list to be shown when the Account Button is clicked.
  * @property {SlugOptions} [slug] Entry slug options.
  * @property {(Collection | CollectionDivider)[]} [collections] Set of collections. The list can
  * also contain dividers, which are used to group collections in the collection list. Either
