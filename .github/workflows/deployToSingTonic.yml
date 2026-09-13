@@ -36,7 +36,7 @@ jobs:
           git config --global user.name "GitHub Action"
           git config --global user.email "action@github.com"
           git clone --depth=1 git@github.com:baenecke-it/singtonic.git target-repo
-          cp -r dist/sveltia-cms.js target-repo/static/admin/ # Copy the output file to the specific subfolder
+          cp -r package/dist/sveltia-cms.js target-repo/static/admin/ # Copy the output file to the specific subfolder
           cd target-repo
           git add static/admin/sveltia-cms.js # Only add the specific file
           git commit -m "Update sveltia-cms.js from ${GITHUB_REPOSITORY}"
