@@ -6,6 +6,7 @@
     Button,
     ConfirmationDialog,
     Divider,
+    Icon,
     Menu,
     MenuButton,
     MenuItem,
@@ -16,6 +17,8 @@
     Toolbar,
     TruncatedText,
   } from '@sveltia/ui';
+  import { LocalStorage } from '@sveltia/utils/storage';
+  import { mount } from 'svelte';
 
   import BackButton from '$lib/components/common/page-toolbar/back-button.svelte';
   import EditSlugDialog from '$lib/components/contents/details/edit-slug-dialog.svelte';
@@ -26,7 +29,7 @@
   import { getAssetFolder } from '$lib/services/assets/folders';
   import { skipCIConfigured, skipCIEnabled } from '$lib/services/backends/git/shared/integration';
   import { allEntries } from '$lib/services/contents';
-  import { getCollectionLabel } from '$lib/services/contents/collection';
+  import { getCollectionLabel, selectedCollection } from '$lib/services/contents/collection';
   import {
     contentUpdatesToast,
     UPDATE_TOAST_DEFAULT_STATE,
@@ -69,6 +72,8 @@
     updateWorkflowStatus,
   } from '$lib/services/workflow/save';
 
+  import NewsletterContent from '../../newsletter/NewsletterContent.svelte';
+
   /**
    * @import { UnpublishedEntry, UpdateToastState } from '$lib/types/private';
    */
@@ -103,6 +108,9 @@
   let showDiscardDialog = $state(false);
   let showDeleteErrorToast = $state(false);
   let showErrorDialog = $state(false);
+  let showSendNewsletterDialog = $state(false);
+  let showSendNewsletterErrorDialog = $state(false);
+  let updateNewsletterSentStateErrorDialog = $state(false);
   let errorMessage = $state('');
   let saving = $state(false);
   let deleting = $state(false);
@@ -183,6 +191,25 @@
   // An entry awaiting deletion is read-only: there’s nothing to save or move through the stages,
   // only the deletion itself to carry out or call off
   const pendingDeletion = $derived(isPendingDeletion(unpublishedEntry));
+
+  let deployed = $state(false);
+  $effect(() => {
+    if (originalEntry) {
+      // get deployed state from HTTP response code
+      fetch(`https://singtonic.net/newsletter/${originalEntry.slug}`)
+        .then(
+          (response) => {
+            deployed = response.status === 200;
+          },
+          (reason) => {
+            console.error('reason', reason);
+          },
+        )
+        .catch((error) => {
+          console.error('error', error);
+        });
+    }
+  });
 
   // Keep the deploy state fresh while the editor is open, so a build that finishes in the
   // background turns the preview link live without the user reloading. The release function is
@@ -453,6 +480,20 @@
         </TruncatedText>
       {/if}
     </h2>
+  {/if}
+  {#if selectedCollection?.current?.name === 'newsletter'}
+    <Button
+      variant="primary"
+      disabled={!!entryDraft.current?.currentValues[defaultLocale]?.sent ||
+        !originalEntry ||
+        !deployed}
+      label={_('newsletter.send')}
+      onclick={async () => {
+        showSendNewsletterDialog = true;
+      }}
+    >
+      <Icon slot="start-icon" name="send" />
+    </Button>
   {/if}
   {#if !env.isSmallScreen}
     {@render overflowButtons()}
@@ -754,6 +795,90 @@ because this toast goes away with the editor once the deletion has completed -->
       {errorMessage}
     </div>
   {/if}
+</AlertDialog>
+
+<ConfirmationDialog
+  bind:open={showSendNewsletterDialog}
+  title={_('newsletter.send')}
+  okLabel={_('newsletter.send')}
+  onOk={async () => {
+    const newsletter = entryDraft.current?.currentValues[defaultLocale];
+
+    if (!newsletter) {
+      updateNewsletterSentStateErrorDialog = true;
+      return;
+    }
+
+    /* eslint-disable */
+    const elem = document.createElement('div');
+    mount(NewsletterContent, { target: elem, props: { newsletter, generateBlobSrc: false } });
+    const html = elem.innerHTML;
+    /* eslint-enable */
+
+    const userCache =
+      (await LocalStorage.get('sveltia-cms.user')) ||
+      (await LocalStorage.get('decap-cms-user')) ||
+      (await LocalStorage.get('netlify-cms-user'));
+
+    if (!originalEntry) {
+      showSendNewsletterErrorDialog = true;
+      return;
+    }
+
+    const response = await fetch('https://api.singtonic.net/newsletter', {
+      method: 'POST',
+      body: JSON.stringify({
+        content: {
+          slug: originalEntry.slug,
+          subject: entryDraft.current?.currentValues[defaultLocale].title,
+          html,
+          text: newsletter.text,
+        },
+      }),
+      headers: {
+        Authorization: `Bearer ${userCache.token}`,
+        'Content-type': 'application/json; charset=UTF-8',
+      },
+    });
+
+    if (!response.ok) {
+      showSendNewsletterErrorDialog = true;
+      return;
+    }
+
+    if (!entryDraft.current) {
+      updateNewsletterSentStateErrorDialog = true;
+      return;
+    }
+
+    entryDraft.current.currentValues[defaultLocale].sent = true;
+    await save();
+  }}
+  onClose={() => {
+    menuButton?.focus();
+  }}
+>
+  {_('newsletter.confirm')}
+</ConfirmationDialog>
+
+<AlertDialog
+  bind:open={showSendNewsletterErrorDialog}
+  title={_('newsletter.error.send_failed.title')}
+  onClose={() => {
+    menuButton?.focus();
+  }}
+>
+  {_('newsletter.error.send_failed.description')}
+</AlertDialog>
+
+<AlertDialog
+  bind:open={updateNewsletterSentStateErrorDialog}
+  title={_('newsletter.error.update_failed.title')}
+  onClose={() => {
+    menuButton?.focus();
+  }}
+>
+  {@html _('newsletter.error.update_failed.description')}
 </AlertDialog>
 
 <style>
