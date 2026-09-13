@@ -22,6 +22,14 @@
     "url": "https://github.com/kyoshino"
   },
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./package/types/index.d.ts",
+      "svelte": "./package/src/index.js",
+      "default": "./package/dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "scripts": {
     "build": "vite build",
     "build:watch": "vite build --watch",
@@ -42,7 +50,7 @@
     "test": "NODE_OPTIONS=--no-experimental-webstorage vitest run",
     "test:coverage": "NODE_OPTIONS=--no-experimental-webstorage vitest run --coverage",
     "test:watch": "NODE_OPTIONS=--no-experimental-webstorage vitest",
-    "prepare": "npm run build"
+    "prepare": "npx svelte-kit sync && vite build"
   },
   "dependencies": {
     "@cfworker/json-schema": "^4.1.1",
