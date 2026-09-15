@@ -204,6 +204,7 @@ export const fetchFileCommits = async (paths) => {
                     avatarUrl
                     user { login }
                   }
+                  message
                   committedDate
                 }
               }
@@ -238,6 +239,7 @@ export const fetchFileCommits = async (paths) => {
           authorAvatarURL: node.author.avatarUrl,
           authorLogin: node.author.user?.login,
           date: new Date(node.committedDate),
+          message: node.message,
         });
       }
     });
