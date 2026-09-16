@@ -186,23 +186,25 @@
   const pendingDeletion = $derived(isPendingDeletion(unpublishedEntry));
 
   let deployed = $state(false);
-  $effect(() => {
-    if (originalEntry) {
-      // get deployed state from HTTP response code
-      fetch(`https://singtonic.net/newsletter/${originalEntry.slug}`)
-        .then(
-          (response) => {
-            deployed = response.status === 200;
-          },
-          (reason) => {
-            console.error('reason', reason);
-          },
-        )
-        .catch((error) => {
-          console.error('error', error);
-        });
-    }
-  });
+  if (selectedCollection?.current?.name === 'newsletter') {
+    $effect(() => {
+      if (originalEntry) {
+        // get deployed state from HTTP response code
+        fetch(`https://singtonic.net/newsletter/${originalEntry.slug}`)
+          .then(
+            (response) => {
+              deployed = response.status === 200;
+            },
+            (reason) => {
+              console.error('reason', reason);
+            },
+          )
+          .catch((error) => {
+            console.error('error', error);
+          });
+      }
+    });
+  }
 
   // Keep the deploy state fresh while the editor is open, so a build that finishes in the
   // background turns the preview link live without the user reloading. The release function is
