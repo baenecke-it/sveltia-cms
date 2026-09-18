@@ -1,3 +1,4 @@
+import { sleep } from '@sveltia/utils/misc';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { commitChanges } from '$lib/services/backends/git/gitlab/commits';
@@ -17,6 +18,7 @@ import gitlabWorkflow, {
 import { fetchAPI, fetchGraphQL } from '$lib/services/backends/git/shared/api';
 import { cmsConfig } from '$lib/services/config';
 
+vi.mock('@sveltia/utils/misc', () => ({ sleep: vi.fn() }));
 vi.mock('$lib/services/backends/git/gitlab/commits');
 vi.mock('$lib/services/backends/git/gitlab/repository', () => ({
   repository: { owner: 'group/sub', repo: 'project', branch: 'main' },
@@ -25,6 +27,8 @@ vi.mock('$lib/services/backends/git/shared/api');
 vi.mock('$lib/services/config', () => ({ cmsConfig: { current: undefined } }));
 
 const PROJECT_ID = encodeURIComponent('group/sub/project');
+/** Path to cancel the auto-merge on merge request !1. */
+const CANCEL_PATH = `/projects/${PROJECT_ID}/merge_requests/1/cancel_merge_when_pipeline_succeeds`;
 /**
  * Get the request body passed to the given `fetchAPI` call.
  * @param {number} [index] Call index.
@@ -615,6 +619,287 @@ describe('GitLab Editorial Workflow service', () => {
       await publish(/** @type {any} */ ({ number: 1, branch: 'cms/posts/hello', title: 't' }));
 
       expect(getRequestBody().squash).toBe(false);
+    });
+
+    describe('when the pipeline must succeed', () => {
+      const pullRequest = /** @type {any} */ ({
+        number: 1,
+        branch: 'cms/posts/hello',
+        title: 'Create Post',
+        headSHA: 'abc123',
+      });
+
+      /**
+       * Create the error `fetchAPI` throws for a failed request.
+       * @param {number} status HTTP status code.
+       * @returns {Error} Error.
+       */
+      const createError = (status) =>
+        new Error('Request failed', { cause: { status, message: `${status}` } });
+
+      /**
+       * A merge request read while GitLab waits for the pipeline.
+       * @param {object} [overrides] Properties to override.
+       * @returns {any} Merge request.
+       */
+      const createWaitingItem = (overrides = {}) => ({
+        state: 'opened',
+        merge_when_pipeline_succeeds: true,
+        detailed_merge_status: 'ci_still_running',
+        ...overrides,
+      });
+
+      /** A merge request that has been merged. */
+      const mergedItem = { state: 'merged', merge_when_pipeline_succeeds: false };
+
+      test('sets the merge request to auto-merge while the pipeline is running', async () => {
+        vi.mocked(fetchAPI)
+          .mockRejectedValueOnce(createError(405))
+          .mockResolvedValueOnce({ detailed_merge_status: 'ci_still_running' })
+          .mockResolvedValueOnce({})
+          .mockResolvedValueOnce(mergedItem);
+
+        await publish(pullRequest);
+
+        // The failed merge, the status read, the auto-merge, and the read that found it merged
+        expect(fetchAPI).toHaveBeenCalledTimes(4);
+
+        expect(fetchAPI).toHaveBeenNthCalledWith(2, `/projects/${PROJECT_ID}/merge_requests/1`);
+
+        expect(fetchAPI).toHaveBeenNthCalledWith(
+          3,
+          `/projects/${PROJECT_ID}/merge_requests/1/merge`,
+          {
+            method: 'PUT',
+            body: {
+              squash: false,
+              should_remove_source_branch: true,
+              sha: 'abc123',
+              merge_commit_message: 'Create Post',
+              auto_merge: true,
+              merge_when_pipeline_succeeds: true,
+            },
+          },
+        );
+
+        // The branch is removed by GitLab once merged; deleting it now would close the request
+        expect(fetchAPI).not.toHaveBeenCalledWith(
+          expect.stringContaining('/repository/branches/'),
+          expect.anything(),
+        );
+      });
+
+      test('waits for a queued mergeability check before deciding', async () => {
+        vi.mocked(fetchAPI)
+          .mockRejectedValueOnce(createError(405))
+          .mockResolvedValueOnce({ detailed_merge_status: 'preparing' })
+          .mockResolvedValueOnce({ detailed_merge_status: 'unchecked' })
+          .mockResolvedValueOnce({ detailed_merge_status: 'checking' })
+          .mockResolvedValueOnce({ detailed_merge_status: 'ci_still_running' })
+          .mockResolvedValueOnce({})
+          .mockResolvedValueOnce(mergedItem);
+
+        await publish(pullRequest);
+
+        expect(sleep).toHaveBeenCalledTimes(4);
+        expect(sleep).toHaveBeenNthCalledWith(3, 1000);
+        expect(fetchAPI).toHaveBeenCalledTimes(7);
+        expect(getRequestBody(5).auto_merge).toBe(true);
+      });
+
+      describe('once the merge request is set to auto-merge', () => {
+        beforeEach(() => {
+          vi.mocked(fetchAPI)
+            .mockRejectedValueOnce(createError(405))
+            .mockResolvedValueOnce({ detailed_merge_status: 'ci_still_running' })
+            .mockResolvedValueOnce({});
+        });
+
+        test('resolves only once the merge has landed', async () => {
+          vi.mocked(fetchAPI)
+            .mockResolvedValueOnce(createWaitingItem())
+            .mockResolvedValueOnce(createWaitingItem({ detailed_merge_status: 'checking' }))
+            .mockResolvedValueOnce(
+              createWaitingItem({ detailed_merge_status: 'approvals_syncing' }),
+            )
+            .mockResolvedValueOnce(createWaitingItem({ detailed_merge_status: 'mergeable' }))
+            .mockResolvedValueOnce(createWaitingItem({ state: 'locked' }))
+            .mockResolvedValueOnce(mergedItem);
+
+          await publish(pullRequest);
+
+          // The reads are spaced out, because a pipeline takes minutes
+          expect(sleep).toHaveBeenCalledTimes(6);
+          expect(sleep).toHaveBeenCalledWith(10000);
+          expect(fetchAPI).toHaveBeenCalledTimes(9);
+
+          expect(fetchAPI).toHaveBeenLastCalledWith(`/projects/${PROJECT_ID}/merge_requests/1`);
+
+          // GitLab removes the branch along with the merge
+          expect(fetchAPI).not.toHaveBeenCalledWith(
+            expect.stringContaining('/repository/branches/'),
+            expect.anything(),
+          );
+        });
+
+        test('fails once the pipeline has failed, cancelling the auto-merge', async () => {
+          vi.mocked(fetchAPI)
+            .mockResolvedValueOnce(createWaitingItem())
+            .mockResolvedValueOnce(createWaitingItem({ detailed_merge_status: 'ci_must_pass' }));
+
+          await expect(publish(pullRequest)).rejects.toThrow(
+            'Merge request !1 was not merged: opened, ci_must_pass, auto-merge on',
+          );
+
+          // GitLab would otherwise still merge once a job is retried by hand, behind the CMS’s
+          // back
+          expect(fetchAPI).toHaveBeenCalledTimes(6);
+          expect(fetchAPI).toHaveBeenLastCalledWith(CANCEL_PATH, { method: 'POST' });
+        });
+
+        test('reports the failure even if the auto-merge can’t be cancelled', async () => {
+          const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+          const error = createError(406);
+
+          vi.mocked(fetchAPI)
+            .mockResolvedValueOnce(createWaitingItem({ detailed_merge_status: 'conflict' }))
+            .mockRejectedValueOnce(error);
+
+          await expect(publish(pullRequest)).rejects.toThrow(
+            'Merge request !1 was not merged: opened, conflict, auto-merge on',
+          );
+
+          expect(warn).toHaveBeenCalledWith(
+            'Failed to cancel the auto-merge on merge request !1.',
+            error,
+          );
+        });
+
+        test('fails once a new commit has cancelled the auto-merge', async () => {
+          vi.mocked(fetchAPI).mockResolvedValueOnce(
+            createWaitingItem({ merge_when_pipeline_succeeds: false }),
+          );
+
+          await expect(publish(pullRequest)).rejects.toThrow(
+            'Merge request !1 was not merged: opened, ci_still_running, auto-merge off',
+          );
+
+          // Nothing left to cancel
+          expect(fetchAPI).toHaveBeenCalledTimes(4);
+        });
+
+        test('fails once the merge request has been closed', async () => {
+          vi.mocked(fetchAPI).mockResolvedValueOnce(
+            createWaitingItem({ state: 'closed', detailed_merge_status: 'not_open' }),
+          );
+
+          await expect(publish(pullRequest)).rejects.toThrow(
+            'Merge request !1 was not merged: closed, not_open, auto-merge on',
+          );
+
+          expect(fetchAPI).toHaveBeenCalledTimes(4);
+        });
+
+        test.each([
+          ['a network error', new Error('Network error')],
+          ['a server error', createError(502)],
+          ['the request limit', createError(429)],
+        ])('keeps waiting when a read fails with %s', async (_label, error) => {
+          const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+          vi.mocked(fetchAPI).mockRejectedValueOnce(error).mockResolvedValueOnce(mergedItem);
+
+          await publish(pullRequest);
+
+          expect(fetchAPI).toHaveBeenCalledTimes(5);
+          expect(warn).toHaveBeenCalledWith(
+            'Failed to read merge request !1, still waiting.',
+            error,
+          );
+        });
+
+        test.each([401, 403, 404])('gives up when a read fails with a %i', async (status) => {
+          const error = createError(status);
+
+          vi.mocked(fetchAPI).mockRejectedValueOnce(error);
+
+          await expect(publish(pullRequest)).rejects.toBe(error);
+
+          // The session has ended or the merge request is gone, so nothing else is tried
+          expect(fetchAPI).toHaveBeenCalledTimes(4);
+          expect(sleep).toHaveBeenCalledTimes(1);
+        });
+
+        test('gives up after an hour, cancelling the auto-merge', async () => {
+          vi.useFakeTimers();
+
+          try {
+            vi.setSystemTime(0);
+            vi.mocked(fetchAPI).mockResolvedValue(createWaitingItem());
+            // Every read takes a while, so the wait runs out after a few of them
+            vi.mocked(sleep).mockImplementation(async () => {
+              vi.advanceTimersByTime(20 * 60 * 1000);
+            });
+
+            await expect(publish(pullRequest)).rejects.toThrow(
+              'Timed out waiting for merge request !1 to be merged',
+            );
+
+            // The three reads within the hour, after the three requests that set the auto-merge,
+            // then the cancellation
+            expect(fetchAPI).toHaveBeenCalledTimes(7);
+            expect(fetchAPI).toHaveBeenLastCalledWith(CANCEL_PATH, { method: 'POST' });
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+      });
+
+      test('gives up on a mergeability check that never settles', async () => {
+        const error = createError(405);
+
+        vi.mocked(fetchAPI)
+          .mockRejectedValueOnce(error)
+          .mockResolvedValue({ detailed_merge_status: 'checking' });
+
+        await expect(publish(pullRequest)).rejects.toBe(error);
+
+        // The failed merge, then ten status reads
+        expect(fetchAPI).toHaveBeenCalledTimes(11);
+        expect(sleep).toHaveBeenCalledTimes(9);
+      });
+
+      test('keeps failing when something other than the pipeline blocks the merge', async () => {
+        const error = createError(405);
+
+        vi.mocked(fetchAPI)
+          .mockRejectedValueOnce(error)
+          .mockResolvedValueOnce({ detailed_merge_status: 'conflict' });
+
+        await expect(publish(pullRequest)).rejects.toBe(error);
+
+        expect(fetchAPI).toHaveBeenCalledTimes(2);
+      });
+
+      test('keeps failing without checking the status on any other error', async () => {
+        const error = createError(422);
+
+        vi.mocked(fetchAPI).mockRejectedValueOnce(error);
+
+        await expect(publish(pullRequest)).rejects.toBe(error);
+
+        expect(fetchAPI).toHaveBeenCalledTimes(1);
+      });
+
+      test('keeps failing on an error without a status', async () => {
+        const error = new Error('Network error');
+
+        vi.mocked(fetchAPI).mockRejectedValueOnce(error);
+
+        await expect(publish(pullRequest)).rejects.toBe(error);
+
+        expect(fetchAPI).toHaveBeenCalledTimes(1);
+      });
     });
   });
 

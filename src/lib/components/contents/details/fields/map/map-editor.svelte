@@ -128,6 +128,7 @@
    * @param {string} changeType Type of change that occurred in the draw instance.
    */
   const onDrawChange = (changeType) => {
+    /* v8 ignore next 3 -- the listener is added to the draw instance itself */
     if (!draw) {
       return;
     }
@@ -250,6 +251,7 @@
    * @param {GeoCoordinates} coordinates GeoCoordinates of the location to set.
    */
   const setLocation = ({ latitude, longitude }) => {
+    /* v8 ignore next 3 -- the drawing tools are loaded right after the map, before any input */
     if (!draw) {
       return;
     }
@@ -344,7 +346,14 @@
 
 <div role="none" class="toolbar">
   <!-- @todo Replace this with `<Combobox>` -->
-  <SearchBar bind:value={searchQuery} debounce {readonly} flex placeholder={_('find_place')} />
+  <SearchBar
+    bind:value={searchQuery}
+    debounce
+    {readonly}
+    flex
+    placeholder={_('find_place')}
+    aria-label={_('find_place')}
+  />
   <!-- @todo Replace `title` with a native tooltip -->
   <Button
     variant="tertiary"
@@ -375,7 +384,7 @@
 {:else if searchQuery}
   {#if searchResults}
     {#if searchResults.length}
-      <Listbox aria-label={_('search_results')}>
+      <Listbox ariaLabel={_('search_results')}>
         {#each searchResults as result (result.place_id)}
           <Option
             label={result.display_name}

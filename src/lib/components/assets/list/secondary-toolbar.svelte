@@ -1,14 +1,15 @@
 <!--
   @component
   Secondary toolbar of the Asset Library, shared by repository folders and external locations: item
-  selector, optional search box, sort/filter menus, view switcher and Info pane toggle. The view
-  settings live in the shared `currentView`.
+  selector, optional search box, sort/filter/group menus, view switcher and Info pane toggle. The
+  view settings live in the shared `currentView`.
 -->
 <script>
   import { _ } from '@sveltia/i18n';
   import { Button, Divider, Icon, SearchBar, Spacer, Toolbar } from '@sveltia/ui';
 
   import FilterMenu from '$lib/components/common/page-toolbar/filter-menu.svelte';
+  import GroupMenu from '$lib/components/common/page-toolbar/group-menu.svelte';
   import ItemSelector from '$lib/components/common/page-toolbar/item-selector.svelte';
   import SortMenu from '$lib/components/common/page-toolbar/sort-menu.svelte';
   import ViewSwitcher from '$lib/components/common/page-toolbar/view-switcher.svelte';
@@ -18,6 +19,7 @@
 
   /**
    * @import { Asset, ExternalAsset, SortKey } from '$lib/types/private';
+   * @import { ViewGroup } from '$lib/types/public';
    */
 
   /**
@@ -27,6 +29,10 @@
    * @property {number} totalCount Number of assets in the location before any filter or search
    * narrows them down, so that the menus stay enabled and the filter can be reset.
    * @property {SortKey[]} sortKeys Sort keys shown in the Sort menu.
+   * @property {ViewGroup[]} [groups] Grouping options shown in the Group menu. The menu is omitted
+   * when there are none, as repository assets have nothing to group by.
+   * @property {string[]} [groupNames] Names of the groups currently in the list, which the Group
+   * menu’s Expand All and Collapse All items act on.
    * @property {{ current: string }} [searchTerms] Search terms to bind a search box to. The box is
    * omitted when this is not given, as repository assets are searched with the global search.
    */
@@ -38,6 +44,8 @@
     selectedItems,
     totalCount,
     sortKeys,
+    groups = [],
+    groupNames = [],
     searchTerms = undefined,
     /* eslint-enable prefer-const */
   } = $props();
@@ -46,7 +54,7 @@
   const hasMultipleAssets = $derived(totalCount > 1);
 </script>
 
-<Toolbar variant="secondary" aria-label={_('asset_list')}>
+<Toolbar variant="secondary" ariaLabel={_('asset_list')}>
   {#if !(env.isSmallScreen || env.isMediumScreen)}
     <ItemSelector {allItems} {selectedItems} />
   {/if}
@@ -56,7 +64,7 @@
       dir="auto"
       flex={env.isSmallScreen}
       bind:value={searchTerms.current}
-      aria-label={_('assets_dialog.search_for_file')}
+      ariaLabel={_('assets_dialog.search_for_file')}
       aria-controls="asset-list"
     />
   {/if}
@@ -69,6 +77,15 @@
     filters={ASSET_KINDS.map((type) => ({ label: _(type), field: 'fileType', pattern: type }))}
     aria-controls="asset-list"
   />
+  {#if groups.length}
+    <GroupMenu
+      disabled={!hasMultipleAssets}
+      {currentView}
+      {groups}
+      {groupNames}
+      aria-controls="asset-list"
+    />
+  {/if}
   <ViewSwitcher disabled={!hasListedAssets} {currentView} aria-controls="asset-list" />
   {#if !(env.isSmallScreen || env.isMediumScreen)}
     <Divider orientation="vertical" />

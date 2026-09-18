@@ -4,16 +4,22 @@ import { backend, backendName } from '$lib/services/backends';
 import { cmsConfig } from '$lib/services/config';
 import { allEntries } from '$lib/services/contents';
 import {
+  getPublishedVersion,
   getUnpublishedEntriesByCollection,
   getUnpublishedEntry,
+  getUnpublishedEntryByBranch,
+  getUnpublishedEntryByDraft,
   getUnpublishedEntryBySlug,
   hasPublishedVersion,
+  isWorkflowDraft,
+  isWorkflowEnabled,
   mergeUnpublishedEntries,
   unpublishedEntries,
   unpublishedEntriesLoaded,
   workflowDataReady,
   workflowEnabled,
 } from '$lib/services/workflow';
+import { forkedRepository } from '$lib/services/workflow/open-authoring';
 
 /**
  * Create a minimal unpublished entry for testing.
@@ -41,6 +47,7 @@ describe('workflow/index', () => {
     allEntries.current = [];
     cmsConfig.current = undefined;
     backendName.current = undefined;
+    forkedRepository.current = undefined;
   });
 
   describe('workflowDataReady', () => {
@@ -82,6 +89,124 @@ describe('workflow/index', () => {
         expect(workflowEnabled.current).toBe(true);
       },
     );
+
+    test('is true when a collection opts in on its own', () => {
+      backendName.current = 'github';
+      cmsConfig.current = /** @type {any} */ ({
+        publish_mode: 'simple',
+        collections: [{ name: 'posts', folder: 'posts', publish_mode: 'editorial_workflow' }],
+      });
+      expect(workflowEnabled.current).toBe(true);
+    });
+
+    test('stays true when every collection opts out', () => {
+      // Singletons follow the site-level option
+      backendName.current = 'github';
+      cmsConfig.current = /** @type {any} */ ({
+        publish_mode: 'editorial_workflow',
+        collections: [{ name: 'posts', folder: 'posts', publish_mode: 'simple' }],
+      });
+      expect(workflowEnabled.current).toBe(true);
+    });
+  });
+
+  describe('isWorkflowEnabled', () => {
+    /** @type {any} */
+    const posts = { name: 'posts', folder: 'posts' };
+    /** @type {any} */
+    const optedOut = { name: 'settings', files: [], publish_mode: 'simple' };
+    /** @type {any} */
+    const optedIn = { name: 'reviewed', folder: 'reviewed', publish_mode: 'editorial_workflow' };
+
+    test('follows the site-level publish mode for a collection without its own', () => {
+      backendName.current = 'github';
+      cmsConfig.current = /** @type {any} */ ({ publish_mode: 'simple' });
+      expect(isWorkflowEnabled(posts)).toBe(false);
+      expect(isWorkflowEnabled(undefined)).toBe(false);
+
+      cmsConfig.current = /** @type {any} */ ({ publish_mode: 'editorial_workflow' });
+      expect(isWorkflowEnabled(posts)).toBe(true);
+      expect(isWorkflowEnabled(undefined)).toBe(true);
+    });
+
+    test('lets a collection override the site-level publish mode', () => {
+      backendName.current = 'github';
+      cmsConfig.current = /** @type {any} */ ({ publish_mode: 'editorial_workflow' });
+      expect(isWorkflowEnabled(optedOut)).toBe(false);
+
+      cmsConfig.current = /** @type {any} */ ({ publish_mode: 'simple' });
+      expect(isWorkflowEnabled(optedIn)).toBe(true);
+    });
+
+    test('is false when the backend doesn’t implement the feature', () => {
+      backendName.current = 'gitea';
+      cmsConfig.current = /** @type {any} */ ({ publish_mode: 'editorial_workflow' });
+      expect(isWorkflowEnabled(posts)).toBe(false);
+      expect(isWorkflowEnabled(optedIn)).toBe(false);
+    });
+
+    test('ignores an opt-out for a contributor working on a fork', () => {
+      // The contributor can’t write to the configured repository, so every change has to go
+      // through a pull request
+      backendName.current = 'github';
+      cmsConfig.current = /** @type {any} */ ({ publish_mode: 'editorial_workflow' });
+      forkedRepository.current = { owner: 'me', repo: 'site' };
+      expect(isWorkflowEnabled(optedOut)).toBe(true);
+    });
+  });
+
+  describe('isWorkflowDraft', () => {
+    /** @type {any} */
+    const optedOut = { name: 'posts', folder: 'posts', publish_mode: 'simple' };
+
+    beforeEach(() => {
+      backendName.current = 'github';
+      cmsConfig.current = /** @type {any} */ ({ publish_mode: 'editorial_workflow' });
+    });
+
+    test('follows the collection’s publish mode for an entry without a pull request', () => {
+      const originalEntry = /** @type {any} */ ({ slug: 'a' });
+
+      expect(
+        isWorkflowDraft({ collection: optedOut, collectionName: 'posts', originalEntry }),
+      ).toBe(false);
+      expect(isWorkflowDraft({ collection: optedOut, collectionName: 'posts' })).toBe(false);
+      expect(
+        isWorkflowDraft({
+          collection: /** @type {any} */ ({ name: 'posts', folder: 'posts' }),
+          collectionName: 'posts',
+        }),
+      ).toBe(true);
+    });
+
+    test('keeps an entry that already has a pull request in the workflow', () => {
+      // The collection has opted out since the pull request was opened, or a contributor working
+      // on a fork opened it. Either way, saving straight to the configured branch would publish
+      // the unreviewed changes
+      const entry = createEntry({ collectionName: 'posts', subPath: 'a' });
+
+      unpublishedEntries.current = [entry];
+
+      expect(
+        isWorkflowDraft({ collection: optedOut, collectionName: 'posts', originalEntry: entry }),
+      ).toBe(true);
+      // The published version was opened, but the pull request is found by the slug
+      expect(
+        isWorkflowDraft({
+          collection: optedOut,
+          collectionName: 'posts',
+          originalEntry: /** @type {any} */ ({ slug: 'a' }),
+        }),
+      ).toBe(true);
+      // Another entry in the same collection has no pull request
+      expect(
+        isWorkflowDraft({
+          collection: optedOut,
+          collectionName: 'posts',
+          originalEntry: /** @type {any} */ ({ slug: 'b' }),
+        }),
+      ).toBe(false);
+    });
   });
 
   describe('getUnpublishedEntriesByCollection', () => {
@@ -160,6 +285,148 @@ describe('workflow/index', () => {
       );
       expect(getUnpublishedEntryBySlug({ collectionName: 'pages', slug: 'about' })).toBeUndefined();
     });
+  });
+
+  describe('getUnpublishedEntryByBranch', () => {
+    test('finds the entry by its branch name as is', () => {
+      const entry = createEntry({ collectionName: 'posts', subPath: 'hello' });
+
+      unpublishedEntries.current = [entry];
+
+      expect(getUnpublishedEntryByBranch('cms/posts/hello')).toBe(entry);
+      expect(getUnpublishedEntryByBranch('cms/posts/hello-2')).toBeUndefined();
+    });
+  });
+
+  describe('getUnpublishedEntryByDraft', () => {
+    test('returns nothing for a new entry', () => {
+      unpublishedEntries.current = [createEntry({ collectionName: 'posts', subPath: 'hello' })];
+
+      expect(getUnpublishedEntryByDraft({ collectionName: 'posts' })).toBeUndefined();
+    });
+
+    test('finds the entry by the branch it is already associated with', () => {
+      const entry = createEntry({ collectionName: 'posts', subPath: 'hello' });
+
+      // The slug was edited after the pull request was opened, so the branch still carries the old
+      // slug while the entry has the new one
+      entry.slug = 'renamed';
+      entry.subPath = 'renamed';
+      unpublishedEntries.current = [entry];
+
+      expect(getUnpublishedEntryByDraft({ collectionName: 'posts', originalEntry: entry })).toBe(
+        entry,
+      );
+    });
+
+    test('follows an entry replaced in the store', () => {
+      const entry = createEntry({ collectionName: 'posts', subPath: 'hello' });
+      const updated = { ...entry, workflow: { ...entry.workflow, status: 'pending_review' } };
+
+      unpublishedEntries.current = [updated];
+
+      expect(getUnpublishedEntryByDraft({ collectionName: 'posts', originalEntry: entry })).toBe(
+        updated,
+      );
+    });
+
+    test('falls back to the branch derived from the slug', () => {
+      const entry = createEntry({ collectionName: 'posts', subPath: 'hello' });
+      const { workflow, ...publishedEntry } = entry;
+
+      unpublishedEntries.current = [entry];
+
+      expect(workflow).toBeDefined();
+      // The editor opened the published version, e.g. before the pull request was found
+      expect(
+        getUnpublishedEntryByDraft({ collectionName: 'posts', originalEntry: publishedEntry }),
+      ).toBe(entry);
+      expect(
+        getUnpublishedEntryByDraft({ collectionName: 'pages', originalEntry: publishedEntry }),
+      ).toBeUndefined();
+    });
+
+    test('addresses a collection file by its name', () => {
+      const entry = createEntry({ collectionName: 'settings', subPath: 'data/site.yml' });
+      const { workflow, ...publishedEntry } = entry;
+
+      entry.workflow.fileName = 'site';
+      entry.workflow.pullRequest.branch = 'cms/settings/site';
+      unpublishedEntries.current = [entry];
+
+      expect(workflow).toBeDefined();
+      expect(
+        getUnpublishedEntryByDraft({
+          collectionName: 'settings',
+          fileName: 'site',
+          originalEntry: publishedEntry,
+        }),
+      ).toBe(entry);
+    });
+
+    test('returns nothing once the pull request is gone', () => {
+      const entry = createEntry({ collectionName: 'posts', subPath: 'hello' });
+
+      unpublishedEntries.current = [];
+
+      expect(
+        getUnpublishedEntryByDraft({ collectionName: 'posts', originalEntry: entry }),
+      ).toBeUndefined();
+    });
+  });
+});
+
+describe('getPublishedVersion', () => {
+  beforeEach(() => {
+    allEntries.current = [];
+  });
+
+  test('returns the published entry sharing a file path', () => {
+    const entry = createEntry({ collectionName: 'posts', subPath: 'hello' });
+
+    const published = /** @type {any} */ ({
+      id: 'p1',
+      locales: { _default: { path: 'content/posts/hello.md' } },
+    });
+
+    allEntries.current = [published];
+
+    expect(getPublishedVersion(entry)).toBe(published);
+  });
+
+  test('matches the path the entry had before the pull request renamed it', () => {
+    const entry = createEntry({ collectionName: 'posts', subPath: 'renamed' });
+
+    const published = /** @type {any} */ ({
+      id: 'p1',
+      locales: { _default: { path: 'content/posts/hello.md' } },
+    });
+
+    entry.workflow.previousPaths = ['content/posts/hello.md'];
+    allEntries.current = [published];
+
+    expect(getPublishedVersion(entry)).toBe(published);
+  });
+
+  test('is undefined for an entry that has never been published', () => {
+    const entry = createEntry({ collectionName: 'posts', subPath: 'hello' });
+
+    allEntries.current = [
+      /** @type {any} */ ({ id: 'p1', locales: { _default: { path: 'content/posts/other.md' } } }),
+    ];
+
+    expect(getPublishedVersion(entry)).toBeUndefined();
+  });
+
+  test('is undefined for a published entry, which has no other version', () => {
+    const published = /** @type {any} */ ({
+      id: 'p1',
+      locales: { _default: { path: 'content/posts/hello.md' } },
+    });
+
+    allEntries.current = [published];
+
+    expect(getPublishedVersion(published)).toBeUndefined();
   });
 });
 

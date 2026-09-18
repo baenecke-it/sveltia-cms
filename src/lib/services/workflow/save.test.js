@@ -7,14 +7,23 @@ import { createCommitMessage } from '$lib/services/backends/git/shared/commits';
 import { getCommitAuthor } from '$lib/services/backends/save';
 import { allEntries } from '$lib/services/contents';
 import { getCollection } from '$lib/services/contents/collection';
-import { unpublishedEntries } from '$lib/services/workflow';
+import {
+  buildCascadeDeleteChanges,
+  planCascadeDelete,
+} from '$lib/services/contents/entry/relations/cascade/delete';
+import { refreshProductionSHA } from '$lib/services/deployments/resolve';
+import {
+  getUnpublishedEntryByBranch,
+  publishingBranches,
+  unpublishedEntries,
+} from '$lib/services/workflow';
+import { trackDeployingEntry } from '$lib/services/workflow/deploy';
 import { forkedRepository } from '$lib/services/workflow/open-authoring';
 import {
   deleteWorkflowEntries,
   deleteWorkflowEntry,
   discardWorkflowEntries,
   discardWorkflowEntry,
-  getUnpublishedEntryByBranch,
   publishWorkflowEntry,
   removeUnpublishedEntry,
   saveWorkflowChanges,
@@ -28,8 +37,14 @@ vi.mock('$lib/services/contents/collection', () => ({
   getCollection: vi.fn(() => ({ name: 'posts', _type: 'entry' })),
 }));
 vi.mock('$lib/services/contents/collection/files', () => ({ getCollectionFile: vi.fn() }));
+vi.mock('$lib/services/contents/entry/relations/cascade/delete', () => ({
+  planCascadeDelete: vi.fn(() => ({ targets: [], blockers: [] })),
+  buildCascadeDeleteChanges: vi.fn(async () => ({ changes: [], savingEntries: [] })),
+}));
 vi.mock('$lib/services/backends/git/shared/commits');
 vi.mock('$lib/services/backends/save');
+vi.mock('$lib/services/deployments/resolve');
+vi.mock('$lib/services/workflow/deploy');
 
 const workflowService = {
   fetchPullRequests: vi.fn(),
@@ -62,6 +77,7 @@ describe('workflow/save', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     unpublishedEntries.current = [];
+    publishingBranches.current = [];
     allEntries.current = [];
     forkedRepository.current = undefined;
 
@@ -497,6 +513,77 @@ describe('workflow/save', () => {
       // The stale published version is replaced, and the unrelated entry is kept
       expect(published.map((/** @type {any} */ e) => e.id)).toEqual(['other', entry.id]);
       expect(/** @type {any} */ (published.at(-1)).workflow).toBeUndefined();
+
+      // The entry is listed as on its way to the site, once the branch head has been refreshed
+      expect(refreshProductionSHA).toHaveBeenCalledBefore(vi.mocked(trackDeployingEntry));
+      expect(trackDeployingEntry).toHaveBeenCalledWith(entry);
+    });
+
+    test('records the entry as being published while the merge is in flight', async () => {
+      const entry = createEntry('cms/posts/hello', 'pending_publish');
+
+      const { promise: merging, resolve: merge } = /** @type {PromiseWithResolvers<void>} */ (
+        Promise.withResolvers()
+      );
+
+      workflowService.publish.mockReturnValueOnce(merging);
+
+      const promise = publishWorkflowEntry(entry);
+
+      // Recorded right away, so a view opened during the wait shows the entry as busy
+      expect(publishingBranches.current).toEqual(['cms/posts/hello']);
+
+      merge();
+      await promise;
+
+      expect(publishingBranches.current).toEqual([]);
+    });
+
+    test('forgets the entry once the merge has failed', async () => {
+      const entry = createEntry('cms/posts/hello', 'pending_publish');
+
+      workflowService.publish.mockRejectedValueOnce(new Error('Boom'));
+
+      await expect(publishWorkflowEntry(entry)).rejects.toThrow('Boom');
+
+      expect(publishingBranches.current).toEqual([]);
+    });
+
+    test('joins a merge already in flight rather than starting another', async () => {
+      const entry = createEntry('cms/posts/hello', 'pending_publish');
+      const otherEntry = createEntry('cms/posts/other', 'pending_publish');
+
+      const { promise: merging, resolve: merge } = /** @type {PromiseWithResolvers<void>} */ (
+        Promise.withResolvers()
+      );
+
+      workflowService.publish.mockReturnValueOnce(merging);
+
+      const first = publishWorkflowEntry(entry);
+      const second = publishWorkflowEntry(entry);
+      // Another entry’s merge is a separate one
+      const other = publishWorkflowEntry(otherEntry);
+
+      expect(publishingBranches.current).toEqual(['cms/posts/hello', 'cms/posts/other']);
+      // The merge is requested once the pre-publish hook has run
+      await vi.waitFor(() => expect(workflowService.publish).toHaveBeenCalledTimes(2));
+
+      merge();
+      await Promise.all([first, second, other]);
+
+      // The hooks fired once for the joined merge, and once for the other one
+      expect(vi.mocked(callEventHooks).mock.calls.map(([{ type }]) => type)).toEqual([
+        'prePublish',
+        'prePublish',
+        'postPublish',
+        'postPublish',
+      ]);
+      expect(publishingBranches.current).toEqual([]);
+
+      // A later publish is a new one
+      await publishWorkflowEntry(entry);
+
+      expect(workflowService.publish).toHaveBeenCalledTimes(3);
     });
   });
 
@@ -533,6 +620,8 @@ describe('workflow/save', () => {
 
     beforeEach(() => {
       vi.mocked(createCommitMessage).mockReturnValue('Delete Post “hello”');
+      vi.mocked(planCascadeDelete).mockReturnValue({ targets: [], blockers: [] });
+      vi.mocked(buildCascadeDeleteChanges).mockResolvedValue({ changes: [], savingEntries: [] });
 
       // The backend opens the pull request at the status it was asked for
       // A new pull request opens at the status it was asked for; an existing one is returned as is
@@ -594,6 +683,55 @@ describe('workflow/save', () => {
           ],
         }),
       );
+    });
+
+    test('removes the references to the entry in the same pull request', async () => {
+      const entry = createPublishedEntry();
+      const target = /** @type {any} */ ({ entry: { id: 'post-1' }, collection });
+
+      const cascadeChange = /** @type {any} */ ({
+        action: 'update',
+        slug: 'post-1',
+        path: 'content/posts/post-1.md',
+        data: 'tag: ""',
+      });
+
+      vi.mocked(planCascadeDelete).mockReturnValue({ targets: [target], blockers: [] });
+      vi.mocked(buildCascadeDeleteChanges).mockResolvedValue({
+        changes: [cascadeChange],
+        savingEntries: [target.entry],
+      });
+
+      await deleteWorkflowEntry(entry, collection, undefined);
+
+      expect(planCascadeDelete).toHaveBeenCalledWith({
+        collection,
+        collectionFile: undefined,
+        entries: [entry],
+      });
+      expect(buildCascadeDeleteChanges).toHaveBeenCalledWith({ targets: [target] });
+      // Once the removal lands, no reference is left dangling
+      expect(workflowService.savePullRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          changes: [
+            { action: 'delete', slug: 'hello', path: 'content/posts/hello.md' },
+            { action: 'delete', slug: 'hello', path: 'content/posts/ja/hello.md' },
+            cascadeChange,
+          ],
+        }),
+      );
+    });
+
+    test('refuses to delete an entry that other entries require', async () => {
+      vi.mocked(planCascadeDelete).mockReturnValue({
+        targets: [],
+        blockers: [/** @type {any} */ ({ entry: { id: 'post-1' }, keyPath: 'tag' })],
+      });
+
+      await expect(
+        deleteWorkflowEntry(createPublishedEntry(), collection, undefined),
+      ).rejects.toThrow('Cannot delete an entry that other entries require');
+      expect(workflowService.savePullRequest).not.toHaveBeenCalled();
     });
 
     test('opens one pull request per entry for a selection', async () => {
@@ -737,6 +875,153 @@ describe('workflow/save', () => {
 
       expect(allEntries.current.map((/** @type {any} */ e) => e.id)).toEqual(['other']);
       expect(unpublishedEntries.current).toEqual([]);
+    });
+
+    test('brings the referencing entries up to date once the removal is published', async () => {
+      const entry = createPublishedEntry();
+
+      const post = /** @type {any} */ ({
+        id: 'post-1',
+        slug: 'post-1',
+        subPath: 'post-1',
+        locales: {
+          _default: { slug: 'post-1', path: 'content/posts/post-1.md', content: { tag: 'hello' } },
+        },
+      });
+
+      const other = /** @type {any} */ ({
+        id: 'other',
+        slug: 'other',
+        subPath: 'other',
+        locales: { _default: { slug: 'other', path: 'content/posts/other.md', content: {} } },
+      });
+
+      const rewrittenPost = {
+        ...post,
+        locales: { _default: { ...post.locales._default, content: { tag: '' } } },
+      };
+
+      allEntries.current = [entry, post, other];
+
+      const unpublishedEntry = await deleteWorkflowEntry(entry, collection, undefined);
+
+      // The references are worked out again at publish time, while the deleted entry is still in
+      // the store, rather than remembered from when the pull request was opened
+      vi.mocked(planCascadeDelete).mockClear();
+      vi.mocked(planCascadeDelete).mockReturnValue({
+        targets: [{ entry: rewrittenPost, collection }],
+        blockers: [],
+      });
+
+      await publishWorkflowEntry(unpublishedEntry);
+
+      expect(planCascadeDelete).toHaveBeenCalledWith({
+        collection: { name: 'posts', _type: 'entry' },
+        collectionFile: undefined,
+        entries: [unpublishedEntry],
+      });
+      expect(allEntries.current).toEqual([rewrittenPost, other]);
+    });
+
+    test('leaves the store alone when a regular publish lands', async () => {
+      const entry = createEntry('cms/posts/hello', 'pending_publish');
+
+      upsertUnpublishedEntry(entry);
+      await publishWorkflowEntry(entry);
+
+      expect(planCascadeDelete).not.toHaveBeenCalled();
+    });
+
+    test('removes the references to the whole selection in every pull request', async () => {
+      const first = createPublishedEntry();
+      const second = createPublishedEntry();
+
+      second.id = 'published-2';
+      second.slug = 'world';
+      second.locales = {
+        _default: { slug: 'world', path: 'content/posts/world.md', content: {} },
+      };
+
+      const target = /** @type {any} */ ({ entry: { id: 'post-1' }, collection });
+
+      const cascadeChange = /** @type {any} */ ({
+        action: 'update',
+        slug: 'post-1',
+        path: 'content/posts/post-1.md',
+        data: 'tags: []',
+      });
+
+      vi.mocked(planCascadeDelete).mockReturnValue({ targets: [target], blockers: [] });
+      vi.mocked(buildCascadeDeleteChanges).mockResolvedValue({
+        changes: [cascadeChange],
+        savingEntries: [target.entry],
+      });
+
+      await deleteWorkflowEntries([
+        { entry: first, collection },
+        { entry: second, collection },
+      ]);
+
+      // One plan for the selection, so a post referencing both entries comes out the same in both
+      // pull requests, and the second one to be published doesn’t conflict with the first
+      expect(planCascadeDelete).toHaveBeenCalledTimes(1);
+      expect(planCascadeDelete).toHaveBeenCalledWith({
+        collection,
+        collectionFile: undefined,
+        entries: [first, second],
+      });
+      expect(buildCascadeDeleteChanges).toHaveBeenCalledTimes(2);
+      expect(buildCascadeDeleteChanges).toHaveBeenCalledWith({ targets: [target] });
+
+      expect(workflowService.savePullRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          branch: 'cms/posts/hello',
+          changes: expect.arrayContaining([cascadeChange]),
+        }),
+      );
+      expect(workflowService.savePullRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          branch: 'cms/posts/world',
+          changes: expect.arrayContaining([cascadeChange]),
+        }),
+      );
+    });
+
+    test('plans a selection spanning collections per collection', async () => {
+      const first = createPublishedEntry();
+      const second = createPublishedEntry();
+      const otherCollection = /** @type {any} */ ({ name: 'pages', _type: 'entry' });
+
+      second.id = 'published-2';
+      second.slug = 'world';
+      second.locales = {
+        _default: { slug: 'world', path: 'content/pages/world.md', content: {} },
+      };
+
+      await deleteWorkflowEntries([
+        { entry: first, collection },
+        { entry: second, collection: otherCollection },
+      ]);
+
+      expect(planCascadeDelete).toHaveBeenCalledTimes(2);
+      expect(planCascadeDelete).toHaveBeenCalledWith(
+        expect.objectContaining({ collection, entries: [first] }),
+      );
+      expect(planCascadeDelete).toHaveBeenCalledWith(
+        expect.objectContaining({ collection: otherCollection, entries: [second] }),
+      );
+    });
+
+    test('refuses a selection that other entries require', async () => {
+      vi.mocked(planCascadeDelete).mockReturnValue({
+        targets: [],
+        blockers: [/** @type {any} */ ({ entry: { id: 'post-1' }, keyPath: 'tag' })],
+      });
+
+      await expect(
+        deleteWorkflowEntries([{ entry: createPublishedEntry(), collection }]),
+      ).rejects.toThrow('Cannot delete entries that other entries require');
+      expect(workflowService.savePullRequest).not.toHaveBeenCalled();
     });
   });
 

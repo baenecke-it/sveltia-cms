@@ -24,6 +24,10 @@
   import { env } from '$lib/services/user/env.svelte';
 
   /**
+   * @import { AssetFolderInfo } from '$lib/types/private';
+   */
+
+  /**
    * @typedef {object} Props
    * @property {boolean} [isSearchPage] Whether the current page is the search results page.
    */
@@ -36,6 +40,15 @@
   } = $props();
 
   const numberFormatter = $derived(Intl.NumberFormat(appLocale.current));
+
+  /* v8 ignore start -- the app locale is loaded before the sidebar is rendered */
+  /**
+   * Get the label of a folder, which follows the app locale.
+   * @param {AssetFolderInfo} folder Folder.
+   * @returns {string} Label.
+   */
+  const getFolderLabel = (folder) => (appLocale.current ? getFolderLabelByCollection(folder) : '');
+  /* v8 ignore stop */
 
   const folders = $derived([
     // All Assets, Global Assets, then collection-level, file-level folders, sorted by appearance
@@ -68,7 +81,7 @@
     (!folders[index].isAssetCollection && !!folders[index + 1]?.isAssetCollection);
 </script>
 
-<div role="none" class="primary-sidebar">
+<nav class="primary-sidebar" aria-label={_('assets')}>
   {#if env.isSmallScreen}
     <header>
       <h2>{_('assets')}</h2>
@@ -80,7 +93,7 @@
       }}
     />
   {/if}
-  <Listbox aria-label={_('asset_folder_list')} aria-controls="assets-container">
+  <Listbox ariaLabel={_('asset_folder_list')} aria-controls="assets-container">
     {#if folders.length}
       <OptionGroup label={_('asset_location.repository')}>
         {#each folders as folder, index ([folder.collectionName, folder.fileName, folder.internalPath].join(':'))}
@@ -95,7 +108,7 @@
             {@const selected = equal(selectedAssetFolder.current, folder)}
             <Option
               selected={env.isSmallScreen || isSearchPage ? false : selected}
-              label={appLocale.current ? getFolderLabelByCollection(folder) : ''}
+              label={getFolderLabel(folder)}
               onSelect={() => {
                 goto(`/assets/${internalPath ?? '-/all'}`, {
                   transitionType: 'forwards',
@@ -172,52 +185,55 @@
         {/each}
       </OptionGroup>
     {/if}
-    <OptionGroup label={_('asset_location.external')}>
-      {#each enabledCloudServices.current as service (service.serviceId)}
-        {@const { serviceId, serviceLabel } = service}
-        <!-- The count is known once the service has been listed; Cloudinary is never listed -->
-        {@const count = externalAssetCounts.current[serviceId]}
+    <!-- Hide the group if there is nothing to show: no external location and no linked file -->
+    {#if enabledCloudServices.current.length || linkedAssets.current.length}
+      <OptionGroup label={_('asset_location.external')}>
+        {#each enabledCloudServices.current as service (service.serviceId)}
+          {@const { serviceId, serviceLabel } = service}
+          <!-- The count is known once the service has been listed; Cloudinary is never listed -->
+          {@const count = externalAssetCounts.current[serviceId]}
+          <Option
+            selected={env.isSmallScreen || isSearchPage
+              ? false
+              : selectedCloudService.current?.serviceId === serviceId}
+            label={serviceLabel}
+            onSelect={() => {
+              goto(getCloudServicePath(service), { transitionType: 'forwards' });
+            }}
+          >
+            {#snippet startIcon()}
+              <Icon name="cloud" />
+            {/snippet}
+            {#snippet endIcon()}
+              {#if count !== undefined}
+                <span class="count" aria-label="({_('x_assets', { values: { count } })})">
+                  {numberFormatter.format(count)}
+                </span>
+              {/if}
+            {/snippet}
+          </Option>
+        {/each}
+        <!-- Files linked from entries by URL, which can be browsed but not managed -->
+        {@const linkedCount = linkedAssets.current.length}
         <Option
           selected={env.isSmallScreen || isSearchPage
             ? false
-            : selectedCloudService.current?.serviceId === serviceId}
-          label={serviceLabel}
+            : selectedCloudService.current?.serviceId === linkedFilesService.serviceId}
+          label={linkedFilesService.serviceLabel}
           onSelect={() => {
-            goto(getCloudServicePath(service), { transitionType: 'forwards' });
+            goto(getCloudServicePath(linkedFilesService), { transitionType: 'forwards' });
           }}
         >
           {#snippet startIcon()}
-            <Icon name="cloud" />
+            <Icon name="link_2" />
           {/snippet}
           {#snippet endIcon()}
-            {#if count !== undefined}
-              <span class="count" aria-label="({_('x_assets', { values: { count } })})">
-                {numberFormatter.format(count)}
-              </span>
-            {/if}
+            <span class="count" aria-label="({_('x_assets', { values: { count: linkedCount } })})">
+              {numberFormatter.format(linkedCount)}
+            </span>
           {/snippet}
         </Option>
-      {/each}
-      <!-- Files linked from entries by URL, which can be browsed but not managed -->
-      {@const linkedCount = linkedAssets.current.length}
-      <Option
-        selected={env.isSmallScreen || isSearchPage
-          ? false
-          : selectedCloudService.current?.serviceId === linkedFilesService.serviceId}
-        label={linkedFilesService.serviceLabel}
-        onSelect={() => {
-          goto(getCloudServicePath(linkedFilesService), { transitionType: 'forwards' });
-        }}
-      >
-        {#snippet startIcon()}
-          <Icon name="link" />
-        {/snippet}
-        {#snippet endIcon()}
-          <span class="count" aria-label="({_('x_assets', { values: { count: linkedCount } })})">
-            {numberFormatter.format(linkedCount)}
-          </span>
-        {/snippet}
-      </Option>
-    </OptionGroup>
+      </OptionGroup>
+    {/if}
   </Listbox>
-</div>
+</nav>

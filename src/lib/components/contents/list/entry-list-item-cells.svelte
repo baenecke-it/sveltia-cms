@@ -4,7 +4,7 @@
   reorder list row.
 -->
 <script>
-  import { locale as appLocale } from '@sveltia/i18n';
+  import { _, locale as appLocale } from '@sveltia/i18n';
   import { Checkbox, GridCell, Icon, TruncatedText } from '@sveltia/ui';
 
   import Image from '$lib/components/assets/shared/image.svelte';
@@ -50,13 +50,19 @@
 
   // Editorial Workflow information, only present on an unpublished entry
   const workflow = $derived(/** @type {UnpublishedEntry} */ (entry).workflow);
+  /* v8 ignore start -- the app locale is always set once the UI strings are loaded */
+  // Plain-text summary naming the selection checkbox, so a screen reader hears which entry it
+  // selects rather than an unlabelled checkbox. `appLocale.current` is a key, because the summary
+  // can include a localized label
+  const summary = $derived(appLocale.current ? getEntrySummary(collection, entry) : '');
+  /* v8 ignore stop */
 </script>
 
 {#if showCheckbox && !(env.isSmallScreen || env.isMediumScreen)}
   <GridCell class="checkbox">
     <Checkbox
-      role="none"
       tabindex="-1"
+      ariaLabel={_('select_item', { values: { name: summary } })}
       checked={selectedEntryIdSet.current.has(entry.id)}
       onChange={({ detail: { checked } }) => {
         onSelect?.(checked);

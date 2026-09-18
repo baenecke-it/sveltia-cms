@@ -11,6 +11,8 @@
 create: 新規作成
 select: 選択
 select_all: すべて選択
+# Accessible name of the checkbox that selects a single entry or asset in a list
+select_item: '{$name} を選択'
 upload: アップロード
 copy: コピー
 download: ダウンロード
@@ -339,9 +341,9 @@ asset_list: アセットリスト
 # Collection and folder page titles
 # Used as aria-labels on page containers
 # {$collection} is the current collection label
-x_collection: 「{$collection}」コレクション
+x_collection: '{$collection} コレクション'
 # {$folder} is the current asset folder label
-x_asset_folder: 「{$folder}」アセットフォルダー
+x_asset_folder: '{$folder} アセットフォルダー'
 
 # Navigation announcements (ARIA live regions)
 # Announce page changes for screen reader users
@@ -436,6 +438,8 @@ grouping_options: グループ化オプション
 # Asset type filter and group labels
 type: 種類
 all: すべて
+# Group option for the linked files, which can be hosted anywhere: the host name of the file’s URL
+domain: ドメイン
 # Asset type labels
 image: 画像
 video: 動画
@@ -454,6 +458,9 @@ all_assets: すべてのアセット
 global_assets: グローバルアセット
 # Virtual location listing the files that File/Image fields link to by URL, wherever they are hosted
 linked_files: リンクされたファイル
+# Badge and message shown on a linked file that couldn’t be loaded, e.g. because it has been deleted
+file_unavailable: 利用不可
+file_unavailable_description: このファイルは読み込めませんでした。移動または削除された可能性があります。
 
 # ==============================================================================
 # Entry and Collection Actions
@@ -572,6 +579,10 @@ file_extension_change_warning: 拡張子が実際のファイル形式と一致�
 replace_asset: アセットを差し替え
 # {$name} is the asset being replaced
 replace_x: '{$name} を差し替え'
+replace_file: ファイルを差し替え
+replace_image: 画像を差し替え
+remove_file: ファイルを削除
+remove_image: 画像を削除
 
 # File selection prompts: drop zones and file pickers
 # Browse prompt shown when drag-and-drop is unavailable on desktop and pointer devices
@@ -640,6 +651,22 @@ confirm_deleting_selected_assets: |
     1   {{ 選択されたアセットを削除してもよろしいですか？ }}
     *   {{ 選択された {$count} 個のアセットを削除してもよろしいですか？ }}
 confirm_deleting_all_assets: すべてのアセットを削除してもよろしいですか？
+# Note added to the confirmation when entries use the assets being deleted; the references are
+# removed in the same commit. {$count} is the number of entries using them
+deleting_referenced_assets_note: |
+  .input {$count :integer}
+  .match $count
+    1   {{ エントリーからの参照も削除されます。 }}
+    *   {{ {$count} 個のエントリーからの参照も削除されます。 }}
+# Shown in place of the confirmation when removing the references would leave a field in an entry
+# invalid, e.g. a required Image field with nothing left, so the deletion is refused. The fields are
+# listed below the message, each with the validation error it would have. {$count} is the number of
+# assets being deleted
+cannot_delete_referenced_assets: |
+  .input {$count :integer}
+  .match $count
+    1   {{ このアセットを使用しているエントリーの以下のフィールドがアセットなしでは無効になるため、削除できません。先にそれらのエントリーを更新してください。 }}
+    *   {{ これらのアセットを使用しているエントリーの以下のフィールドがアセットなしでは無効になるため、削除できません。先にそれらのエントリーを更新してください。 }}
 
 # Delete entries: dialog titles and confirmation messages
 # {$count} is the number of entries targeted by the action
@@ -666,6 +693,23 @@ confirm_deleting_selected_entries_with_assets: |
     *   {{ 選択された {$count} 個のエントリーと関連アセットを削除してもよろしいですか？ }}
 confirm_deleting_all_entries: すべてのエントリーを削除してもよろしいですか？
 confirm_deleting_all_entries_with_assets: すべてのエントリーと関連アセットを削除してもよろしいですか？
+# Note added to the confirmation when other entries reference the entries being deleted through
+# Relation fields; the references are removed in the same commit. {$count} is the number of
+# referencing entries
+deleting_referenced_entries_note: |
+  .input {$count :integer}
+  .match $count
+    1   {{ 他のエントリーからの参照も削除されます。 }}
+    *   {{ 他の {$count} 個のエントリーからの参照も削除されます。 }}
+# Shown in place of the confirmation when removing the references would leave a Relation field in
+# another entry invalid, e.g. a required field with nothing selected, so the deletion is refused.
+# The fields are listed below the message, each with the validation error it would have. {$count}
+# is the number of entries being deleted
+cannot_delete_referenced_entries: |
+  .input {$count :integer}
+  .match $count
+    1   {{ 他のエントリーの以下のフィールドがこのエントリーなしでは無効になるため、削除できません。先にそれらのエントリーを更新してください。 }}
+    *   {{ 他のエントリーの以下のフィールドがこれらのエントリーなしでは無効になるため、削除できません。先にそれらのエントリーを更新してください。 }}
 
 # ==============================================================================
 # Entry Reordering
@@ -1233,7 +1277,8 @@ reorder_item: アイテムを並び替え
 # take a label from
 list_item_value: アイテムの値
 
-# Add item button label
+# Add item button label, also used by the Relation field to create a new entry in the referenced
+# collection, with the collection’s singular label
 # Example: “Add Image”, “Add Author”
 # {$name} is the label of the item type that can be added
 add_x: '{$name} を追加'
@@ -1258,6 +1303,13 @@ opacity: 透明度
 
 # Select field: empty option placeholder
 unselected_option: (なし)
+
+# Relation field: creating a referenced entry without leaving the editor
+relation_field:
+  # Note shown in the dialog. {$name} is the singular label of the referenced collection
+  save_together_hint: 新しい{$name}は、編集中のエントリーと一緒に保存されます。
+  # Error shown when the entry couldn’t be prepared. {$name} is the singular label of the collection
+  add_failed: '{$name} を追加できませんでした。詳細はブラウザーのコンソールを確認してください。'
 
 # Select Assets dialog
 assets_dialog:
@@ -1413,6 +1465,9 @@ cloud_storage:
   aws_s3:
     auth_key_label: シークレットアクセスキー
 
+  bunny_storage:
+    auth_key_label: ストレージゾーンパスワード
+
   cloudflare_r2:
     auth_key_label: シークレットアクセスキー
 
@@ -1479,6 +1534,16 @@ config:
     missing_media_folder: メディアフォルダーが定義されていません。
     public_folder_relative_path: 設定されているパブリックフォルダーが正しくありません。この設定は「/」で始まる絶対パスでなければなりません。
     public_folder_absolute_url: パブリックフォルダーオプションの絶対 URL は Sveltia CMS では非対応です。
+    # {$replacement} is the configured replacement string; Don’t localize `sanitize_replacement`
+    invalid_sanitize_replacement: '`sanitize_replacement` オプションに `{$replacement}` が指定されていますが、スラッグに使用できない文字が含まれているため、置換文字として使用できません。'
+    # {$option} is the option name (`site_url` or `display_url`) and {$url} is the configured value
+    invalid_url_option: '`{$option}` オプションに `{$url}` が指定されていますが、`https://` または `http://` で始まる絶対 URL を指定する必要があります。'
+    # Don’t localize `i18n` and `locales`
+    i18n_no_locales: '`i18n.locales` オプションには少なくとも 1 つのロケールを指定する必要があります。'
+    # {$locale} is the locale code from the configuration; Don’t localize `default_locale` and `locales`
+    i18n_invalid_default_locale: '`default_locale` オプションに `{$locale}` が指定されていますが、`locales` に含まれていません。'
+    # {$locale} is the locale code from the configuration; Don’t localize `initial_locales` and `locales`
+    i18n_invalid_initial_locale: '`initial_locales` オプションに `{$locale}` が含まれていますが、`locales` に含まれていません。'
     # {$key} is the unsupported key found in the option map; Don’t localize `transformations`, `raster_image` and `svg`
     invalid_transformation_key: '`transformations` オプションにサポートされていない `{$key}` キーが含まれています。`raster_image`、`svg` またはサポートされているラスター画像形式を指定してください。'
     # {$key} is the transformation key; Don’t localize `quality`
@@ -1499,6 +1564,16 @@ config:
     file_format_mismatch: 拡張子 `{$extension}` は `{$format}` 形式と一致しません。
     # {$slug} is the invalid slug template from the configuration; Don’t localize `path` and `slug`
     invalid_slug_slash: スラッグテンプレート `{$slug}` は無効です。スラッシュを含めることはできません。エントリーをサブフォルダーに整理するには、`slug` の代わりに `path` オプションを使用してください。
+    # {$name} is the field name from the configuration; Don’t localize `identifier_field`
+    invalid_identifier_field: '`identifier_field` オプションで `{$name}` が参照されていますが、そのフィールドはコレクションに定義されていません。'
+    # {$name} is the field name from the configuration; Don’t localize `filter`
+    invalid_filter_field: '`filter` オプションで `{$name}` が参照されていますが、そのフィールドはコレクションに定義されていません。'
+    # Don’t localize `filter`, `value` and `pattern`
+    invalid_filter_no_condition: '`filter` オプションには、エントリーを照合するための `value` または `pattern` オプションが必要です。'
+    # {$option} is an option name such as `slug` or `summary` and {$name} is the field name or template tag from the configuration
+    option_field_not_found: '`{$option}` オプションで `{$name}` が参照されていますが、そのフィールドは定義されていません。'
+    # {$option} is an option name such as `pattern` or `filter` and {$pattern} is the configured pattern
+    invalid_regex: '`{$option}` オプションに無効な正規表現 `{$pattern}` が含まれているため、無視されます。'
     # {$name} is the group name from the configuration; Don’t localize `reorder`, `group` and `view_groups`
     invalid_reorder_group: '`reorder` オプションで指定された `{$name}` グループは、`view_groups` オプションに定義されていません。'
     # {$name} is the field name from the configuration; Don’t localize `sortable_fields`
@@ -1514,6 +1589,8 @@ config:
     duplicate_view_group_name: ビューグループ名は一意である必要がありますが、`{$name}` が複数回使用されています。
     # {$count} is the 1-based view filter index in the configuration array; Don’t localize `name`
     missing_view_filter_name: ビューフィルター {$count} には `name` オプションを空でない文字列として定義する必要があります。
+    # {$count} is the 1-based view filter index in the configuration array; Don’t localize `pattern`, `eq` and `gte`
+    invalid_view_filter_no_condition: ビューフィルター {$count} には、エントリーを照合するための `pattern` オプション、または `eq` や `gte` などの比較オプションを定義する必要があります。
     # {$name} is the invalid or duplicate view filter name
     invalid_view_filter_name: ビューフィルター名 `{$name}` は無効です。特殊文字を含めることはできません。
     duplicate_view_filter_name: ビューフィルター名は一意である必要がありますが、`{$name}` が複数回使用されています。
@@ -1556,12 +1633,29 @@ config:
     invalid_list_variable_type: List フィールドの変数タイプが無効です。`widget` オプションは `{$widget}` に設定されていますが、`object` でなければなりません。
     # Don’t localize `fields`, and `types`
     invalid_object_field: Object フィールドは `fields` と `types` オプションを同時に持つことはできません。
+    # {$min} and {$max} are option names such as `min` and `max` or `minlength` and `maxlength`
+    invalid_range_options: '`{$min}` オプションは `{$max}` オプションより大きくすることはできません。'
+    # {$step} is the configured value; Don’t localize `step`
+    invalid_step: '`step` オプションに `{$step}` が指定されていますが、0 より大きい値を指定する必要があります。'
+    # Don’t localize `options`
+    select_field_no_options: Select フィールドの `options` オプションには少なくとも 1 つの項目が必要です。
+    # {$value} is the option value from the configuration; Don’t localize `options`
+    select_field_duplicate_option: Select フィールドの `options` は一意である必要がありますが、`{$value}` が複数回使用されています。
+    # {$value} is the default value from the configuration; Don’t localize `default` and `options`
+    select_field_invalid_default: Select フィールドの `default` オプションに `{$value}` が指定されていますが、`options` に含まれていません。
+    # Don’t localize `fields` and `types`
+    list_field_no_subfields: List フィールドの `fields` または `types` オプションには少なくとも 1 つの項目が必要です。単純な値のリストにする場合は、オプションを省略してください。
+    # Don’t localize `fields` and `types`
+    object_field_no_subfields: Object フィールドの `fields` または `types` オプションには少なくとも 1 つの項目が必要です。
     # {$collection}, {$file}, and {$field} are referenced names that could not be resolved
     relation_field_invalid_collection: 参照されている `{$collection}` コレクションは無効であるか定義されていません。
     relation_field_invalid_collection_file: 参照されている `{$file}` ファイルは無効であるか定義されていません。
     # Don’t localize `file`
     relation_field_missing_file_name: ファイルコレクションへの参照には `file` オプションを定義する必要があります。
     relation_field_invalid_value_field: 参照されている値フィールド `{$field}` は無効であるか定義されていません。
+    relation_field_invalid_display_field: 参照されている表示フィールド `{$field}` は無効であるか定義されていません。
+    relation_field_invalid_search_field: 参照されている検索フィールド `{$field}` は無効であるか定義されていません。
+    relation_field_invalid_filter_field: 参照されているフィルターフィールド `{$field}` は無効であるか定義されていません。
     unexpected: 予期せぬ問題
 
     # Schema validation errors, reported when the configuration doesn’t match the published JSON
@@ -1606,6 +1700,10 @@ config:
     preview_path_date_field_not_found: '`preview_path_date_field` オプションで `{$name}` という名前のフィールドが指定されていますが、その名前の DateTime フィールドが定義されていないため、プレビューリンクは表示されません。'
     # {$name} is the template tag from the configuration; Don’t localize `preview_path`
     preview_path_field_not_found: '`preview_path` オプションで `{$name}` が参照されていますが、そのフィールドはコレクションに定義されていないため、プレビューリンクは表示されません。'
+    # {$name} is the default identifier field name; Don’t localize `identifier_field` and `slug`
+    missing_identifier_field: コレクションに新しいエントリーの名前となる `{$name}` フィールドがないため、新しいエントリーにはランダムなスラッグが付けられます。`{$name}` フィールドを追加するか、`identifier_field` または `slug` オプションを設定してください。
+    # Don’t localize `i18n`
+    i18n_not_configured: '`i18n` オプションが有効になっていますが、設定のトップレベルまたはコレクションで i18n が設定されていないため、このオプションは効果がありません。'
     # {$option} is an option path from the configuration, such as `filter.Regulation`
     schema_unknown_option: '`{$option}` オプションは Sveltia CMS の設定スキーマに定義されていません。このオプションは無視されます。入力ミスや記述ミスがないか確認してください。'
 
@@ -1651,6 +1749,10 @@ status:
   # A pending removal, which is a status of its own rather than a stage: it has no review to go
   # through, only the deletion itself to carry out or call off
   pending_deletion: 削除待ち
+  # Merged changes the site hasn’t caught up with yet: it’s being rebuilt and deployed from the
+  # merge, so a published entry isn’t live and a deleted one is still up. Heading of the tray below
+  # the board that lists them until the site has caught up
+  deploying: デプロイ中
 
 workflow:
   # Buttons on a pending deletion card, and their confirmation dialogs. The two actions are the
@@ -1748,6 +1850,9 @@ workflow:
   no_entries: エントリーはありません。
   # Workflow page: aria-label for a draggable entry card
   drag_entry: ドラッグするとステータスを変更できます
+  # Workflow page: note on a card in the Deploying tray, marking an entry that’s being removed from
+  # the site rather than published to it
+  deploying_deletion: 削除
 
 # Open Authoring: a contributor without write access to the configured repository works in a fork
 # of it, and their changes reach the site through a pull request a maintainer merges

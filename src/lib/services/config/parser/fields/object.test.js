@@ -313,6 +313,33 @@ describe('Object Field Config Parser', () => {
       expect(mockParseFields).not.toHaveBeenCalled();
     });
 
+    it('should error on an empty subfield or type list', async () => {
+      const { parseObjectFieldConfig } = await import('./object.js');
+      const collectors = createCollectors();
+      /** @type {any} */
+      const context = { cmsConfig: {}, collection: { name: 'posts' }, typedKeyPath: 'meta' };
+
+      parseObjectFieldConfig({
+        config: /** @type {any} */ ({ name: 'meta', widget: 'object', fields: [] }),
+        context,
+        collectors,
+      });
+
+      parseObjectFieldConfig({
+        config: /** @type {any} */ ({ name: 'meta', widget: 'object', types: [] }),
+        context,
+        collectors,
+      });
+
+      expect(mockAddMessage).toHaveBeenCalledTimes(2);
+      expect(mockAddMessage).toHaveBeenCalledWith({
+        strKey: 'object_field_no_subfields',
+        context,
+        collectors,
+      });
+      expect(mockParseFields).not.toHaveBeenCalled();
+    });
+
     it('should skip parsing types without fields', async () => {
       const { parseObjectFieldConfig } = await import('./object.js');
       const collectors = createCollectors();
@@ -348,6 +375,68 @@ describe('Object Field Config Parser', () => {
 
       // Only one call to parseFields (for the first type with fields)
       expect(mockParseFields).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('parseObjectFieldConfig thumbnail option', () => {
+    /** @type {any} */
+    const context = {
+      cmsConfig: {},
+      collection: { name: 'posts' },
+      typedKeyPath: 'hero',
+    };
+
+    const subfields = [
+      { name: 'image', widget: 'image' },
+      { name: 'caption', widget: 'string' },
+    ];
+
+    it('should accept a thumbnail that names a subfield', async () => {
+      const { parseObjectFieldConfig } = await import('./object.js');
+      const collectors = createCollectors();
+
+      parseObjectFieldConfig({
+        config: { name: 'hero', widget: 'object', fields: subfields, thumbnail: 'image' },
+        context,
+        collectors,
+      });
+
+      parseObjectFieldConfig({
+        config: { name: 'hero', widget: 'object', fields: subfields, thumbnail: 'fields.image' },
+        context,
+        collectors,
+      });
+
+      parseObjectFieldConfig({
+        config: {
+          name: 'hero',
+          widget: 'object',
+          types: [{ name: 'photo', fields: subfields }],
+          thumbnail: 'image',
+        },
+        context,
+        collectors,
+      });
+
+      expect(mockAddMessage).not.toHaveBeenCalled();
+    });
+
+    it('should error on a thumbnail that names no subfield', async () => {
+      const { parseObjectFieldConfig } = await import('./object.js');
+      const collectors = createCollectors();
+
+      parseObjectFieldConfig({
+        config: { name: 'hero', widget: 'object', fields: subfields, thumbnail: 'photo' },
+        context,
+        collectors,
+      });
+
+      expect(mockAddMessage).toHaveBeenCalledExactlyOnceWith({
+        strKey: 'option_field_not_found',
+        values: { option: 'thumbnail', name: 'photo' },
+        context,
+        collectors,
+      });
     });
   });
 });

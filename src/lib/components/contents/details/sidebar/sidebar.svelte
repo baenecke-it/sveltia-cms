@@ -81,8 +81,8 @@
 <div role="none" class="sidebar">
   <SelectButtonGroup
     class="tabs"
-    aria-label={_('entry_sidebar.sidebar_panels')}
-    aria-controls="entry-sidebar-content"
+    ariaLabel={_('entry_sidebar.sidebar_panels')}
+    aria-controls={EffectiveTab ? 'entry-sidebar-content' : undefined}
   >
     {#each tabs as { key, label, icon, disabled } (key)}
       <SelectButton
@@ -133,6 +133,8 @@
     flex: none;
     width: 320px;
     margin-inline-start: 8px;
+    border: var(--area-border);
+    border-block-end: 0;
     border-radius: 16px 16px 0 0;
     background-color: var(--sui-primary-background-color);
   }

@@ -1,10 +1,12 @@
 import { getOrderFieldKey } from '$lib/services/contents/collection/entries/reorder/config';
 import { getEntryDirPath, getSharedEntryFileName } from '$lib/services/contents/collection/nested';
 import { getSlugEditorProp } from '$lib/services/contents/draft/create';
+import { copyEntryRelativeAssets } from '$lib/services/contents/draft/create/duplicate-assets';
 import { createProxy } from '$lib/services/contents/draft/create/proxy.svelte';
 import { showDuplicateToast } from '$lib/services/contents/editor';
 import { getAliasesKey, removeAliases } from '$lib/services/contents/entry/aliases';
 import { getField, LIST_KEY_PATH_REGEX } from '$lib/services/contents/entry/fields';
+import { hasUuidTag } from '$lib/services/contents/fields/compute/helpers';
 import { getDefaultValueMap as getHiddenFieldDefaultValueMap } from '$lib/services/contents/fields/hidden/defaults';
 import { getInitialValue as getInitialUuidValue } from '$lib/services/contents/fields/uuid/helpers';
 import { createState, getSnapshot } from '$lib/services/utils/state.svelte';
@@ -12,15 +14,16 @@ import { createState, getSnapshot } from '$lib/services/utils/state.svelte';
 /**
  * @import { EntryDraftState } from '$lib/services/contents/draft/state.svelte';
  * @import { EntryDraft, LocaleContentMap } from '$lib/types/private';
- * @import { HiddenField, UuidField } from '$lib/types/public';
+ * @import { ComputeField, HiddenField, UuidField } from '$lib/types/public';
  */
 
 /**
  * Duplicate the entry draft open in the editor, replacing it with the duplicate.
  * @param {EntryDraftState} entryDraft Entry draft state.
- * @returns {EntryDraft} Duplicated draft.
+ * @returns {Promise<EntryDraft | undefined>} Duplicated draft, or `undefined` if the editor was
+ * closed or given another draft while the original’s assets were being copied.
  */
-export const duplicateDraft = (entryDraft) => {
+export const duplicateDraft = async (entryDraft) => {
   const draft = /** @type {EntryDraft} */ (entryDraft.current);
   const { collectionName, fileName, collection, collectionFile, fields, isIndexFile } = draft;
 
@@ -68,6 +71,21 @@ export const duplicateDraft = (entryDraft) => {
         }
       }
 
+      // A Compute field keeps the UUIDs found in its current value when it’s resolved again, so
+      // the value has to be cleared for the duplicate to get UUIDs of its own. The field is
+      // resolved as soon as the new draft is in place
+      if (
+        fieldConfig?.widget === 'compute' &&
+        hasUuidTag(/** @type {ComputeField} */ (fieldConfig).value)
+      ) {
+        if (
+          locale === defaultLocale ||
+          [true, 'translate', 'duplicate'].includes(fieldConfig?.i18n ?? false)
+        ) {
+          valueMap[keyPath] = '';
+        }
+      }
+
       if (fieldConfig?.widget === 'hidden') {
         // The value could be array; normalize the key path, e.g. `tags.0` -> `tags`
         if (Array.isArray(fieldConfig.default) && LIST_KEY_PATH_REGEX.test(keyPath)) {
@@ -94,6 +112,15 @@ export const duplicateDraft = (entryDraft) => {
     });
   });
 
+  // The original’s own assets have to be copied along with the entry, or the duplicate would
+  // reference files that only exist next to the original
+  // @see https://github.com/sveltia/sveltia-cms/issues/526
+  const files = { ...draft.files, ...(await copyEntryRelativeAssets({ draft, currentValues })) };
+
+  if (entryDraft.current !== draft) {
+    return undefined;
+  }
+
   const { currentPath } = draft;
 
   const duplicatePath =
@@ -118,6 +145,7 @@ export const duplicateDraft = (entryDraft) => {
     currentPath: duplicatePath,
     // The value proxies are created below, as they need a reference to the new draft
     currentValues: {},
+    files,
     // Reset the validities
     validities: Object.fromEntries(Object.keys(draft.validities).map((locale) => [locale, {}])),
     slugEditor: getSlugEditorProp({ collection, collectionFile, originalSlugs: {} }),

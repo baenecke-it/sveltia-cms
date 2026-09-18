@@ -14,6 +14,7 @@
   import NotFound from '$lib/components/global/not-found.svelte';
   import { goBack, goto } from '$lib/services/app/navigation';
   import { overlaidAsset } from '$lib/services/assets';
+  import { planAssetDeletion } from '$lib/services/assets/data/cascade';
   import { deleteAssets } from '$lib/services/assets/data/delete';
   import { selectedAssetFolder } from '$lib/services/assets/folders';
   import { getAssetBlob } from '$lib/services/assets/info';
@@ -38,7 +39,7 @@
   const blob = $derived(loaded?.asset === asset ? /** @type {Blob} */ (loaded?.blob) : undefined);
   const kind = $derived(asset?.kind);
   const blobURL = $derived(asset?.blobURL);
-  const name = $derived(asset?.name);
+  const name = $derived(asset?.name ?? '');
   const assets = $derived(asset ? [asset] : []);
   const backPath = $derived(`/assets/${selectedAssetFolder.current?.internalPath ?? '-/all'}`);
   /** The assets right before and after the shown one in the list the overlay was opened from. */
@@ -57,13 +58,16 @@
   };
 
   $effect(() => {
-    if (asset) {
+    // Hold on to the asset, as the derived value follows the overlay while the blob is being read
+    const current = asset;
+
+    if (current) {
       (async () => {
-        const _blob = await getAssetBlob(asset);
+        const _blob = await getAssetBlob(current);
 
         // The user may have switched to another asset in the meantime
-        if (overlaidAsset.current === asset) {
-          loaded = { asset, blob: _blob };
+        if (overlaidAsset.current === current) {
+          loaded = { asset: current, blob: _blob };
         }
       })();
     }
@@ -93,6 +97,7 @@
         // Don’t wait for the commit; the list is updated optimistically
         deleteAssets(_assets);
       }}
+      planDeletion={planAssetDeletion}
       buttonDescription={_('delete_assets', { values: { count: 1 } })}
       dialogDescription={_('confirm_deleting_this_asset')}
       onDelete={() => {
@@ -120,7 +125,7 @@
       <iframe src={blobURL} title={name} sandbox="allow-scripts"></iframe>
     {:else if blob?.type && isTextFileType(blob.type)}
       {#await asset.text ?? blob.text() then text}
-        <TextPreview {text} name={name ?? ''} />
+        <TextPreview {text} {name} />
       {/await}
     {:else}
       <EmptyState>

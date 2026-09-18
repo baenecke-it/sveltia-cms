@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { cmsConfigVersion } from '$lib/services/config';
 import { isDraftModified } from '$lib/services/contents/draft';
+import { createState } from '$lib/services/utils/state.svelte';
 
 vi.mock('@sveltia/utils/storage');
 vi.mock('@sveltia/utils/file', () => ({
@@ -235,6 +236,41 @@ describe('draft/backup', () => {
           files: {},
         }),
       );
+    });
+
+    it('should include the pending entries as plain objects', async () => {
+      mockPrefs.useDraftBackup = true;
+      cmsConfigVersion.current = 'v1.0.0';
+      vi.mocked(isDraftModified).mockReturnValue(true);
+      interacted = true;
+
+      const pendingEntry = {
+        collectionName: 'tags',
+        entry: { id: 'new', slug: 'svelte', subPath: 'svelte', locales: {} },
+        changes: [{ action: 'create', path: 'content/tags/svelte.md', data: 'title: Svelte' }],
+        savingAssets: [],
+        values: ['svelte'],
+      };
+
+      const draft = createState({
+        collectionName: 'posts',
+        fileName: undefined,
+        originalEntry: { slug: 'my-post' },
+        currentLocales: { en: true },
+        currentSlugs: { en: 'my-post' },
+        currentValues: { en: { 'tags.0': 'svelte' } },
+        files: {},
+        interacted,
+        pendingEntries: [pendingEntry],
+      });
+
+      await saveBackup(/** @type {any} */ (draft));
+
+      const [backup] = mockBackupDB.put.mock.calls[0];
+
+      expect(backup.pendingEntries).toEqual([pendingEntry]);
+      // Detached from the reactive draft, so IndexedDB can clone it
+      expect(backup.pendingEntries[0]).not.toBe(draft.pendingEntries[0]);
     });
 
     it('should not save backup when draft is not modified', async () => {
@@ -542,6 +578,35 @@ describe('draft/backup', () => {
       }).not.toThrow();
     });
 
+    it('should restore the pending entries, or none for an older backup', () => {
+      const pendingEntry = {
+        collectionName: 'tags',
+        entry: { id: 'new', slug: 'svelte', subPath: 'svelte', locales: {} },
+        changes: [],
+        savingAssets: [],
+        values: ['svelte'],
+      };
+
+      const backup = {
+        timestamp: new Date(),
+        cmsConfigVersion: 'v1.0.0',
+        collectionName: 'posts',
+        slug: 'my-post',
+        currentLocales: { en: true },
+        currentSlugs: { en: 'my-post' },
+        currentValues: { en: { 'tags.0': 'svelte' } },
+        files: {},
+      };
+
+      updatedDraft = createMockDraft({ pendingEntries: [] });
+      restoreBackup({ backup: { ...backup, pendingEntries: [pendingEntry] }, draft: updatedDraft });
+      expect(updatedDraft.pendingEntries).toEqual([pendingEntry]);
+
+      updatedDraft = createMockDraft({ pendingEntries: [] });
+      restoreBackup({ backup, draft: updatedDraft });
+      expect(updatedDraft.pendingEntries).toEqual([]);
+    });
+
     it('should update currentLocales and currentSlugs from backup', () => {
       const backup = {
         timestamp: new Date(),
@@ -676,7 +741,7 @@ describe('draft/backup', () => {
       }).not.toThrow();
     });
 
-    it('should assign existing locale values when locale already has content', () => {
+    it('should replace existing locale values when locale already has content', () => {
       const backup = {
         timestamp: new Date(),
         cmsConfigVersion: 'v1.0.0',
@@ -688,16 +753,64 @@ describe('draft/backup', () => {
         files: {},
       };
 
-      const existingLocaleContent = { title: 'Old Title', body: 'Old Body', extra: 'keep' };
+      const existingLocaleContent = { title: 'Old Title', body: 'Old Body', extra: 'drop' };
 
       updatedDraft = createMockDraft({
         currentValues: { en: existingLocaleContent },
         originalValues: { en: { title: 'Original' } },
       });
 
-      expect(() => {
-        restoreBackup({ backup, draft: updatedDraft });
-      }).not.toThrow();
+      restoreBackup({ backup, draft: updatedDraft });
+
+      // The content is updated in place, as the draft holds a proxy around it
+      expect(updatedDraft.currentValues.en).toBe(existingLocaleContent);
+      expect(updatedDraft.currentValues.en).toEqual({ title: 'New Title', body: 'New Body' });
+    });
+
+    // https://github.com/sveltia/sveltia-cms/issues/985
+    it('should drop the stale keys of shifted list items', () => {
+      // The entry as loaded from the file: three items, the first with the longest nested list
+      const loadedContent = {
+        'releases.0.version': '3',
+        'releases.0.features.0': 'A1',
+        'releases.0.features.1': 'A2',
+        'releases.0.features.2': 'A3',
+        'releases.1.version': '2',
+        'releases.1.features.0': 'B1',
+        'releases.2.version': '1',
+        'releases.2.features.0': 'C1',
+      };
+
+      // The backup taken after the first item was removed, so every key has shifted up
+      const backup = {
+        timestamp: new Date(),
+        cmsConfigVersion: 'v1.0.0',
+        collectionName: 'release-notes',
+        slug: 'release-notes',
+        currentLocales: { en: true },
+        currentSlugs: {},
+        currentValues: {
+          en: {
+            'releases.0.version': '2',
+            'releases.0.features.0': 'B1',
+            'releases.1.version': '1',
+            'releases.1.features.0': 'C1',
+          },
+        },
+        files: {},
+      };
+
+      updatedDraft = createMockDraft({
+        collectionName: 'release-notes',
+        fileName: 'release-notes',
+        currentValues: { en: loadedContent },
+        originalValues: { en: structuredClone(loadedContent) },
+      });
+
+      restoreBackup({ backup, draft: updatedDraft });
+
+      // Neither `releases.0.features.1`/`.2` nor the third item survive the restoration
+      expect(updatedDraft.currentValues.en).toEqual(backup.currentValues.en);
     });
 
     it('should create proxy for locale that does not yet have content', () => {

@@ -20,6 +20,7 @@
   import PaneHeader from '$lib/components/contents/details/pane-header.svelte';
   import Sidebar from '$lib/components/contents/details/sidebar/sidebar.svelte';
   import Toolbar from '$lib/components/contents/details/toolbar.svelte';
+  import { rememberFocus } from '$lib/services/app/focus';
   import { goto } from '$lib/services/app/navigation';
   import { selectedCollection } from '$lib/services/contents/collection';
   import { collectionState } from '$lib/services/contents/collection/view';
@@ -58,7 +59,7 @@
 
   /**
    * @import { EntryDraftState } from '$lib/services/contents/draft/state.svelte';
-   * @import { EntryDraft, InternalLocaleCode } from '$lib/types/private';
+   * @import { EntryDraft, EntryEditorPane, InternalLocaleCode } from '$lib/types/private';
    * @import { FieldKeyPath } from '$lib/types/public';
    */
 
@@ -85,9 +86,13 @@
 
   let restoring = false;
   let switching = false;
-  let swapButtonPressed = false;
-  let swapDragStartX = 0;
-  let swapDragStartY = 0;
+  /**
+   * Width of the first pane in pixels, used to place the pane swap button over the gutter between
+   * the panes. The button sits next to the resize handle rather than inside it: the handle is a
+   * focusable `separator`, and a button nested in it is an interactive control inside another one.
+   * @type {number}
+   */
+  let firstPaneWidth = $state(0);
 
   let hidden = $state(true);
   /** @type {HTMLElement | undefined} */
@@ -109,9 +114,11 @@
     currentValues,
   } = $derived(/** @type {EntryDraft} */ (entryDraft.current ?? {}));
   const { showPreview, showSecondPane = true } = $derived(entryEditorSettings.current ?? {});
+  /* v8 ignore start -- only read while the panes are set up, which needs a collection */
   const { i18nEnabled, allLocales, defaultLocale } = $derived(
     (collectionFile ?? collection)?._i18n ?? DEFAULT_I18N_CONFIG,
   );
+  /* v8 ignore stop */
   const paneStateKey = $derived(getPaneStateKey({ collection, collectionFile }));
   const { canCreate, quota, creationDisabled } = $derived(collectionState.current);
   const [firstPaneSize, secondPaneSize, minPaneSize] = $derived(
@@ -123,11 +130,15 @@
    * @returns {Promise<boolean>} Whether the panes are restored.
    */
   const restorePanes = async () => {
+    // Guard against re-entrance while the panes are being applied, which the `await`s below leave
+    // room for
+    /* v8 ignore next 3 */
     if (restoring) {
       return false;
     }
 
     const panes = getRestoredPanes({
+      /* v8 ignore next -- there’s no key without a collection, and then no draft to restore for */
       savedPanes: entryEditorSettings.current?.paneStates?.[paneStateKey ?? ''],
       editorLocale,
       allLocales,
@@ -194,45 +205,9 @@
   };
 
   /**
-   * Called when the user presses the pointer on the pane swap button. Remember the button and
-   * position, which are used to determine whether the following {@link onSwapHandleClick} call is a
-   * click or a drag to resize the panes.
-   * @param {PointerEvent} event `pointerdown` event.
+   * Swap the panes.
    */
-  const onSwapButtonPointerDown = (event) => {
-    swapButtonPressed = true;
-    swapDragStartX = event.clientX;
-    swapDragStartY = event.clientY;
-  };
-
-  /**
-   * Called when the user clicks on the resizable handle that holds the pane swap button. The handle
-   * captures the pointer to support dragging, so a `click` event triggered with a pointer is
-   * dispatched on the handle instead of the button, meaning a `click` event handler on the button
-   * itself is never called. Swap the panes only if the pointer was pressed on the button and not
-   * dragged. A `click` event triggered with the keyboard is dispatched on the button as usual, and
-   * has no associated pointer position.
-   * @param {MouseEvent} event `click` event.
-   */
-  const onSwapHandleClick = (event) => {
-    const { detail, target, clientX, clientY } = event;
-    const pressed = swapButtonPressed;
-
-    swapButtonPressed = false;
-
-    if (detail === 0) {
-      // Keyboard activation
-      if (!(/** @type {HTMLElement} */ (target).closest('.swap-button'))) {
-        return;
-      }
-    } else if (
-      !pressed ||
-      Math.abs(clientX - swapDragStartX) > 5 ||
-      Math.abs(clientY - swapDragStartY) > 5
-    ) {
-      return;
-    }
-
+  const swapPanes = () => {
     [editorFirstPane.current, editorSecondPane.current] = [
       editorSecondPane.current,
       editorFirstPane.current,
@@ -256,6 +231,7 @@
     // Wait until `inert` is updated
     await tick();
 
+    /* v8 ignore next 4 -- the wrapper is bound as long as the overlay is mounted */
     if (wrapper) {
       wrapper.tabIndex = 0;
       wrapper.focus();
@@ -297,6 +273,8 @@
 
     const draft = entryDraft.current;
 
+    // The draft may have gone away while the pane was switched
+    /* v8 ignore next 3 */
     if (!draft) {
       return;
     }
@@ -323,11 +301,13 @@
       );
 
       if (targetField) {
+        /* v8 ignore start -- `scrollIntoViewIfNeeded()` is non-standard; Firefox doesn’t have it */
         if (typeof targetField.scrollIntoViewIfNeeded === 'function') {
           targetField.scrollIntoViewIfNeeded();
         } else {
           targetField.scrollIntoView();
         }
+        /* v8 ignore stop */
 
         const widgetWrapper = targetField.querySelector('.field-wrapper');
 
@@ -375,14 +355,19 @@
       entryDraft.current = null;
     }
 
+    // The row or the New button that opened the editor gets the focus back once it closes
+    const restoreFocus = rememberFocus();
+
     window.addEventListener('message', onmessage);
 
     return () => {
       window.removeEventListener('message', onmessage);
+      restoreFocus();
     };
   });
 
   $effect(() => {
+    /* v8 ignore next 5 -- the wrapper is bound as long as the overlay is mounted */
     if (wrapper) {
       // Rich text editor components are mounted outside the component tree, so they look the
       // draft up through the DOM rather than the context
@@ -429,6 +414,7 @@
       void $state.snapshot(draft.currentSlugs);
       // The files map holds `File` objects, which can’t be snapshotted; a file can be replaced
       Object.values(draft.files).forEach(({ file }) => void file);
+      void draft.pendingEntries.length;
       void draft.interacted;
     }
 
@@ -464,6 +450,7 @@
   });
 
   $effect(() => {
+    /* v8 ignore next -- the wrapper is bound as long as the overlay is mounted */
     if (wrapper) {
       (async () => {
         if (!showContentOverlay.current) {
@@ -480,56 +467,39 @@
   });
 </script>
 
-{#snippet firstPane()}
-  {#if editorFirstPane.current}
-    {@const { locale, mode } = editorFirstPane.current}
-    <div class="pane-wrapper">
-      <Group
-        class="pane"
-        aria-label={_(mode === 'edit' ? 'edit_x_locale' : 'preview_x_locale', {
-          values: { locale: getLocaleLabel(locale) ?? locale },
-        })}
-        data-locale={locale}
-        data-mode={mode}
-      >
-        <PaneHeader id="first-pane-header" thisPane={editorFirstPane} thatPane={editorSecondPane} />
+{#snippet pane(
+  /** @type {'first' | 'second'} */ position,
+  /** @type {EntryEditorPane} */ { locale, mode },
+)}
+  {@const thisPane = position === 'first' ? editorFirstPane : editorSecondPane}
+  {@const thatPane = position === 'first' ? editorSecondPane : editorFirstPane}
+  <div class="pane-wrapper">
+    <Group
+      class="pane"
+      ariaLabel={_(mode === 'edit' ? 'edit_x_locale' : 'preview_x_locale', {
+        values: { locale: getLocaleLabel(locale) ?? locale },
+      })}
+      data-locale={locale}
+      data-mode={mode}
+    >
+      <PaneHeader id="{position}-pane-header" {thisPane} {thatPane} />
+      {#if position === 'first'}
         <PaneBody
           id="first-pane-body"
-          thisPane={editorFirstPane}
+          {thisPane}
           bind:thisPaneContentArea={firstPaneContentArea}
-          bind:thatPaneContentArea={secondPaneContentArea}
+          thatPaneContentArea={secondPaneContentArea}
         />
-      </Group>
-    </div>
-  {/if}
-{/snippet}
-
-{#snippet secondPane()}
-  {#if editorSecondPane.current}
-    {@const { locale, mode } = editorSecondPane.current}
-    <div class="pane-wrapper">
-      <Group
-        class="pane"
-        aria-label={_(mode === 'edit' ? 'edit_x_locale' : 'preview_x_locale', {
-          values: { locale: getLocaleLabel(locale) ?? locale },
-        })}
-        data-locale={locale}
-        data-mode={mode}
-      >
-        <PaneHeader
-          id="second-pane-header"
-          thisPane={editorSecondPane}
-          thatPane={editorFirstPane}
-        />
+      {:else}
         <PaneBody
           id="second-pane-body"
-          thisPane={editorSecondPane}
+          {thisPane}
           bind:thisPaneContentArea={secondPaneContentArea}
-          bind:thatPaneContentArea={firstPaneContentArea}
+          thatPaneContentArea={firstPaneContentArea}
         />
-      </Group>
-    </div>
-  {/if}
+      {/if}
+    </Group>
+  </div>
 {/snippet}
 
 <div
@@ -580,45 +550,46 @@
         {#key `${collectionName}|${fileName}|${isIndexFile}`}
           <div role="none" class="content-area">
             {#if editorFirstPane.current && editorSecondPane.current}
-              {#if firstPaneSize && secondPaneSize}
-                <ResizablePaneGroup
-                  onResize={({ sizes }) => {
-                    if (editorFirstPane.current && editorSecondPane.current) {
-                      const [firstWidth, secondWidth] = sizes;
+              <ResizablePaneGroup
+                onResize={({ sizes }) => {
+                  /* v8 ignore next -- the group is only rendered with both panes */
+                  if (editorFirstPane.current && editorSecondPane.current) {
+                    const [firstWidth, secondWidth] = sizes;
 
-                      // Replace the objects rather than mutating them, so the change is noticed
-                      editorFirstPane.current = { ...editorFirstPane.current, width: firstWidth };
-                      editorSecondPane.current = {
-                        ...editorSecondPane.current,
-                        width: secondWidth,
-                      };
-                    }
-                  }}
-                >
-                  <ResizablePane defaultSize={firstPaneSize} minSize={minPaneSize}>
-                    {@render firstPane()}
-                  </ResizablePane>
-                  <ResizableHandle onclick={onSwapHandleClick}>
-                    <Button
-                      class="swap-button"
-                      iconic
-                      size="small"
-                      variant="tertiary"
-                      aria-label={_('swap_panes')}
-                      onpointerdown={onSwapButtonPointerDown}
-                    >
-                      <Icon name="swap_horiz" />
-                    </Button>
-                  </ResizableHandle>
-                  <ResizablePane defaultSize={secondPaneSize} minSize={minPaneSize}>
-                    {@render secondPane()}
-                  </ResizablePane>
-                </ResizablePaneGroup>
-              {/if}
+                    // Replace the objects rather than mutating them, so the change is noticed
+                    editorFirstPane.current = { ...editorFirstPane.current, width: firstWidth };
+                    editorSecondPane.current = {
+                      ...editorSecondPane.current,
+                      width: secondWidth,
+                    };
+                  }
+                }}
+              >
+                <ResizablePane defaultSize={firstPaneSize} minSize={minPaneSize}>
+                  <div role="none" class="pane-measure" bind:clientWidth={firstPaneWidth}>
+                    {@render pane('first', editorFirstPane.current)}
+                  </div>
+                </ResizablePane>
+                <ResizableHandle />
+                <ResizablePane defaultSize={secondPaneSize} minSize={minPaneSize}>
+                  {@render pane('second', editorSecondPane.current)}
+                </ResizablePane>
+              </ResizablePaneGroup>
+              <Button
+                class="swap-button"
+                iconic
+                size="small"
+                variant="tertiary"
+                aria-label={_('swap_panes')}
+                style="--gutter-position: {firstPaneWidth}px"
+                onclick={swapPanes}
+              >
+                <Icon name="swap_horiz" />
+              </Button>
             {:else if editorFirstPane.current}
-              {@render firstPane()}
+              {@render pane('first', editorFirstPane.current)}
             {:else if editorSecondPane.current}
-              {@render secondPane()}
+              {@render pane('second', editorSecondPane.current)}
             {:else}
               <Spacer flex />
             {/if}
@@ -672,30 +643,51 @@
   }
 
   .content-area {
+    position: relative;
     flex: auto;
+    border-block-start: var(--area-border); /* below the toolbar */
     background-color: var(--sui-primary-background-color);
 
     &:not(:only-child) {
-      border-start-end-radius: 16px; /* sidebar is present */
+      border-inline-end: var(--area-border); /* sidebar is present */
+      border-start-end-radius: 16px;
     }
 
     :global {
       .sui.resizable-handle {
+        border-inline: var(--area-border); /* between the panes */
         background-color: var(--sui-secondary-background-color); /* same as toolbar */
+      }
 
-        .swap-button {
-          position: absolute;
-          top: calc(50% - 12px);
-          margin: 0;
-          border-radius: 50%;
-          opacity: 0.5;
+      /* Centred over the gutter, whose position is the first pane’s width */
+      .swap-button {
+        position: absolute;
+        top: calc(50% - 12px);
+        inset-inline-start: calc(
+          var(--gutter-position) + var(--sui-resizable-handle-size, 4px) / 2
+        );
+        /* Above the handle’s hit area, a positioned `::before` pseudo-element at `z-index: 1` */
+        z-index: 2;
+        margin: 0;
+        border-radius: 50%;
+        opacity: 0.5;
+        translate: -50%;
 
-          &:hover,
-          &:focus-visible {
-            opacity: 1;
-          }
+        &:dir(rtl) {
+          translate: 50%;
+        }
+
+        &:hover,
+        &:focus-visible {
+          opacity: 1;
         }
       }
     }
+  }
+
+  .pane-measure {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
   }
 </style>

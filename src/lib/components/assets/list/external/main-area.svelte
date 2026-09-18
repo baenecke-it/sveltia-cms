@@ -30,7 +30,12 @@
     uploadExternalAssets,
     uploadingExternalAssets,
   } from '$lib/services/assets/external/data';
-  import { externalAssetSortKeys, listedExternalAssets } from '$lib/services/assets/external/view';
+  import {
+    externalAssetGroups,
+    externalAssetSortKeys,
+    externalAssetViewGroups,
+    listedExternalAssets,
+  } from '$lib/services/assets/external/view';
 
   /**
    * @import { ExternalAsset, MediaLibraryService } from '$lib/types/private';
@@ -38,7 +43,9 @@
 
   /** The component is only rendered while a service is selected. */
   const service = $derived(/** @type {MediaLibraryService} */ (selectedCloudService.current));
+  /* v8 ignore start -- only read to report a file exceeding the configured size */
   const maxSize = $derived(getSharedMediaLibraryOptions().max_file_size ?? Infinity);
+  /* v8 ignore stop */
 
   /** @type {string[]} */
   let oversizedFileNames = $state([]);
@@ -85,6 +92,8 @@
         selectedItems={selectedExternalAssets}
         totalCount={externalAssets.current.length}
         sortKeys={externalAssetSortKeys.current}
+        groups={externalAssetViewGroups.current}
+        groupNames={Object.keys(externalAssetGroups.current)}
         searchTerms={externalAssetSearchTerms}
       />
     {/if}
@@ -105,9 +114,7 @@
 
 <Toast bind:show={externalAssetsToast.current.show}>
   <Alert status={externalAssetsToast.current.status}>
-    {#if externalAssetsToast.current.message}
-      {_(externalAssetsToast.current.message)}
-    {/if}
+    {_(externalAssetsToast.current.message)}
   </Alert>
 </Toast>
 

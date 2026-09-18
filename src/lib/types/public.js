@@ -32,7 +32,7 @@
 /**
  * Cloud media storage name.
  * @typedef {'cloudinary' | 'uploadcare' | 'aws_s3' | 'azure_blob_storage' | 'backblaze_b2' |
- * 'cloudflare_r2' | 'digitalocean_spaces' | 'scaleway_object_storage' |
+ * 'bunny_storage' | 'cloudflare_r2' | 'digitalocean_spaces' | 'scaleway_object_storage' |
  * 'supabase_storage'} CloudMediaLibraryName
  */
 
@@ -180,10 +180,13 @@
  * Options for S3-compatible media libraries.
  * @typedef {object} S3MediaLibrary
  * @property {string} [name] Media library name (used when configuring via legacy `media_library`).
- * @property {string} access_key_id AWS access key ID or equivalent (safe to store in config).
- * @property {string} bucket Bucket name.
- * @property {string} [region] AWS region (e.g., 'us-east-1'). Required for Amazon S3, DigitalOcean
- * Spaces, Scaleway Object Storage, and Supabase Storage.
+ * @property {string} [access_key_id] AWS access key ID or equivalent (safe to store in config).
+ * Required for all services except Bunny Storage, where it defaults to `bucket`, as the storage
+ * zone name serves as the access key ID.
+ * @property {string} bucket Bucket name. For Bunny Storage, this is the storage zone name.
+ * @property {string} [region] AWS region (e.g., 'us-east-1'). Required for Amazon S3, Backblaze B2,
+ * Bunny Storage (two-letter storage region code, e.g. 'de'), DigitalOcean Spaces, Scaleway Object
+ * Storage, and Supabase Storage.
  * @property {string} [account_id] Cloudflare account ID. Required for Cloudflare R2.
  * @property {'default' | 'eu' | 'fedramp'} [jurisdiction] Cloudflare R2 jurisdiction. Required for
  * buckets created in the EU or FedRAMP jurisdictions; the global endpoint returns an error for
@@ -195,7 +198,9 @@
  * @property {string} [public_url] Base URL for public asset access. When set, asset preview and
  * download URLs are constructed as `{public_url}/{key}` instead of the S3 API endpoint URL.
  * Required for Cloudflare R2 (S3 API endpoint always requires authentication); set to the `r2.dev`
- * development URL (e.g. `https://pub-abcd1234.r2.dev`) or a custom domain. Optional for Amazon S3
+ * development URL (e.g. `https://pub-abcd1234.r2.dev`) or a custom domain. Also required for Bunny
+ * Storage; set to the hostname of a pull zone connected to the storage zone (e.g.
+ * `https://my-zone.b-cdn.net`) or a custom domain. Optional for Amazon S3
  * and DigitalOcean Spaces — use when serving assets through a CDN or custom domain (e.g. CloudFront
  * or Route 53 for S3, CDN endpoint for Spaces).
  */
@@ -270,6 +275,8 @@
  * media storage. Set to `false` to explicitly disable.
  * @property {S3MediaLibrary | false} [backblaze_b2] Options for the Backblaze B2 media storage. Set
  * to `false` to explicitly disable.
+ * @property {S3MediaLibrary | false} [bunny_storage] Options for the Bunny Storage media storage.
+ * Set to `false` to explicitly disable.
  * @property {S3MediaLibrary | false} [scaleway_object_storage] Options for the Scaleway Object
  * Storage media storage. Set to `false` to explicitly disable.
  * @property {S3MediaLibrary | false} [supabase_storage] Options for the Supabase Storage media
@@ -509,8 +516,11 @@
  * Compute field properties.
  * @typedef {object} ComputeFieldProps
  * @property {'compute'} widget Field type.
- * @property {string} value Value template, like `posts-{{fields.slug}}`.
+ * @property {string} value Value template, like `posts-{{fields.slug}}`. Besides the `fields.*`
+ * tags, `{{index}}` is the position of the item in a list, and `{{uuid}}`, `{{uuid_short}}` and
+ * `{{uuid_shorter}}` generate a UUID, which is kept once the value is saved.
  * @see https://github.com/sveltia/sveltia-cms/issues/111
+ * @see https://github.com/sveltia/sveltia-cms/issues/122
  */
 
 /**
@@ -693,7 +703,7 @@
  * @property {string} [summary] Template of a label to be displayed on a collapsed list item.
  * @property {string} [thumbnail] Subfield name to be used as a thumbnail image for a list item. It
  * will be displayed along with the summary label when the item is collapsed. The subfield must be
- * an Image field. Default: none.
+ * an Image or File field. Default: none.
  * @property {boolean | 'auto'} [collapsed] Whether to collapse the list items by default. Default:
  * `false`. If set to `auto`, the UI is collapsed if the item has any filled subfields and expanded
  * if all the subfields are empty.
@@ -890,6 +900,9 @@
  * `false`. If set to `auto`, the UI is collapsed if the object has any filled subfields and
  * expanded if all the subfields are empty.
  * @property {string} [summary] Template of a label to be displayed on a collapsed object.
+ * @property {string} [thumbnail] Subfield name to be used as a thumbnail image for the object. It
+ * will be displayed along with the summary label when the object is collapsed. The subfield must be
+ * an Image or File field. Default: none.
  * @see https://decapcms.org/docs/widgets/#Object
  * @see https://sveltiacms.app/en/docs/fields/object
  */
@@ -1268,14 +1281,55 @@
  */
 
 /**
- * View filter.
- * @typedef {object} ViewFilter
+ * A value that a view filter or group compares the field value with. A string can contain the
+ * `{{now}}` tag for the current date and time, the `{{today}}` tag for the current date in the
+ * `YYYY-MM-DD` format, or the `{{year}}`, `{{month}}`, `{{day}}`, `{{hour}}`, `{{minute}}` and
+ * `{{second}}` tags for the parts of the current date and time, all in the user’s local time zone.
+ * The tags are resolved whenever the entry list is updated, and every minute while such a filter
+ * or group is applied, so a filter like “Upcoming events” keeps working without a change to the
+ * configuration.
+ * @typedef {string | number | boolean} ViewComparisonValue
+ * @see https://sveltiacms.app/en/docs/collections/entries#filtering
+ */
+
+/**
+ * Comparison options for a view filter or group, which can be combined with each other and with
+ * `pattern`. An entry has to satisfy all of them. The field value is compared as a date if the
+ * field is a DateTime field, as a number if both the value and the given value are numeric, or as
+ * a string otherwise. For a DateTime field, a given date should be in the same format as the field
+ * value, or be the `{{now}}` or `{{today}}` tag; `{{today}}` is the one to use with a date-only
+ * field, so that an entry dated today is included in a `gte` comparison.
+ * @typedef {object} ViewComparisonOptions
+ * @property {ViewComparisonValue} [eq] Value the field value has to be equal to.
+ * @property {ViewComparisonValue} [ne] Value the field value has to be different from. An entry
+ * without a value for the field also matches.
+ * @property {ViewComparisonValue} [lt] Value the field value has to be less than, e.g. `{{now}}`
+ * for past events.
+ * @property {ViewComparisonValue} [lte] Value the field value has to be less than or equal to.
+ * @property {ViewComparisonValue} [gt] Value the field value has to be greater than.
+ * @property {ViewComparisonValue} [gte] Value the field value has to be greater than or equal to,
+ * e.g. `{{today}}` for upcoming events.
+ * @property {ViewComparisonValue[]} [in] Values one of which the field value has to be equal to.
+ * @property {ViewComparisonValue[]} [not_in] Values the field value has to be different from. An
+ * entry without a value for the field also matches.
+ * @see https://sveltiacms.app/en/docs/collections/entries#filtering
+ */
+
+/**
+ * View filter properties.
+ * @typedef {object} ViewFilterProps
  * @property {string} [name] Unique identifier for the filter.
  * @property {string} label Label.
  * @property {FieldKeyPath} field Field name.
- * @property {string | RegExp | boolean} pattern Regular expression matching pattern or exact value.
+ * @property {string | RegExp | boolean} [pattern] Regular expression matching pattern or exact
+ * value. Required unless one of the comparison options is defined.
  * @see https://decapcms.org/docs/configuration-options/#view_filters
  * @see https://sveltiacms.app/en/docs/collections/entries#filtering
+ */
+
+/**
+ * View filter.
+ * @typedef {ViewFilterProps & ViewComparisonOptions} ViewFilter
  */
 
 /**
@@ -1288,15 +1342,21 @@
  */
 
 /**
- * View group.
- * @typedef {object} ViewGroup
+ * View group properties.
+ * @typedef {object} ViewGroupProps
  * @property {string} [name] Unique identifier for the group.
- * @property {string} label Label.
+ * @property {string} label Label. With a comparison option, the entries satisfying the condition
+ * are grouped under this label, and the other entries under “Other”.
  * @property {FieldKeyPath} field Field name.
  * @property {string | RegExp | boolean} [pattern] Regular expression matching pattern or exact
  * value.
  * @see https://decapcms.org/docs/configuration-options/#view_groups
  * @see https://sveltiacms.app/en/docs/collections/entries#grouping
+ */
+
+/**
+ * View group.
+ * @typedef {ViewGroupProps & ViewComparisonOptions} ViewGroup
  */
 
 /**
@@ -1416,6 +1476,11 @@
  * @property {string} [public_folder] Public media folder path for an entry collection. This
  * overrides the global `public_folder` option. Default: `media_folder` option value.
  * @property {boolean} [hide] Whether to hide the collection in the UI. Default: `false`.
+ * @property {'simple' | 'editorial_workflow'} [publish_mode] Publish mode for the collection. This
+ * overrides the global `publish_mode` option, so Editorial Workflow can be enabled for some
+ * collections only, or turned off for a collection when it’s enabled globally. Default: global
+ * `publish_mode` option value. Note that a contributor working on a fork with Open Authoring always
+ * goes through Editorial Workflow, regardless of this option.
  * @property {boolean} [publish] Whether to show the publishing control UI for Editorial Workflow.
  * Default: `true`. Set this to `false` to let editors move an entry through the review stages
  * without being able to publish it themselves. It has no effect unless the `editorial_workflow`
@@ -1434,6 +1499,7 @@
  * DEPRECATED: Use the global YAML format options. `yaml_quote: true` is equivalent to `quote:
  * double`. See the documentation https://sveltiacms.app/en/docs/data-output#controlling-data-output
  * for details.
+ * @see https://github.com/decaporg/decap-cms/issues/1571
  * @see https://decapcms.org/docs/configuration-options/#collections
  * @see https://sveltiacms.app/en/docs/collections/entries
  * @see https://sveltiacms.app/en/docs/collections/files
@@ -1822,7 +1888,8 @@
  * only in the `CMS.init()` method’s `config` option. Default: `true`.
  * @property {Backend} backend Backend options.
  * @property {'' | 'simple' | 'editorial_workflow'} [publish_mode] Publish mode. An empty string is
- * the same as `simple`. Default: `simple`. Note that Editorial Workflow is currently supported with
+ * the same as `simple`. Default: `simple`. It can be overridden for each collection with the
+ * collection-level `publish_mode` option. Note that Editorial Workflow is currently supported with
  * the GitHub and GitLab backends only.
  * @property {string} [media_folder] Global internal media folder path, relative to the project’s
  * root directory. Required unless a cloud media storage is configured.

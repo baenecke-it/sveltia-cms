@@ -27,6 +27,7 @@
  * S3MediaLibrary,
  * SelectField,
  * SelectFieldValue,
+ * ViewComparisonOptions,
  * } from './public';
  */
 
@@ -217,7 +218,8 @@
 
 /**
  * State of a deployment created by a CI/CD provider connected to the Git backend.
- * - `checking`: a request to the backend is in flight.
+ * - `checking`: a request to the backend is in flight, or nothing has been reported yet for a
+ * commit made moments ago and the provider is being given time to post its first status.
  * - `pending`: the build is queued or running, or the page is not live yet.
  * - `ready`: the build succeeded and the page is live.
  * - `error`: the build failed.
@@ -347,6 +349,16 @@
  */
 
 /**
+ * An entry whose pull request has been merged, and whose change is on its way to the site.
+ * @typedef {object} DeployingEntry
+ * @property {UnpublishedEntry} entry Entry as it was published, with the workflow properties it
+ * had: the status says whether the merge removed the entry from the site rather than putting it
+ * there, and the pull request’s `updatedDate` is when the merge landed.
+ * @property {string} sha Head commit of the configured branch once the merge had landed, which the
+ * site is being built from.
+ */
+
+/**
  * A file included in an Editorial Workflow pull request.
  * @typedef {object} WorkflowFile
  * @property {string} path File path relative to the project’s root directory.
@@ -426,7 +438,9 @@
  * Promise<WorkflowPullRequest>} updateStatus Function to update the pull request’s status label and
  * draft state.
  * @property {(pullRequest: WorkflowPullRequest) => Promise<void>} publish Function to merge the
- * pull request and delete the workflow branch.
+ * pull request and delete the workflow branch. The service may leave the merge to the Git service
+ * when a required check is still running, in which case it resolves once the merge has landed, and
+ * rejects if it won’t — the check has failed, say — so the entry isn’t taken for published.
  * @property {(pullRequest: WorkflowPullRequest) => Promise<void>} discard Function to close the
  * pull request and delete the workflow branch.
  */
@@ -979,6 +993,23 @@
  * @property {boolean} interacted Whether the user has manually interacted with the entry editor.
  * This prevents auto-backup from triggering when only programmatic changes (e.g. Lexical markdown
  * reformatting) have occurred.
+ * @property {PendingEntry[]} pendingEntries Entries created from a Relation field while editing
+ * this entry, to be saved along with it.
+ */
+
+/**
+ * An entry created with the quick-add dialog of a Relation field while another entry is being
+ * edited. It’s kept on that entry’s draft and saved in the same commit as the entry, rather than on
+ * its own, so the two never go out of sync. Everything needed to commit it is prepared as soon as
+ * it’s added, because the preparation replaces the blob URLs in the content with asset paths, which
+ * can only be done once.
+ * @typedef {object} PendingEntry
+ * @property {string} collectionName Name of the collection the entry belongs to.
+ * @property {Entry} entry Entry as it will be saved.
+ * @property {FileChange[]} changes File changes to be committed along with the parent entry.
+ * @property {Asset[]} savingAssets Assets to be saved along with the entry.
+ * @property {any[]} values Values the Relation field that created the entry stores for it, in any
+ * of the parent entry’s locales. The entry is only saved while one of them is still there.
  */
 
 /**
@@ -994,6 +1025,8 @@
  * @property {LocaleContentMap} currentValues Key is a locale code, value is a flattened object
  * containing all the current field values while editing.
  * @property {EntryFileMap} files Files to be uploaded.
+ * @property {PendingEntry[]} [pendingEntries] Entries created from a Relation field, to be saved
+ * along with the entry. Missing from a backup taken before they were introduced.
  */
 
 /**
@@ -1192,22 +1225,35 @@
  */
 
 /**
- * Entry/Asset filtering conditions.
- * @typedef {object} FilteringConditions
+ * Entry/Asset filtering conditions: what an entry collection’s view filter defines, minus its name
+ * and label. An asset filter only has a field and pattern.
+ * @typedef {object} FilteringConditionsProps
  * @property {FieldKeyPath} field Target field name.
- * @property {string | RegExp | boolean} pattern Regular expression matching pattern or exact value.
+ * @property {string | RegExp | boolean} [pattern] Regular expression matching pattern or exact
+ * value. Required unless a comparison operator is defined.
  * @see https://decapcms.org/docs/configuration-options/#view_filters
  * @see https://sveltiacms.app/en/docs/collections/entries#filtering
  */
 
 /**
- * Entry/Asset grouping conditions.
- * @typedef {object} GroupingConditions
+ * Entry/Asset filtering conditions.
+ * @typedef {FilteringConditionsProps & ViewComparisonOptions} FilteringConditions
+ */
+
+/**
+ * Entry/Asset grouping conditions: what an entry collection’s view group defines, minus its name
+ * and label. An asset group only has a field and pattern.
+ * @typedef {object} GroupingConditionsProps
  * @property {FieldKeyPath} field Target field name.
  * @property {string | RegExp | boolean} [pattern] Regular expression matching pattern or exact
  * value.
  * @see https://decapcms.org/docs/configuration-options/#view_groups
  * @see https://sveltiacms.app/en/docs/collections/entries#grouping
+ */
+
+/**
+ * Entry/Asset grouping conditions.
+ * @typedef {GroupingConditionsProps & ViewComparisonOptions} GroupingConditions
  */
 
 /**
@@ -1223,6 +1269,8 @@
  * @property {FilteringConditions} [filter] Filtering conditions. Deprecated in favour of `filters`.
  * @property {FilteringConditions[]} [filters] One or more filtering conditions.
  * @property {GroupingConditions | null} [group] Grouping conditions.
+ * @property {Record<string, string[]>} [collapsedGroups] Names of the groups whose entries are
+ * hidden, under each grouping condition’s key. See `getGroupingKey()`.
  * @property {boolean} [showMedia] Whether to show the Media pane.
  */
 
@@ -1264,7 +1312,9 @@
  * @property {SortingConditions} [sort] Sorting conditions.
  * @property {FilteringConditions} [filter] Filtering conditions.
  * @property {FilteringConditions[]} [filters] Unused.
- * @property {GroupingConditions} [group] Grouping conditions.
+ * @property {GroupingConditions | null} [group] Grouping conditions.
+ * @property {Record<string, string[]>} [collapsedGroups] Names of the groups whose assets are
+ * hidden, under each grouping condition’s key. See `getGroupingKey()`.
  * @property {boolean} [showInfo] Whether to show the Info pane.
  */
 
@@ -1475,6 +1525,14 @@
  */
 
 /**
+ * The file an image/file field value points to.
+ * @typedef {object} MediaFieldSource
+ * @property {string} [url] Complete URL of a file on an external location, including a Cloudinary
+ * asset referenced by its relative path.
+ * @property {Asset} [asset] Asset in the repository. Exclusive with {@link MediaFieldSource.url}.
+ */
+
+/**
  * Arguments for the `getField` function.
  * @typedef {object} GetFieldArgs
  * @property {string} collectionName Collection name.
@@ -1528,6 +1586,54 @@
  * @property {RegExp} [valuePattern] Pattern matching the concrete key paths a wildcard `keyPath`
  * expands to. `undefined` when the key path has no wildcard.
  * @property {boolean} multiple Whether the field accepts multiple values.
+ */
+
+/**
+ * An entry that references another entry through a Relation field, with its references already
+ * updated or removed, along with where it lives so its file(s) can be written back.
+ * @typedef {object} CascadeTarget
+ * @property {Entry} entry Updated entry.
+ * @property {InternalCollection} collection Collection the entry belongs to.
+ * @property {InternalCollectionFile} [collectionFile] Collection file, for file/singleton
+ * collections.
+ */
+
+/**
+ * A Relation field that would no longer be valid once its references to the entries being deleted
+ * are removed, e.g. a required field with nothing left selected, which is what stops the deletion.
+ * @typedef {object} CascadeDeleteBlockerProps
+ * @property {InternalLocaleCode} locale Locale the field was found invalid in. A field invalid in
+ * several locales is reported once, for the first of them.
+ * @property {FieldKeyPath} keyPath Key path of the invalid field.
+ * @property {string[]} messages Validation messages, one per violated constraint.
+ */
+
+/**
+ * @typedef {EntryBacklink & CascadeDeleteBlockerProps} CascadeDeleteBlocker
+ */
+
+/**
+ * A field holding a reference to an asset: an Image or File field storing its path, or a Markdown
+ * or rich text field embedding it as an image.
+ * @typedef {object} AssetReference
+ * @property {Entry} entry Entry holding the field.
+ * @property {InternalCollection} collection Collection the field is resolved in.
+ * @property {InternalCollectionFile} [collectionFile] Collection file, for file/singleton
+ * collections.
+ * @property {InternalLocaleCode} locale Locale of the content holding the field.
+ * @property {FieldKeyPath} keyPath Key path of the value holding the reference. For a multi-value
+ * field, that of the item, e.g. `images.1`.
+ * @property {Field} fieldConfig Field config.
+ */
+
+/**
+ * Everything the deletion of one or more entries entails for the entries referencing them through
+ * Relation fields.
+ * @typedef {object} CascadeDeletePlan
+ * @property {CascadeTarget[]} targets Referencing entries with the references removed, to be
+ * rewritten along with the deletion.
+ * @property {CascadeDeleteBlocker[]} blockers Fields that would be left invalid. The deletion can
+ * only go ahead if this is empty.
  */
 
 /**

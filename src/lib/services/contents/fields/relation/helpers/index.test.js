@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
   getEntryOptions,
   getOptions,
+  getRefEntries,
   getReferencedOptionLabel,
   optionCacheMap,
 } from '$lib/services/contents/fields/relation/helpers';
@@ -14,6 +15,7 @@ import {
  * InternalEntryCollection,
  * InternalFileCollection,
  * LocalizedEntry,
+ * PendingEntry,
  * } from '$lib/types/private';
  * @import { RelationField } from '$lib/types/public';
  */
@@ -26,6 +28,9 @@ vi.mock('$lib/services/contents/collection', () => ({
 }));
 vi.mock('$lib/services/contents/collection/entries', () => ({
   getEntriesByCollection: vi.fn(),
+}));
+vi.mock('$lib/services/contents/collection/files', () => ({
+  getCollectionFileEntry: vi.fn(),
 }));
 vi.mock('$lib/services/contents/collection/entries/index-file', () => ({
   isCollectionIndexFile: vi.fn(),
@@ -1360,6 +1365,53 @@ describe('Test getOptions()', async () => {
         expect(result).toBe('nonexistent-slug');
       });
 
+      test('should resolve a value referring to a pending entry', () => {
+        /** @type {RelationField} */
+        const fieldConfig = {
+          ...baseFieldConfig,
+          collection: 'members',
+          display_fields: ['name.first'],
+        };
+
+        vi.mocked(getFieldDisplayValue).mockImplementation(
+          ({ keyPath, valueMap }) => valueMap?.[keyPath] || 'display-value',
+        );
+
+        /** @type {PendingEntry[]} */
+        const pendingEntries = [
+          {
+            collectionName: 'members',
+            entry: {
+              id: 'new-member',
+              slug: 'jane-doe',
+              subPath: 'jane-doe',
+              locales: { _default: { ...localizedEntryProps, content: { 'name.first': 'Jane' } } },
+            },
+            changes: [],
+            savingAssets: [],
+            values: ['jane-doe'],
+          },
+          // Another collection’s entry is left alone
+          {
+            collectionName: 'tags',
+            entry: { id: 'new-tag', slug: 'jane-doe', subPath: 'jane-doe', locales: {} },
+            changes: [],
+            savingAssets: [],
+            values: ['jane-doe'],
+          },
+        ];
+
+        const args = { fieldConfig, valueMap: { author: 'jane-doe' }, keyPath: 'author', locale };
+
+        expect(getReferencedOptionLabel({ ...args, pendingEntries })).toBe('Jane');
+        // The pending entries are passed on, so a label made of another Relation field resolves
+        expect(getFieldDisplayValue).toHaveBeenCalledWith(
+          expect.objectContaining({ keyPath: 'name.first', pendingEntries }),
+        );
+        // Without them, the value stays as it is
+        expect(getReferencedOptionLabel(args)).toBe('jane-doe');
+      });
+
       test('should handle undefined values', () => {
         /** @type {RelationField} */
         const fieldConfig = {
@@ -1788,5 +1840,35 @@ describe('Test getOptions()', async () => {
       expect(resolvedLabels[0]).toBe(options[0].label);
       expect(resolvedLabels[1]).toBe(options[1].label);
     });
+  });
+});
+
+describe('Test getRefEntries()', async () => {
+  const { getEntriesByCollection } = await import('$lib/services/contents/collection/entries');
+  const { getCollectionFileEntry } = await import('$lib/services/contents/collection/files');
+  const entry = /** @type {Entry} */ ({ id: 'entry-1', locales: {} });
+
+  test('should return the entries of the referenced collection', () => {
+    vi.mocked(getEntriesByCollection).mockReturnValue([entry]);
+
+    expect(getRefEntries({ ...baseFieldConfig, collection: 'members' })).toEqual([entry]);
+    expect(getEntriesByCollection).toHaveBeenCalledWith('members');
+    expect(getCollectionFileEntry).not.toHaveBeenCalled();
+  });
+
+  test('should return the referenced file of a file collection', () => {
+    vi.mocked(getCollectionFileEntry).mockReturnValue(entry);
+
+    expect(getRefEntries({ ...baseFieldConfig, collection: 'data', file: 'members' })).toEqual([
+      entry,
+    ]);
+    expect(getCollectionFileEntry).toHaveBeenCalledWith('data', 'members');
+    expect(getEntriesByCollection).not.toHaveBeenCalled();
+  });
+
+  test('should return an empty array if the referenced file is not found', () => {
+    vi.mocked(getCollectionFileEntry).mockReturnValue(undefined);
+
+    expect(getRefEntries({ ...baseFieldConfig, collection: 'data', file: 'missing' })).toEqual([]);
   });
 });

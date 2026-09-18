@@ -37,7 +37,7 @@
   const additionalLinks = cmsConfig?.current?.links ?? [];
 </script>
 
-<Menu aria-label={_('account')}>
+<Menu ariaLabel={_('account')}>
   <MenuItem
     label={isLocalRepo
       ? _('working_with_local_repo')

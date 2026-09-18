@@ -17,7 +17,12 @@
     appTitle,
   } from '$lib/services/app/branding';
   import { initAppLocale } from '$lib/services/app/i18n';
-  import { announcedPageStatus, startViewTransition } from '$lib/services/app/navigation';
+  import {
+    announcedPageStatus,
+    mainAreaTitle,
+    overlayTitle,
+    startViewTransition,
+  } from '$lib/services/app/navigation';
   import { backend } from '$lib/services/backends';
   import { cmsConfigLoaded, DEV_SITE_URL, initCmsConfig } from '$lib/services/config';
   import { dataLoaded } from '$lib/services/contents';
@@ -40,19 +45,9 @@
     /* eslint-enable prefer-const */
   } = $props();
 
-  /**
-   * State to track whether the app locale has been initialized. The strings for the default locale
-   * are always bundled with the app, so the UI can be rendered right away, even while the strings
-   * for another locale are being fetched from the CDN.
-   */
-  let localeLoaded = $state(false);
-
-  $effect.pre(() => {
-    if (!localeLoaded) {
-      initAppLocale();
-      localeLoaded = true;
-    }
-  });
+  // The strings for the default locale are always bundled with the app, so the UI can be rendered
+  // right away, even while the strings for another locale are being fetched from the CDN
+  initAppLocale();
 
   $effect.pre(() => {
     initUserEnvDetection();
@@ -88,6 +83,12 @@
 
   let transitioned = $state(false);
 
+  // “Posts › Hello – Acme CMS” while editing, “Posts Collection – Acme CMS” on the list, and just
+  // the app name on the sign-in page, so each view has its own title (WCAG 2.4.2)
+  const documentTitle = $derived(
+    [overlayTitle.current || mainAreaTitle.current, appTitle.current].filter(Boolean).join(' – '),
+  );
+
   $effect(() => {
     if (dataLoaded.current && user.account) {
       startViewTransition('forwards', () => {
@@ -105,7 +106,7 @@
   <meta name="referrer" content="same-origin" />
   <meta name="robots" content="noindex" />
   {#if cmsConfigLoaded.current}
-    <title>{appTitle.current}</title>
+    <title>{documentTitle}</title>
     <link rel="icon" href={appLogoURL.current} type={appLogoType.current} />
     {#if appIconURLs.current}
       <link rel="apple-touch-icon" href={appIconURLs.current.large} />
@@ -135,27 +136,25 @@
 />
 
 <AppShell>
-  {#if localeLoaded}
-    <div role="none" class="outer">
-      <LocaleLoadErrorToast />
-      <UpdateNotification />
-      <ForkPermissionDialog />
-      {#if backend.current}
-        <BackendStatusIndicator />
+  <div role="none" class="outer">
+    <LocaleLoadErrorToast />
+    <UpdateNotification />
+    <ForkPermissionDialog />
+    {#if backend.current}
+      <BackendStatusIndicator />
+    {/if}
+    {#if user.account && dataLoaded.current}
+      <OpenAuthoringIndicator />
+    {/if}
+    <div role="none" class="main">
+      {#if user.account && dataLoaded.current && transitioned}
+        <MainRouter />
+      {:else}
+        <EntrancePage />
       {/if}
-      {#if user.account && dataLoaded.current}
-        <OpenAuthoringIndicator />
-      {/if}
-      <div role="none" class="main">
-        {#if user.account && dataLoaded.current && transitioned}
-          <MainRouter />
-        {:else}
-          <EntrancePage />
-        {/if}
-      </div>
     </div>
-    <div role="status">{announcedPageStatus.current}</div>
-  {/if}
+  </div>
+  <div role="status">{announcedPageStatus.current}</div>
 </AppShell>
 
 <style>
@@ -371,6 +370,19 @@
 
     #nc-root > .sui.app-shell {
       position: absolute;
+    }
+
+    .sui.app-shell {
+      /* A placeholder is often the only visible label of a search box, so it has to meet the 4.5:1
+        text contrast. Sveltia UI only renders it at full strength in the high-contrast themes; the
+        default themes leave it at 50% opacity, which is 2.6:1 on white. */
+      --sui-textbox-placeholder-foreground-color: var(--sui-tertiary-foreground-color);
+      --sui-textbox-placeholder-opacity: 1;
+      /* Border drawn where a primary area (page content, editor panes, asset preview) meets a
+        secondary one (sidebars, toolbars, the gutter between panes). The default themes tell them
+        apart by background alone, so the width is zero; the high-contrast themes, which set
+        `--sui-modal-border-width` to outline dialogs for the same reason, get a visible line. */
+      --area-border: var(--sui-modal-border-width) solid var(--sui-primary-border-color);
     }
   }
 

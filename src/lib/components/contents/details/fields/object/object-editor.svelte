@@ -10,6 +10,7 @@
   import { toRaw } from '@sveltia/utils/object';
   import { getContext, onMount, tick } from 'svelte';
 
+  import Image from '$lib/components/assets/shared/image.svelte';
   import FieldEditor from '$lib/components/contents/details/editor/field-editor.svelte';
   import AddItemButton from '$lib/components/contents/details/fields/object/add-item-button.svelte';
   import ObjectHeader from '$lib/components/contents/details/fields/object/object-header.svelte';
@@ -27,10 +28,16 @@
   } from '$lib/services/contents/editor/fields';
   import { getKeysByPrefix } from '$lib/services/contents/entry/key-paths';
   import { formatSummary } from '$lib/services/contents/fields/object/helpers';
+  import { getObjectThumbnail } from '$lib/services/contents/fields/object/thumbnail';
   import { env } from '$lib/services/user/env.svelte';
 
   /**
-   * @import { EntryDraft, FieldEditorContext, FieldEditorProps } from '$lib/types/private';
+   * @import {
+   * EntryDraft,
+   * FieldEditorContext,
+   * FieldEditorProps,
+   * MediaFieldSource,
+   * } from '$lib/types/private';
    * @import {
    * ObjectField,
    * ObjectFieldWithSubFields,
@@ -47,7 +54,12 @@
   const entryDraft = getEntryDraftContext();
 
   /** @type {FieldEditorContext} */
-  const { fieldContext, valueStoreKey = 'currentValues' } = getContext('field-editor') ?? {};
+  const {
+    fieldContext,
+    valueStoreKey = 'currentValues',
+    parentComponentNames = [],
+  } = getContext('field-editor') ?? {};
+  const componentName = parentComponentNames.at(-1);
   // Hide the header/expander if in a single subfield list field because it’s redundant
   const hideHeader = fieldContext === 'single-subfield-list-field';
 
@@ -71,11 +83,14 @@
     // Field type-specific options
     collapsed,
     summary,
+    thumbnail: thumbnailFieldName,
   } = $derived(fieldConfig);
   const { fields } = $derived(/** @type {ObjectFieldWithSubFields} */ (fieldConfig));
   const { types, typeKey = 'type' } = $derived(/** @type {ObjectFieldWithTypes} */ (fieldConfig));
+  /* v8 ignore start -- the editor is only rendered while the draft is there */
   const isIndexFile = $derived(entryDraft.current?.isIndexFile ?? false);
   const collectionName = $derived(entryDraft.current?.collectionName ?? '');
+  /* v8 ignore stop */
   const fileName = $derived(entryDraft.current?.fileName);
   const defaultLocale = $derived(entryDraft.current?.defaultLocale);
   const valueMap = $derived(getValueMapSnapshot(entryDraft.current, locale, valueStoreKey));
@@ -94,7 +109,9 @@
   );
   const hasVariableTypes = $derived(Array.isArray(types));
   const typeKeyPath = $derived(`${keyPath}.${typeKey}`);
+  /* v8 ignore start -- only read for an object with variable types */
   const type = $derived(hasVariableTypes ? valueMap[typeKeyPath] : undefined);
+  /* v8 ignore stop */
   const typeConfig = $derived(type ? types?.find(({ name }) => name === type) : undefined);
   const unknownType = $derived(hasVariableTypes && !typeConfig);
   const subFields = $derived((hasVariableTypes ? typeConfig?.fields : fields) ?? []);
@@ -132,6 +149,7 @@
     suspendAutoDuplication(async () => {
       const draft = entryDraft.current;
 
+      /* v8 ignore next 3 -- the button is only offered while the draft is there */
       if (!draft) {
         return;
       }
@@ -197,6 +215,24 @@
    * @returns {string} Formatted summary.
    */
   const _formatSummary = () => formatSummary({ ...getFieldArgs, keyPath, locale, summaryTemplate });
+
+  /**
+   * Get the thumbnail of the collapsed object.
+   * @returns {MediaFieldSource | undefined} Thumbnail.
+   */
+  const getThumbnail = () =>
+    getObjectThumbnail({
+      thumbnailFieldName,
+      keyPath,
+      typedKeyPath: type ? `${typedKeyPath}<${type}>` : typedKeyPath,
+      collectionName,
+      fileName,
+      componentName,
+      valueMap,
+      isIndexFile,
+      entry: entryDraft.current?.originalEntry,
+      files: entryDraft.current?.files,
+    });
 
   /**
    * Warn about unknown variable type.
@@ -298,8 +334,12 @@
         {/each}
       {:else}
         {@const formattedSummary = _formatSummary()}
-        {#if formattedSummary}
+        {@const thumbnail = getThumbnail()}
+        {#if formattedSummary || thumbnail}
           <div role="none" class="summary" id="object-{fieldId}-summary">
+            {#if thumbnail}
+              <Image asset={thumbnail.asset} src={thumbnail.url} variant="icon" cover />
+            {/if}
             <TruncatedText lines={env.isSmallScreen ? 2 : 1}>
               {formattedSummary}
             </TruncatedText>
@@ -338,6 +378,9 @@
   }
 
   .summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     padding: 8px;
   }
 </style>

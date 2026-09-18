@@ -7,8 +7,9 @@ import { cmsConfigVersion } from '$lib/services/config';
 import { getOrderFieldKey } from '$lib/services/contents/collection/entries/reorder/config';
 import { isDraftModified, suspendAutoDuplication } from '$lib/services/contents/draft';
 import { createProxy } from '$lib/services/contents/draft/create/proxy.svelte';
+import { updateObject } from '$lib/services/contents/draft/update/list';
 import { prefs } from '$lib/services/user/prefs.svelte';
-import { createDeepState, createRootEffect } from '$lib/services/utils/state.svelte';
+import { createDeepState, createRootEffect, getSnapshot } from '$lib/services/utils/state.svelte';
 
 /**
  * @import {
@@ -108,6 +109,7 @@ export const saveBackup = async (draft) => {
     currentSlugs = {},
     currentValues = {},
     files,
+    pendingEntries = [],
   } = draft;
 
   const slug = getBackupSlug(draft);
@@ -134,6 +136,8 @@ export const saveBackup = async (draft) => {
           },
         ]),
       ),
+      // The entries hold `File` objects among their changes, so a JSON round trip won’t do
+      pendingEntries: getSnapshot(pendingEntries),
     };
 
     await backupDB?.put(backup);
@@ -153,12 +157,14 @@ export const saveBackup = async (draft) => {
  * @param {EntryDraft} args.draft Entry draft to restore the backup to.
  */
 export const restoreBackup = ({ backup, draft }) => {
-  const { currentLocales, currentSlugs, currentValues, files } = backup;
+  const { currentLocales, currentSlugs, currentValues, files, pendingEntries = [] } = backup;
   const fileURLs = new Map();
 
   suspendAutoDuplication(() => {
     draft.currentLocales = currentLocales;
     draft.currentSlugs = currentSlugs;
+    // The entries created from a Relation field are what the restored values refer to
+    draft.pendingEntries = pendingEntries;
 
     // Reconcile a stale manual-sort order field. The backup may have been taken before another
     // reorder/renumber operation rewrote this entry’s `order`. For existing entries, prefer the
@@ -208,7 +214,13 @@ export const restoreBackup = ({ backup, draft }) => {
       });
 
       if (draft.currentValues[locale]) {
-        Object.assign(draft.currentValues[locale], valueMap);
+        // The backup is the whole content, so replace the loaded content rather than merging the
+        // backup into it. A merge can only add or overwrite keys, and the flattened keys of a list
+        // shift when an item is removed or inserted, so a merge would leave the keys the backup no
+        // longer has in place: after removing the first item, the stale trailing keys of every
+        // shifted item would be saved as extra nested values
+        // @see https://github.com/sveltia/sveltia-cms/issues/985
+        updateObject(draft.currentValues[locale], valueMap);
       } else {
         draft.currentValues[locale] = createProxy({
           draft,

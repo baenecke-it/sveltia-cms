@@ -33,7 +33,9 @@
       : undefined,
   );
   const collectionName = $derived(entryCollection?.name);
+  /* v8 ignore start -- only read for an entry collection */
   const thumbnailFieldNames = $derived(entryCollection?._thumbnailFieldNames ?? []);
+  /* v8 ignore stop */
   // The unpublished entries are listed in their own group above the published ones, so they count
   // towards the list total as well
   const listedEntryCount = $derived(
@@ -44,7 +46,7 @@
 </script>
 
 {#if entryCollection && !reordering.current}
-  <Toolbar variant="secondary" aria-label={_('entry_list')}>
+  <Toolbar variant="secondary" ariaLabel={_('entry_list')}>
     {#if !(env.isSmallScreen || env.isMediumScreen) && !openAuthoring.current}
       <ItemSelector
         allItems={[
@@ -76,6 +78,7 @@
         disabled={!hasMultipleEntries}
         {currentView}
         groups={viewGroups.current}
+        groupNames={entryGroups.current.map(({ name }) => name)}
         aria-controls="entry-list"
       />
     {/if}
@@ -89,7 +92,7 @@
         iconic
         disabled={!hasListedEntries || !getAssetFolder({ collectionName })}
         pressed={!!currentView.current.showMedia}
-        aria-controls="collection-assets"
+        aria-controls={currentView.current.showMedia ? 'collection-assets' : undefined}
         aria-expanded={currentView.current.showMedia}
         aria-label={_(currentView.current.showMedia ? 'hide_assets' : 'show_assets')}
         onclick={() => {

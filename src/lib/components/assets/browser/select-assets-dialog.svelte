@@ -13,7 +13,7 @@
     Select,
     TextInput,
   } from '@sveltia/ui';
-  import { getHash } from '@sveltia/utils/crypto';
+  import { untrack } from 'svelte';
 
   import CloudinaryPanel from '$lib/components/assets/browser/cloudinary-panel.svelte';
   import ExternalAssetsPanel from '$lib/components/assets/browser/external-assets-panel.svelte';
@@ -43,6 +43,7 @@
   import { normalize } from '$lib/services/search/util';
   import { env } from '$lib/services/user/env.svelte';
   import { prefs } from '$lib/services/user/prefs.svelte';
+  import { getGitHash } from '$lib/services/utils/file';
   import { SUPPORTED_IMAGE_TYPES } from '$lib/services/utils/media/image';
 
   /**
@@ -202,10 +203,10 @@
    * exists.
    */
   const processFile = async (file, replace) => {
-    const hash = await getHash(file);
+    const sha = await getGitHash(file);
     const folder = selectedFolder;
 
-    if (await hasSameAsset({ hash, folder, unsavedAssets })) {
+    if (hasSameAsset({ sha, folder, unsavedAssets })) {
       return undefined;
     }
 
@@ -248,14 +249,21 @@
    * Handle the OK button click.
    */
   const onOk = () => {
+    /* v8 ignore next 3 -- the Insert button is disabled until something is selected */
     if (!selectedResources.length) {
       return;
     }
 
-    const resources = $state.snapshot(selectedResources).map((resource) => {
-      const { asset: { unsaved, file, folder } = {}, replace } = resource;
+    const resources = selectedResources.map((resource) => {
+      const { asset, replace } = resource;
 
-      return unsaved ? { file, folder, replace } : resource;
+      if (!asset?.unsaved) {
+        return $state.snapshot(resource);
+      }
+
+      // The `File` is taken as is: `$state.snapshot()` would clone it with `structuredClone()`,
+      // and the copy would then have to be read and hashed all over again
+      return { file: asset.file, folder: $state.snapshot(asset.folder), replace };
     });
 
     onSelect?.(resources);
@@ -269,6 +277,9 @@
     if (firstDefaultLibraryId) {
       // Select the first enabled folder
       libraryName = `default-${firstDefaultLibraryId}`;
+    } else if (untrack(() => pendingFiles.length)) {
+      // Select the first cloud storage service, which can take the files to be uploaded
+      libraryName = enabledCloudServiceEntries[0]?.[0] ?? enabledExternalServiceEntries[0]?.[0];
     } else {
       // Select the first available external service
       libraryName = enabledExternalServiceEntries[0]?.[0];
@@ -296,7 +307,7 @@
 
   // Upload pending files (e.g. dropped on the file editor) to the cloud service panel once mounted
   $effect(() => {
-    if (externalAssetsPanel && pendingFiles.length) {
+    if (externalAssetsPanel && isCloudLibrary && pendingFiles.length) {
       externalAssetsPanel.uploadFiles(pendingFiles);
       pendingFiles = [];
     }
@@ -317,7 +328,7 @@
       bind:value={rawSearchTerms}
       debounce={!isDefaultLibrary}
       disabled={selectedResources.some((r) => r.file)}
-      aria-label={_(`assets_dialog.search_for_${kind ?? 'file'}`)}
+      ariaLabel={_(`assets_dialog.search_for_${kind ?? 'file'}`)}
     />
   {/if}
   {#if isDefaultLibrary || (isCloudLibrary && libraryName !== 'cloudinary')}
@@ -356,7 +367,7 @@
   {#snippet footerExtra()}
     {#if isEnabledMediaService}
       {@const { showServiceLink, serviceLabel, serviceURL } =
-        allStockAssetProviders[/** @type {StockAssetProviderName} */ (libraryName)] ?? {}}
+        allStockAssetProviders[/** @type {StockAssetProviderName} */ (libraryName)]}
       {#if showServiceLink}
         <a href={serviceURL} class="service-link">
           {_('prefs.media.stock_photos.credit', { values: { service: serviceLabel } })}
@@ -368,7 +379,7 @@
     <div role="none" class="nav">
       <Selector
         class="tabs"
-        aria-label={_('assets_dialog.locations')}
+        ariaLabel={_('assets_dialog.locations')}
         aria-controls="{elementIdPrefix}-content-pane"
         filterThreshold={-1}
         onChange={(event) => {
@@ -385,7 +396,11 @@
                   {name}
                   label={folder?.label || _(`assets_dialog.folder.${id}`)}
                   selected={libraryName === name}
-                />
+                >
+                  {#snippet startIcon()}
+                    <Icon name="folder" />
+                  {/snippet}
+                </Option>
               {/if}
             {/each}
           </OptionGroup>
@@ -402,21 +417,33 @@
                     cloudinaryDialogOpen.current = true;
                   }
                 }}
-              />
+              >
+                {#snippet startIcon()}
+                  <Icon name="cloud" />
+                {/snippet}
+              </Option>
             {/each}
             {#if canEnterURL}
               <Option
                 name="enter-url"
                 label={_('assets_dialog.enter_url')}
                 selected={libraryName === 'enter-url'}
-              />
+              >
+                {#snippet startIcon()}
+                  <Icon name="link_2" />
+                {/snippet}
+              </Option>
             {/if}
           </OptionGroup>
         {/if}
         {#if enabledStockAssetProviderEntries.length}
           <OptionGroup label={_('asset_location.stock_photos')}>
             {#each enabledStockAssetProviderEntries as [serviceId, { serviceLabel }] (serviceId)}
-              <Option name={serviceId} label={serviceLabel} selected={libraryName === serviceId} />
+              <Option name={serviceId} label={serviceLabel} selected={libraryName === serviceId}>
+                {#snippet startIcon()}
+                  <Icon name="photo_camera_back" />
+                {/snippet}
+              </Option>
             {/each}
           </OptionGroup>
         {/if}
@@ -528,9 +555,15 @@
       }
     }
 
-    :global(.listbox) {
-      flex: none;
-      background-color: transparent;
+    :global {
+      .listbox {
+        flex: none;
+        background-color: transparent;
+
+        .option button .icon:not(.check) {
+          display: block;
+        }
+      }
     }
 
     .content-pane {

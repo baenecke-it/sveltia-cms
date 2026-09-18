@@ -12,9 +12,10 @@
 <script>
   import { _, isRTL } from '@sveltia/i18n';
   import { Button, Icon, Toolbar, TruncatedText } from '@sveltia/ui';
-  import { tick } from 'svelte';
+  import { onMount, tick } from 'svelte';
 
   import BackButton from '$lib/components/common/page-toolbar/back-button.svelte';
+  import { rememberFocus } from '$lib/services/app/focus';
   import { showAssetOverlay } from '$lib/services/assets/view';
   import { env } from '$lib/services/user/env.svelte';
 
@@ -76,6 +77,7 @@
     // Wait until `inert` is updated
     await tick();
 
+    /* v8 ignore next 4 -- the overlay may have been closed in the meantime */
     if (wrapper) {
       wrapper.tabIndex = 0;
       wrapper.focus();
@@ -83,12 +85,13 @@
   };
 
   $effect(() => {
-    if (wrapper) {
-      if (showAssetOverlay.current) {
-        moveFocus();
-      }
+    if (showAssetOverlay.current) {
+      moveFocus();
     }
   });
+
+  // The row that opened the overlay gets the focus back once it closes
+  onMount(rememberFocus);
 
   /**
    * Elements that use the arrow keys themselves, e.g. to move the caret or to seek in a video, and
@@ -194,7 +197,7 @@
 
 <div role="group" class="wrapper" aria-label={_('asset_editor')} bind:this={wrapper}>
   {#key contentKey}
-    <Toolbar variant="primary" aria-label={_('primary')}>
+    <Toolbar variant="primary" ariaLabel={_('primary')}>
       <BackButton aria-label={_('cancel_editing')} useShortcut={true} onclick={onBack} />
       <h2 role="none">
         <TruncatedText>
@@ -388,7 +391,16 @@
         :global {
           .detail {
             flex: auto;
+            border-block-start: var(--area-border);
             width: auto;
+          }
+        }
+      }
+
+      @media (768px <= width) {
+        :global {
+          .detail {
+            border-inline-start: var(--area-border);
           }
         }
       }

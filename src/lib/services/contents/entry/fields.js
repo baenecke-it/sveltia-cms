@@ -30,7 +30,9 @@ import { isNumeric } from '$lib/services/utils/number';
  * GetFieldArgs,
  * InternalEntryCollection,
  * InternalLocaleCode,
+ * PendingEntry,
  * StringTransformation,
+ * TypedFieldKeyPath,
  * } from '$lib/types/private';
  * @import {
  * DateTimeField,
@@ -330,6 +332,70 @@ export const getField = (args) => {
 };
 
 /**
+ * Convert a field key path to the typed key path a field-level asset folder is registered under: a
+ * list index becomes `*`, followed by the subfield name in a single-subfield List field, and a
+ * variable type is spelled out. The index of a multi-value field, like an Image field with the
+ * `multiple` option, is dropped, because the folder belongs to the field itself.
+ * @param {GetFieldArgs} args Arguments. A `valueMap` is required to resolve variable types.
+ * @returns {TypedFieldKeyPath} Typed key path.
+ * @example
+ * // A variable type List field, with `valueMap: { 'blocks.0.type': 'image' }`
+ * getTypedKeyPath({ collectionName, keyPath: 'blocks.0.src', valueMap })
+ * // => 'blocks.*<image>.src'
+ * @example
+ * // A variable type Object field, with `valueMap: { 'banner.type': 'hero' }`
+ * getTypedKeyPath({ collectionName, keyPath: 'banner.src', valueMap })
+ * // => 'banner<hero>.src'
+ * @example
+ * // A single-subfield List field, `field: { name: 'src', widget: 'image' }`
+ * getTypedKeyPath({ collectionName, keyPath: 'photos.0' })
+ * // => 'photos.*.src'
+ * @example
+ * // An Image field with the `multiple` option
+ * getTypedKeyPath({ collectionName, keyPath: 'images.1' })
+ * // => 'images'
+ */
+export const getTypedKeyPath = ({ keyPath, valueMap = {}, ...args }) => {
+  const keyPathArray = keyPath.split('.');
+
+  return keyPathArray
+    .map((key, index) => {
+      const parentKeyPath = keyPathArray.slice(0, index).join('.');
+      const currentKeyPath = index ? `${parentKeyPath}.${key}` : key;
+
+      if (isNumeric(key)) {
+        const parentField = getField({ ...args, valueMap, keyPath: parentKeyPath });
+        const { widget: parentFieldType = 'text' } = parentField ?? {};
+
+        if (MULTI_VALUE_FIELD_TYPES.includes(parentFieldType)) {
+          return undefined;
+        }
+
+        const { field: subField } = /** @type {ListFieldWithSubField} */ (parentField ?? {});
+        const { types, typeKey = 'type' } = /** @type {FieldWithTypes} */ (parentField ?? {});
+
+        if (subField) {
+          return `*.${subField.name}`;
+        }
+
+        const type = types ? valueMap[`${currentKeyPath}.${typeKey}`] : undefined;
+
+        return type ? `*<${type}>` : '*';
+      }
+
+      const field = getField({ ...args, valueMap, keyPath: currentKeyPath });
+      const { types, typeKey = 'type' } = /** @type {FieldWithTypes} */ (field ?? {});
+
+      const type =
+        field?.widget === 'object' && types ? valueMap[`${currentKeyPath}.${typeKey}`] : undefined;
+
+      return type ? `${key}<${type}>` : key;
+    })
+    .filter((segment) => segment !== undefined)
+    .join('.');
+};
+
+/**
  * Determine the given field’s kind: one of the built-in field types, custom field type or unknown.
  * @param {Field} fieldConfig Field configuration.
  * @returns {'builtin' | 'custom' | 'unknown'} Result.
@@ -378,6 +444,8 @@ const numberFormatterCache = new Map();
  * @param {StringTransformation[]} [args.transformations] String transformations.
  * @param {boolean} [args.isIndexFile] Whether the corresponding entry is the collection’s special
  * index file used specifically in Hugo.
+ * @param {PendingEntry[]} [args.pendingEntries] Entries created from a Relation field of the draft
+ * being edited, which a Relation field value can refer to before they are saved.
  * @returns {string} Resolved display value.
  */
 export const getFieldDisplayValue = ({
@@ -388,6 +456,7 @@ export const getFieldDisplayValue = ({
   locale,
   transformations,
   isIndexFile = false,
+  pendingEntries = undefined,
 }) => {
   const fieldConfig = getField({ collectionName, fileName, valueMap, keyPath, isIndexFile });
   let value = valueMap[keyPath];
@@ -415,6 +484,7 @@ export const getFieldDisplayValue = ({
       valueMap,
       keyPath,
       locale,
+      pendingEntries,
     });
   }
 

@@ -11,7 +11,12 @@ import { resetPageLiveness } from '$lib/services/deployments/ping';
 import { initDeployments } from '$lib/services/deployments/resolve';
 import { user } from '$lib/services/user/account.svelte';
 import { prefs } from '$lib/services/user/prefs.svelte';
-import { unpublishedEntries, unpublishedEntriesLoaded } from '$lib/services/workflow';
+import {
+  publishingBranches,
+  unpublishedEntries,
+  unpublishedEntriesLoaded,
+} from '$lib/services/workflow';
+import { resetDeployingEntries } from '$lib/services/workflow/deploy';
 import { loadUnpublishedEntries, startLoadingPullRequests } from '$lib/services/workflow/load';
 
 /**
@@ -311,6 +316,8 @@ export const signOut = async () => {
   dataLoaded.current = false;
   unpublishedEntries.current = [];
   unpublishedEntriesLoaded.current = false;
+  publishingBranches.current = [];
+  resetDeployingEntries();
   resetDeployments();
   resetPageLiveness();
 

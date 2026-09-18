@@ -21,7 +21,9 @@ import {
   getAssetBlobURL,
   getAssetPublicURL,
   getAssetThumbnailURL,
+  getMediaFieldSource,
   getMediaFieldURL,
+  hasCachedThumbnail,
   revokeAssetBlobURLIfNeeded,
   revokeBlobURLIfNeeded,
 } from './info';
@@ -585,6 +587,57 @@ describe('assets/info', () => {
 
       expect(result).toBe(undefined);
     });
+
+    describe('hasCachedThumbnail', () => {
+      it('should report a thumbnail in the cache', async () => {
+        mockIndexedDB.get.mockResolvedValue(new Blob(['cached'], { type: 'image/webp' }));
+
+        await expect(hasCachedThumbnail('abc123')).resolves.toBe(true);
+        expect(mockIndexedDB.get).toHaveBeenCalledWith('abc123');
+
+        mockIndexedDB.get.mockResolvedValue(undefined);
+
+        await expect(hasCachedThumbnail('abc123')).resolves.toBe(false);
+      });
+
+      it('should wait for a thumbnail being generated', async () => {
+        mockIndexedDB.get.mockResolvedValue(undefined);
+
+        const file = new File(['content'], 'test.jpg', { type: 'image/jpeg' });
+        const assetWithFile = { ...mockAsset, file };
+        const { transformImage } = await import('$lib/services/utils/media/image/transform');
+        const { promise, resolve } = Promise.withResolvers();
+
+        vi.mocked(transformImage).mockReturnValue(/** @type {any} */ (promise));
+
+        const urlPromise = getAssetThumbnailURL(assetWithFile);
+        const checkPromise = hasCachedThumbnail('abc123');
+
+        resolve(new Blob(['thumbnail'], { type: 'image/webp' }));
+
+        await expect(checkPromise).resolves.toBe(true);
+        await urlPromise;
+      });
+
+      it('should report a failed generation as no thumbnail', async () => {
+        mockIndexedDB.get.mockResolvedValue(undefined);
+
+        const file = new File(['content'], 'test.jpg', { type: 'image/jpeg' });
+        const assetWithFile = { ...mockAsset, file };
+        const { transformImage } = await import('$lib/services/utils/media/image/transform');
+        const { promise, reject } = Promise.withResolvers();
+
+        vi.mocked(transformImage).mockReturnValue(/** @type {any} */ (promise));
+
+        const urlPromise = getAssetThumbnailURL(assetWithFile).catch(() => undefined);
+        const checkPromise = hasCachedThumbnail('abc123');
+
+        reject(new Error('Failed to decode image'));
+
+        await expect(checkPromise).resolves.toBe(false);
+        await urlPromise;
+      });
+    });
   });
 
   describe('getAssetPublicURL', () => {
@@ -1007,6 +1060,52 @@ describe('assets/info', () => {
       // Verify that getAssetFoldersByPath was called to search for the folder
       expect(getAssetFoldersByPath).toHaveBeenCalledWith(assetWithCollection.path);
       expect(result).toBeDefined();
+    });
+  });
+
+  describe('getMediaFieldSource', () => {
+    it('should return undefined for empty value', () => {
+      expect(getMediaFieldSource({ value: '', collectionName: 'posts' })).toBeUndefined();
+    });
+
+    it('should return an external URL as-is', () => {
+      expect(
+        getMediaFieldSource({ value: 'https://example.com/image.jpg', collectionName: 'posts' }),
+      ).toEqual({ url: 'https://example.com/image.jpg' });
+    });
+
+    it('should return the asset the path points to', async () => {
+      const { getAssetByPath } = await import('$lib/services/assets');
+
+      vi.mocked(getAssetByPath).mockReturnValue(mockAsset);
+
+      const entry = /** @type {any} */ ({ id: 'post' });
+
+      expect(
+        getMediaFieldSource({
+          value: '/uploads/test.jpg',
+          entry,
+          collectionName: 'posts',
+          fileName: 'about',
+          componentName: 'figure',
+          typedKeyPath: 'hero.image',
+        }),
+      ).toEqual({ asset: mockAsset });
+
+      expect(getAssetByPath).toHaveBeenCalledWith({
+        value: '/uploads/test.jpg',
+        entry,
+        collectionName: 'posts',
+        fileName: 'about',
+        componentName: 'figure',
+        typedKeyPath: 'hero.image',
+      });
+
+      vi.mocked(getAssetByPath).mockReturnValue(undefined);
+
+      expect(
+        getMediaFieldSource({ value: '/uploads/missing.jpg', collectionName: 'posts' }),
+      ).toBeUndefined();
     });
   });
 

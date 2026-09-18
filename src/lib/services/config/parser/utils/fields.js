@@ -1,7 +1,15 @@
+import { DEFAULT_CANONICAL_SLUG } from '$lib/services/contents/i18n/config/constants';
+import { mergeI18nConfigs } from '$lib/services/contents/i18n/config/merge';
 import { isNumeric } from '$lib/services/utils/number';
 
 /**
+ * @import { ConfigParserContext, InternalSingletonCollection } from '$lib/types/private';
  * @import {
+ * CmsConfig,
+ * Collection,
+ * CollectionDivider,
+ * CollectionFile,
+ * EntryCollection,
  * Field,
  * FieldKeyPath,
  * FieldWithSubFields,
@@ -9,6 +17,38 @@ import { isNumeric } from '$lib/services/utils/number';
  * ListFieldWithSubField,
  * } from '$lib/types/public';
  */
+
+/**
+ * Entry metadata property keys that can be used in the `filter`, `sortable_fields`, `view_groups`
+ * and `view_filters` options in place of a field key path. These are resolved by
+ * `getPropertyValue()` from the entry itself rather than the collection’s `fields`.
+ * @type {string[]}
+ */
+export const METADATA_KEYS = ['slug', 'commit_author', 'commit_date'];
+
+/**
+ * Get the canonical slug key of the given collection or file. When i18n is enabled, the key —
+ * `translationKey` by default — is added to the content of each localized entry, allowing entries
+ * to be matched across locales. It can therefore be used wherever a field key path is expected,
+ * such as the `value_field` of a Relation field or the `filter` option of a collection, even though
+ * it’s not defined as a field.
+ * @param {object} args Arguments.
+ * @param {CmsConfig | undefined} args.cmsConfig The site configuration.
+ * @param {Collection | CollectionDivider | InternalSingletonCollection} args.collection Collection.
+ * @param {CollectionFile} [args.file] Collection file, if the collection is a file collection.
+ * @returns {string | undefined} The key, or `undefined` if i18n is not enabled for the collection
+ * or file.
+ * @see https://sveltiacms.app/en/docs/i18n#localizing-entry-slugs
+ */
+export const getCanonicalSlugKey = ({ cmsConfig, collection, file }) => {
+  const config = mergeI18nConfigs({ cmsConfig, collection, file });
+
+  if (!config?.locales?.length) {
+    return undefined;
+  }
+
+  return config.canonical_slug?.key ?? DEFAULT_CANONICAL_SLUG.key;
+};
 
 /**
  * Regular expression to match the explicit variable type in a key path segment, e.g. the `<button>`
@@ -23,7 +63,7 @@ const EXPLICIT_TYPE_REGEX = /<[^>]+>$/;
  * @param {Field} field Field configuration.
  * @returns {Field[]} Sub fields. An empty array if the field doesn’t have any.
  */
-const getSubFields = (field) => {
+export const getSubFields = (field) => {
   const { field: subField } = /** @type {ListFieldWithSubField} */ (field);
   const { fields: subFields } = /** @type {FieldWithSubFields} */ (field);
   const { types, typeKey = 'type' } = /** @type {FieldWithTypes} */ (field);
@@ -82,4 +122,30 @@ export const hasField = (fields, keyPath) => {
   });
 
   return isResolved && !!field;
+};
+
+/**
+ * Get the top-level fields of the entry a field being parsed belongs to: those of the collection
+ * file, or the index file, or the collection. These are the fields an option that refers to the
+ * entry’s fields, such as a template, can name.
+ * @param {ConfigParserContext} context Context.
+ * @returns {Field[] | undefined} Fields, or `undefined` outside a collection, e.g. for a field of a
+ * custom editor component.
+ */
+export const getRootFields = ({ collection, collectionFile, isIndexFile }) => {
+  if (collectionFile) {
+    return collectionFile.fields;
+  }
+
+  if (!collection || !('folder' in collection)) {
+    return undefined;
+  }
+
+  const { fields, index_file: indexFile } = /** @type {EntryCollection} */ (collection);
+
+  if (isIndexFile && typeof indexFile === 'object' && indexFile.fields) {
+    return indexFile.fields;
+  }
+
+  return fields;
 };

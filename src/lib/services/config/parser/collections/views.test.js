@@ -31,10 +31,11 @@ const createCollectors = () => ({
 /**
  * Call {@link checkViewOptions} with the given collection options.
  * @param {Record<string, any>} collection Partial collection config.
+ * @param {Record<string, any>} [cmsConfig] Partial site config.
  */
-const check = (collection) => {
+const check = (collection, cmsConfig = {}) => {
   checkViewOptions(
-    /** @type {any} */ ({ cmsConfig: {}, collection: { name: 'posts', ...collection } }),
+    /** @type {any} */ ({ cmsConfig, collection: { name: 'posts', ...collection } }),
     createCollectors(),
   );
 };
@@ -147,6 +148,57 @@ describe('Test checkViewOptions()', () => {
     expect(mockAddMessage).not.toHaveBeenCalled();
   });
 
+  it('should accept the canonical slug key when i18n is enabled', () => {
+    const cmsConfig = { i18n: { locales: ['en', 'fr'] } };
+
+    check(
+      {
+        fields,
+        i18n: true,
+        sortable_fields: ['translationKey'],
+        view_groups: [{ label: 'Key', field: 'translationKey' }],
+        view_filters: [{ label: 'Key', field: 'translationKey', pattern: '^post-' }],
+      },
+      cmsConfig,
+    );
+
+    check(
+      {
+        fields,
+        i18n: { canonical_slug: { key: 'translation_id' } },
+        sortable_fields: ['translation_id'],
+        view_groups: [{ label: 'Key', field: 'translation_id' }],
+        view_filters: [{ label: 'Key', field: 'translation_id', pattern: '^post-' }],
+      },
+      cmsConfig,
+    );
+
+    expect(mockAddMessage).not.toHaveBeenCalled();
+  });
+
+  it('should report the canonical slug key when i18n is not enabled for the collection', () => {
+    check(
+      {
+        fields,
+        sortable_fields: ['translationKey'],
+        view_groups: [{ label: 'Key', field: 'translationKey' }],
+        view_filters: [{ label: 'Key', field: 'translationKey', pattern: '^post-' }],
+      },
+      { i18n: { locales: ['en', 'fr'] } },
+    );
+
+    expect(mockAddMessage).toHaveBeenCalledTimes(3);
+
+    ['sortable', 'view_group', 'view_filter'].forEach((type) => {
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          strKey: `invalid_${type}_field`,
+          values: { name: 'translationKey' },
+        }),
+      );
+    });
+  });
+
   it('should ignore an invalid sortable fields configuration', () => {
     check({ fields, sortable_fields: 'title' });
     check({ fields, sortable_fields: [''] });
@@ -190,6 +242,48 @@ describe('Test checkViewOptions()', () => {
       expect.objectContaining({
         strKey: 'invalid_view_filter_field',
         values: { name: 'draft' },
+      }),
+    );
+  });
+
+  it('should accept a view filter or group with a comparison option', () => {
+    check({
+      fields,
+      view_groups: [{ label: 'Recent', field: 'title', gte: '{{year}}' }],
+      view_filters: [
+        { label: 'Upcoming', field: 'title', gte: '{{today}}' },
+        { label: 'Some', field: 'title', in: ['a', 'b'] },
+        { label: 'Range', field: 'title', pattern: '^2', lt: '3' },
+      ],
+    });
+
+    expect(mockAddMessage).not.toHaveBeenCalled();
+  });
+
+  it('should report a view filter without a pattern or comparison option', () => {
+    check({
+      fields,
+      // A group without a pattern groups the entries by the field value
+      view_groups: [{ label: 'Title', field: 'title' }],
+      view_filters: [
+        { label: 'Titled', field: 'title' },
+        { label: 'Upcoming', field: 'title', gte: '{{today}}' },
+        { label: 'Empty', field: 'title', eq: undefined },
+        'invalid',
+      ],
+    });
+
+    expect(mockAddMessage).toHaveBeenCalledTimes(2);
+    expect(mockAddMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        strKey: 'invalid_view_filter_no_condition',
+        values: { count: '1' },
+      }),
+    );
+    expect(mockAddMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        strKey: 'invalid_view_filter_no_condition',
+        values: { count: '3' },
       }),
     );
   });

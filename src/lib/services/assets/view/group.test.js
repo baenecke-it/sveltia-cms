@@ -2,6 +2,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { OTHER_GROUP_NAME } from '$lib/services/common/view';
+
 import { groupAssets } from './group';
 
 // Mock dependencies
@@ -132,6 +134,11 @@ describe('assets/view/group', () => {
       expect(result).toEqual({});
     });
 
+    it('should return single group when the conditions are null', () => {
+      // The Group menu writes `null` to the view settings to clear the grouping
+      expect(groupAssets(mockAssets, null)).toEqual({ '*': mockAssets });
+    });
+
     it('should return single group when field is empty string', () => {
       const result = groupAssets(mockAssets, { field: '', pattern: undefined });
 
@@ -158,7 +165,7 @@ describe('assets/view/group', () => {
 
       expect(getRegexMock).toHaveBeenCalledWith('photo|video');
       expect(result).toEqual({
-        Other: [mockAssets[3]], // document.pdf doesn’t match regex
+        [OTHER_GROUP_NAME]: [mockAssets[3]], // document.pdf doesn’t match regex
         photo: [mockAssets[0], mockAssets[1]], // photo1.jpg, photo2.png
         video: [mockAssets[2]], // video1.mp4
       });
@@ -172,7 +179,7 @@ describe('assets/view/group', () => {
       const result = groupAssets(mockAssets, { field: 'name', pattern: 'nonexistent' });
 
       expect(result).toEqual({
-        Other: mockAssets, // None match the regex
+        [OTHER_GROUP_NAME]: mockAssets, // None match the regex
       });
     });
 
@@ -202,7 +209,7 @@ describe('assets/view/group', () => {
       const result = groupAssets(testAssets, { field: 'name', pattern: 'xyz' });
 
       expect(result).toEqual({
-        Other: testAssets,
+        [OTHER_GROUP_NAME]: testAssets,
       });
     });
 
@@ -245,7 +252,7 @@ describe('assets/view/group', () => {
       const result = groupAssets(testAssets, { field: 'name', pattern: '^test' });
 
       expect(result).toEqual({
-        Other: [testAssets[1]],
+        [OTHER_GROUP_NAME]: [testAssets[1]],
         test: [testAssets[0]],
       });
     });
@@ -276,7 +283,7 @@ describe('assets/view/group', () => {
       const result = groupAssets(testAssets, { field: 'name', pattern: '(test)' });
 
       // The matched first element (either the full match or first capture group) becomes the key
-      expect(result.test || result.Other).toBeDefined();
+      expect(result.test || result[OTHER_GROUP_NAME]).toBeDefined();
       expect(Object.keys(result).length).toBeGreaterThan(0);
     });
 
@@ -318,7 +325,7 @@ describe('assets/view/group', () => {
       const result = groupAssets(assetsWithUndefined, { field: 'category', pattern: undefined });
 
       expect(result).toEqual({
-        Other: [assetsWithUndefined[1]],
+        [OTHER_GROUP_NAME]: [assetsWithUndefined[1]],
         photos: [assetsWithUndefined[0]],
       });
     });
@@ -412,7 +419,8 @@ describe('assets/view/group', () => {
 
       expect(result).toEqual({
         1024: [mockAssets[0], mockAssets[2]], // 1024000 and 10240000 both contain "1024"
-        Other: [mockAssets[1], mockAssets[3]], // 2048000 and 512000 don’t contain "1024"
+        // 2048000 and 512000 don’t contain "1024"
+        [OTHER_GROUP_NAME]: [mockAssets[1], mockAssets[3]],
       });
     });
 
@@ -425,11 +433,11 @@ describe('assets/view/group', () => {
 
       expect(result).toEqual({
         1024: [mockAssets[0], mockAssets[2]], // Both sizes contain "1024"
-        Other: [mockAssets[1], mockAssets[3]], // Other sizes don't contain "1024"
+        [OTHER_GROUP_NAME]: [mockAssets[1], mockAssets[3]], // Other sizes don't contain "1024"
       });
     });
 
-    it('should use otherKey when regex match fails on empty string', () => {
+    it('should use the Other group when regex match fails on empty string', () => {
       const mockRegex = /\d+/; // Matches one or more digits
 
       getRegexMock.mockReturnValue(mockRegex);
@@ -471,7 +479,8 @@ describe('assets/view/group', () => {
 
       expect(result).toEqual({
         123: [testAssets[1]],
-        Other: [testAssets[0]], // Empty string doesn't match \d+, falls back to otherKey
+        // Empty string doesn’t match \d+, falls back to the Other group
+        [OTHER_GROUP_NAME]: [testAssets[0]],
       });
     });
 
@@ -517,7 +526,7 @@ describe('assets/view/group', () => {
 
       // Both null and undefined convert to empty string '', which doesn't match 'test' regex
       expect(result).toEqual({
-        Other: testAssets,
+        [OTHER_GROUP_NAME]: testAssets,
       });
     });
   });
