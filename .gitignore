@@ -9,3 +9,5 @@ node_modules
 .claude
 
 /admin/**
+/.idea/
+.env
