@@ -196,10 +196,20 @@
               deployed = response.status === 200;
             },
             (reason) => {
+              if (!prefs.devModeEnabled) {
+                return;
+              }
+
+              // eslint-disable-next-line no-console
               console.error('reason', reason);
             },
           )
           .catch((error) => {
+            if (!prefs.devModeEnabled) {
+              return;
+            }
+
+            // eslint-disable-next-line no-console
             console.error('error', error);
           });
       }

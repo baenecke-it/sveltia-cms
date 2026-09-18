@@ -84,7 +84,12 @@
             window.open(_url, '_blank')?.focus(); // window.open + focus
           })
           .catch((err) => {
-            console.log(err);
+            if (!prefs.devModeEnabled) {
+              return;
+            }
+
+            // eslint-disable-next-line no-console
+            console.info('Error fetching additional link:', err);
           });
       }}
     />
