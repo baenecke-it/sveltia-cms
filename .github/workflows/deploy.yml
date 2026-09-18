@@ -18,22 +18,24 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
+      - name: Install pnpm and Node.js
+        uses: pnpm/setup@v2.1.0
         with:
-          node-version: '26' # Specify the Node.js version needed
+          version: latest
+          runtime: node@26
+          cache: true
 
       - name: Install dependencies
-        run: npm ci
+        run: pnpm ci
 
       - name: Build Svelte project
-        run: npm run build
+        run: pnpm run build
 
-      - name: Package npm artifact
+      - name: Package pnpm artifact
         run: |
           TARBALL="sveltia-cms-${{ github.ref_name }}.tgz"
-          npm pack
-          mv *.tgz "$TARBALL"
+          pnpm pack
+          mv package/*.tgz "$TARBALL"
           echo "TARBALL_NAME=$TARBALL" >> $GITHUB_ENV
 
       - name: Create Github Release
@@ -59,7 +61,7 @@ jobs:
         with:
           node-version: '26' # Specify the Node.js version needed
 
-      - name: Install npm dependency
+      - name: Install pnpm dependency
         run: |
           TAG="${{ needs.build-and-release.outputs.release_version }}"
           npm install "https://github.com/${{ github.repository }}/releases/download/${TAG}/sveltia-cms-${TAG}.tgz"
