@@ -14,6 +14,10 @@ import {
   isCollectionIndexFile,
 } from '$lib/services/contents/collection/entries/index-file';
 import { getField, getFieldDisplayValue } from '$lib/services/contents/entry/fields';
+import {
+  hasLocalePlaceholder,
+  stripLocaleFolderPath,
+} from '$lib/services/contents/i18n/placeholder';
 
 /**
  * @import {
@@ -123,7 +127,10 @@ export const replaceSub = (tag, context) => {
   if (tag === 'dirname') {
     let dirPath = entryPath.replace(/[^/]+$/, '');
 
-    if (basePath) {
+    if (basePath && hasLocalePlaceholder(basePath)) {
+      // The base path stands for a folder per locale
+      dirPath = stripLocaleFolderPath(dirPath, basePath);
+    } else if (basePath) {
       // Remove basePath prefix with boundary awareness
       const prefix = basePath.endsWith('/') ? basePath : `${basePath}/`;
 
@@ -347,7 +354,7 @@ const formatEntrySummary = (
  * `nested.summary` option.
  * @returns {string} Formatted entry summary.
  * @see https://decapcms.org/docs/configuration-options/#summary
- * @see https://sveltiacms.app/en/docs/collections/entries#summaries
+ * @see https://sveltiacms.app/en/docs/collections/entries/listings#summaries
  */
 export const getEntrySummary = (collection, entry, options = {}) => {
   const { locale, useTemplate = false, allowMarkdown = false, template } = options;

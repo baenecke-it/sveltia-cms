@@ -14,7 +14,12 @@ import {
   localizeDirPath,
 } from '$lib/services/contents/collection/nested/i18n';
 import { hasLocalizedSlugs } from '$lib/services/contents/draft/slugs';
+import { resolveFileConfig } from '$lib/services/contents/file/config';
 import { getLocalePath } from '$lib/services/contents/i18n';
+import {
+  fillLocalePlaceholder,
+  hasLocalePlaceholder,
+} from '$lib/services/contents/i18n/placeholder';
 import { createPath } from '$lib/services/utils/file';
 
 /**
@@ -46,6 +51,12 @@ export const buildPathByStructure = ({
   omitLocale,
   structure,
 }) => {
+  // The `{{locale}}` placeholder in the `folder` option says where the locale folder goes, so the
+  // structure has nothing to add
+  if (hasLocalePlaceholder(basePath)) {
+    return `${fillLocalePlaceholder({ path: basePath, locale, omitLocale })}/${path}.${extension}`;
+  }
+
   switch (structure) {
     case 'multiple_folders':
       return omitLocale
@@ -182,15 +193,17 @@ export const createEntryPath = ({ draft, locale, slug }) => {
     return /** @type {Entry} */ (originalEntry).locales[locale].path;
   }
 
-  const {
-    _file: { basePath, subPath, extension },
-  } = entryCollection;
+  // The index file can have an extension of its own
+  const { basePath, subPath, extension } = resolveFileConfig({
+    collection: entryCollection,
+    isIndexFile,
+  });
 
   /**
    * Support entry collection’s subpath.
    * @see https://decapcms.org/docs/collection-folder/#folder-collections-path
    * @see https://decapcms.org/docs/collection-nested/
-   * @see https://sveltiacms.app/en/docs/collections/entries#managing-entry-file-paths
+   * @see https://sveltiacms.app/en/docs/collections/entries/slugs#file-paths
    */
   let path = isIndexFile
     ? /** @type {string} */ (getIndexFile(entryCollection)?.name)

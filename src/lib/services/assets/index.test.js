@@ -2,7 +2,7 @@
 /* eslint-disable jsdoc/require-param-description */
 /* eslint-disable jsdoc/require-description */
 
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -47,17 +47,14 @@ vi.mock('$lib/services/integrations/media-libraries/default', () => ({
     enabled: true,
     config: { max_file_size: Infinity, multiple: false, transformations: undefined },
   })),
+  canConvertHEIC: vi.fn(() => false),
   transformFile: vi.fn(),
 }));
-// Some modules above read the preferences, whose effect needs `matchMedia()`, which jsdom lacks
 // The backend services imported below pull in the environment detection, which isn’t needed here
 vi.mock('$lib/services/user/env.svelte', () => ({
   env: { isLocalHost: false },
 }));
 
-vi.mock('$lib/services/user/prefs.svelte', () => ({
-  prefs: { devModeEnabled: false },
-}));
 vi.mock('$lib/services/utils/media/image/validate', () => ({
   isValidImage: vi.fn().mockResolvedValue(true),
 }));
@@ -1084,6 +1081,22 @@ describe('assets/index', () => {
 
       // focusedAsset should be reset to undefined
       expect(focusedAsset.current).toBe(undefined);
+    });
+
+    it('should reset the focused asset and subfolder when a subfolder is selected', async () => {
+      const { focusedSubfolder, selectedSubfolderPath } =
+        await import('$lib/services/assets/subfolders');
+
+      focusedAsset.current = /** @type {any} */ ({ path: 'assets/image.jpg' });
+      focusedSubfolder.current = { name: '2024', path: 'assets/2024' };
+      selectedSubfolderPath.current = '2024';
+
+      await new Promise((resolve) => {
+        setTimeout(resolve, 10);
+      });
+
+      expect(focusedAsset.current).toBeUndefined();
+      expect(focusedSubfolder.current).toBeUndefined();
     });
   });
 

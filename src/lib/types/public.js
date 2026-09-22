@@ -42,8 +42,9 @@
  */
 
 /**
- * Supported raster image format.
- * @typedef {'avif' | 'gif' | 'jpeg' | 'png' | 'webp'} RasterImageFormat
+ * Supported raster image format. HEIC (HEIF) is an input format: browsers other than Safari can’t
+ * display it, so a `heic` or `raster_image` transformation converts it to a format they can.
+ * @typedef {'avif' | 'gif' | 'heic' | 'jpeg' | 'png' | 'webp'} RasterImageFormat
  */
 
 /**
@@ -62,7 +63,7 @@
 
 /**
  * Raster image transformation options. See the
- * [documentation](https://sveltiacms.app/en/docs/media/internal#image-optimization) for details.
+ * [documentation](https://sveltiacms.app/en/docs/media#image-optimization) for details.
  * @typedef {object} RasterImageTransformationOptions
  * @property {RasterImageConversionFormat} [format] New format. Default: `webp`.
  * @property {number} [quality] Image quality between 0 and 100. Default: `85`.
@@ -77,6 +78,7 @@
  * that apply to any supported raster image format.
  * @property {RasterImageTransformationOptions} [avif] AVIF image transformation options.
  * @property {RasterImageTransformationOptions} [gif] GIF image transformation options.
+ * @property {RasterImageTransformationOptions} [heic] HEIC image transformation options.
  * @property {RasterImageTransformationOptions} [jpeg] JPEG image transformation options.
  * @property {RasterImageTransformationOptions} [png] PNG image transformation options.
  * @property {RasterImageTransformationOptions} [webp] WebP image transformation options.
@@ -115,7 +117,7 @@
  * @property {FileTransformations} [transformations] File transformation option map. The key is an
  * original format like `png` or `jpeg`. It can also be `raster_image` that matches any supported
  * raster image format. See the
- * [documentation](https://sveltiacms.app/en/docs/media/internal#image-optimization) for details.
+ * [documentation](https://sveltiacms.app/en/docs/media#image-optimization) for details.
  */
 
 /**
@@ -200,9 +202,9 @@
  * Required for Cloudflare R2 (S3 API endpoint always requires authentication); set to the `r2.dev`
  * development URL (e.g. `https://pub-abcd1234.r2.dev`) or a custom domain. Also required for Bunny
  * Storage; set to the hostname of a pull zone connected to the storage zone (e.g.
- * `https://my-zone.b-cdn.net`) or a custom domain. Optional for Amazon S3
- * and DigitalOcean Spaces — use when serving assets through a CDN or custom domain (e.g. CloudFront
- * or Route 53 for S3, CDN endpoint for Spaces).
+ * `https://my-zone.b-cdn.net`) or a custom domain. Optional for Amazon S3 and DigitalOcean Spaces —
+ * use when serving assets through a CDN or custom domain (e.g. CloudFront or Route 53 for S3, CDN
+ * endpoint for Spaces).
  */
 
 /**
@@ -243,8 +245,8 @@
 
 /**
  * Supported cloud media storage options.
- * @typedef {CloudinaryMediaLibrary | UploadcareMediaLibrary | S3MediaLibrary |
- * AzureMediaLibrary} CloudMediaLibrary
+ * @typedef {CloudinaryMediaLibrary | UploadcareMediaLibrary | S3MediaLibrary | AzureMediaLibrary}
+ * CloudMediaLibrary
  */
 
 /**
@@ -307,7 +309,8 @@
  * non-default like `false` but automatically copies the default locale’s value to other locales.
  * `translate` and `none` are aliases of `true` and `false`, respectively. This option only works
  * when i18n is set up with the global and collection-level `i18n` option. See the
- * [documentation](https://sveltiacms.app/en/docs/i18n#field-level-configuration) for details.
+ * [documentation](https://sveltiacms.app/en/docs/i18n/options#field-level-configuration) for
+ * details.
  */
 
 /**
@@ -320,8 +323,9 @@
  * key-value pairs to other locales. `duplicate_keys` copies the keys only: the keys are read-only
  * in non-default locales and kept in sync with the default locale, while the values can be edited
  * in each locale. `translate` and `none` are aliases of `true` and `false`, respectively. This
- * option only works when i18n is set up with the global and collection-level `i18n` option. See
- * the [documentation](https://sveltiacms.app/en/docs/i18n#field-level-configuration) for details.
+ * option only works when i18n is set up with the global and collection-level `i18n` option. See the
+ * [documentation](https://sveltiacms.app/en/docs/i18n/options#field-level-configuration) for
+ * details.
  */
 
 /**
@@ -466,8 +470,8 @@
 
 /**
  * Boolean field definition.
- * @typedef {CommonFieldProps & VisibleFieldProps & BooleanFieldProps &
- * AdjacentLabelProps} BooleanField
+ * @typedef {CommonFieldProps & VisibleFieldProps & BooleanFieldProps & AdjacentLabelProps}
+ * BooleanField
  */
 
 /**
@@ -508,8 +512,8 @@
 
 /**
  * Color field definition.
- * @typedef {CommonFieldProps & VisibleFieldProps & FieldValidationProps &
- * ColorFieldProps} ColorField
+ * @typedef {CommonFieldProps & VisibleFieldProps & FieldValidationProps & ColorFieldProps}
+ * ColorField
  */
 
 /**
@@ -594,8 +598,8 @@
 
 /**
  * DateTime field definition.
- * @typedef {CommonFieldProps & VisibleFieldProps & FieldValidationProps &
- * DateTimeFieldProps} DateTimeField
+ * @typedef {CommonFieldProps & VisibleFieldProps & FieldValidationProps & DateTimeFieldProps}
+ * DateTimeField
  */
 
 /**
@@ -667,9 +671,9 @@
  * List field properties.
  * @typedef {object} ListFieldProps
  * @property {'list'} widget Field type.
- * @property {string[] | Record<string, any>[] | Record<string, any>} [default] Default value. The
- * format depends on how the field is configured, with or without `field`, `fields` or `types`. See
- * the document for details.
+ * @property {string[] | Record<string, any>[]} [default] Default value. The format depends on how
+ * the field is configured, with or without `field`, `fields` or `types`. See the document for
+ * details.
  * @property {string} [label_singular] Label to be displayed on the Add button. Default: `label`
  * field value.
  * @see https://decapcms.org/docs/widgets/#List
@@ -678,8 +682,8 @@
 
 /**
  * Base properties for a List field.
- * @typedef {CommonFieldProps & VisibleFieldProps & ListFieldProps &
- * MultiValueFieldProps} ListFieldBaseProps
+ * @typedef {CommonFieldProps & VisibleFieldProps & ListFieldProps & MultiValueFieldProps}
+ * ListFieldBaseProps
  */
 
 /**
@@ -755,8 +759,8 @@
 
 /**
  * List field definition.
- * @typedef {SimpleListField | ListFieldWithSubField | ListFieldWithSubFields |
- * ListFieldWithTypes} ListField
+ * @typedef {SimpleListField | ListFieldWithSubField | ListFieldWithSubFields | ListFieldWithTypes}
+ * ListField
  */
 
 // Note: the `typedef` above cannot be `SimpleListField | ComplexListField` because it’s not
@@ -1044,8 +1048,8 @@
  * @property {string} [prefix] A string to be prepended to the value. Default: empty string.
  * @property {boolean} [use_b32_encoding] Whether to encode the value with Base32. Default: `false`.
  * @property {boolean} [read_only] Whether to make the field read-only. Default: `true`.
- * DEPRECATED: Use the `readonly` common field option instead, which defaults to `true` for the
- * UUID field type.
+ * DEPRECATED: Use the `readonly` common field option instead, which defaults to `true` for the UUID
+ * field type.
  * @see https://github.com/decaporg/decap-cms/pull/6675
  */
 
@@ -1113,8 +1117,8 @@
 
 /**
  * Entry field using a custom field type.
- * @typedef {CommonFieldProps & VisibleFieldProps & CustomFieldProps &
- * Record<string, any>} CustomField
+ * @typedef {CommonFieldProps & VisibleFieldProps & CustomFieldProps & Record<string, any>}
+ * CustomField
  */
 
 /**
@@ -1137,10 +1141,12 @@
  * [documentation](https://sveltiacms.app/en/docs/i18n) for details.
  * @typedef {object} I18nOptions
  * @property {I18nFileStructure} [structure] File structure for entry collections. **Required for
- * the global i18n options**. File/singleton collection must define the structure using `{{locale}}`
- * in the `file` option. `multiple_folders_i18n_root` has been deprecated in favor of
- * `multiple_root_folders`. See the
- * [documentation](https://sveltiacms.app/en/docs/i18n#managing-content-structure) for details.
+ * the global i18n options**. An entry collection can instead say where the locale folder goes with
+ * the `{{locale}}` placeholder in the `folder` option, like `content/{{locale}}/posts`, which is
+ * useful when the locale folders sit between the site’s content folder and the collection folders.
+ * File/singleton collection must define the structure using `{{locale}}` in the `file` option.
+ * `multiple_folders_i18n_root` has been deprecated in favor of `multiple_root_folders`. See the
+ * [documentation](https://sveltiacms.app/en/docs/i18n/structures) for details.
  * @property {LocaleCode[]} [locales] List of all available locales. **Required for the global i18n
  * options**.
  * @property {LocaleCode} [default_locale] Default locale. Default: first locale in the `locales`
@@ -1148,18 +1154,18 @@
  * @property {LocaleCode[] | 'all' | 'default'} [initial_locales] Locales to be enabled when
  * creating a new entry draft. If this option is used, users will be able to disable the output of
  * non-default locales through the UI. See the
- * [documentation](https://sveltiacms.app/en/docs/i18n#disabling-non-default-locale-content) for
- * details.
+ * [documentation](https://sveltiacms.app/en/docs/i18n/options#disabling-non-default-locale-content)
+ * for details.
  * @property {boolean} [save_all_locales] Whether to save collection entries in all the locales.
  * Default: `true`.
  * DEPRECATED: Use the `initial_locales` option instead, which provides more flexibility.
  * `save_all_locales: false` is equivalent to `initial_locales: all`. See the documentation
- * https://sveltiacms.app/en/docs/i18n#disabling-non-default-locale-content for details.
+ * https://sveltiacms.app/en/docs/i18n/options#disabling-non-default-locale-content for details.
  * @property {{ key?: string, value?: string }} [canonical_slug] Property name and value template
  * used to add a canonical slug to entry files, which helps Sveltia CMS and some frameworks to link
  * localized files when entry slugs are localized. The default property name is `translationKey`
  * used in Hugo’s multilingual support, and the default value is the default locale’s slug. See the
- * [documentation](https://sveltiacms.app/en/docs/i18n#localizing-entry-slugs) for details.
+ * [documentation](https://sveltiacms.app/en/docs/i18n/slugs#localizing-entry-slugs) for details.
  * @property {boolean} [omit_default_locale_from_filename] Whether to exclude the default locale
  * from entry filenames. Default: `false`. This option applies to entry collections with the
  * `multiple_files` i18n structure enabled, as well as to file/singleton collection items with the
@@ -1221,25 +1227,25 @@
 
 /**
  * Supported file extension. Actually it can be any string.
- * @typedef {'yml' | 'yaml' | 'toml' | 'json' | 'md' | 'markdown' | 'html' | 'txt' |
- * string} FileExtension
+ * @typedef {'yml' | 'yaml' | 'toml' | 'json' | 'md' | 'markdown' | 'html' | 'txt' | string}
+ * FileExtension
  * @see https://decapcms.org/docs/configuration-options/#extension-and-format
- * @see https://sveltiacms.app/en/docs/collections/entries#file-format-and-extension
+ * @see https://sveltiacms.app/en/docs/collections/entries/formats
  */
 
 /**
  * Supported Markdown front matter format.
  * @typedef {'yaml-frontmatter' | 'toml-frontmatter' | 'json-frontmatter'} FrontMatterFormat
  * @see https://decapcms.org/docs/configuration-options/#extension-and-format
- * @see https://sveltiacms.app/en/docs/collections/entries#file-format-and-extension
+ * @see https://sveltiacms.app/en/docs/collections/entries/formats
  */
 
 /**
  * Supported file format. Actually it can be any string because of custom formats.
- * @typedef {'yml' | 'yaml' | 'toml' | 'json' | 'frontmatter' | FrontMatterFormat | 'raw' |
- * string} FileFormat
+ * @typedef {'yml' | 'yaml' | 'toml' | 'json' | 'frontmatter' | FrontMatterFormat | 'raw' | string}
+ * FileFormat
  * @see https://decapcms.org/docs/configuration-options/#extension-and-format
- * @see https://sveltiacms.app/en/docs/collections/entries#file-format-and-extension
+ * @see https://sveltiacms.app/en/docs/collections/entries/formats
  */
 
 /**
@@ -1250,7 +1256,7 @@
  * Multiple values can be defined with an array. This option or `pattern` is required.
  * @property {string | RegExp} [pattern] Regular expression matching pattern.
  * @see https://decapcms.org/docs/collection-folder/#filtered-folder-collections
- * @see https://sveltiacms.app/en/docs/collections/entries#filtering-entries
+ * @see https://sveltiacms.app/en/docs/collections/entries/listings#filtering-entries
  * @see https://github.com/decaporg/decap-cms/issues/7347
  */
 
@@ -1268,7 +1274,7 @@
  * @typedef {object} SortableFields
  * @property {FieldKeyPath[]} fields A list of sortable field names.
  * @property {SortableFieldsDefaultOptions} [default] Default sort settings. See the
- * [documentation](https://sveltiacms.app/en/docs/collections/entries#sorting) for details.
+ * [documentation](https://sveltiacms.app/en/docs/collections/entries/views#sorting) for details.
  * @see https://staticjscms.netlify.app/docs/collection-overview#sortable-fields
  */
 
@@ -1285,18 +1291,18 @@
  * `{{now}}` tag for the current date and time, the `{{today}}` tag for the current date in the
  * `YYYY-MM-DD` format, or the `{{year}}`, `{{month}}`, `{{day}}`, `{{hour}}`, `{{minute}}` and
  * `{{second}}` tags for the parts of the current date and time, all in the user’s local time zone.
- * The tags are resolved whenever the entry list is updated, and every minute while such a filter
- * or group is applied, so a filter like “Upcoming events” keeps working without a change to the
+ * The tags are resolved whenever the entry list is updated, and every minute while such a filter or
+ * group is applied, so a filter like “Upcoming events” keeps working without a change to the
  * configuration.
  * @typedef {string | number | boolean} ViewComparisonValue
- * @see https://sveltiacms.app/en/docs/collections/entries#filtering
+ * @see https://sveltiacms.app/en/docs/collections/entries/views#filtering
  */
 
 /**
  * Comparison options for a view filter or group, which can be combined with each other and with
  * `pattern`. An entry has to satisfy all of them. The field value is compared as a date if the
- * field is a DateTime field, as a number if both the value and the given value are numeric, or as
- * a string otherwise. For a DateTime field, a given date should be in the same format as the field
+ * field is a DateTime field, as a number if both the value and the given value are numeric, or as a
+ * string otherwise. For a DateTime field, a given date should be in the same format as the field
  * value, or be the `{{now}}` or `{{today}}` tag; `{{today}}` is the one to use with a date-only
  * field, so that an entry dated today is included in a `gte` comparison.
  * @typedef {object} ViewComparisonOptions
@@ -1312,7 +1318,7 @@
  * @property {ViewComparisonValue[]} [in] Values one of which the field value has to be equal to.
  * @property {ViewComparisonValue[]} [not_in] Values the field value has to be different from. An
  * entry without a value for the field also matches.
- * @see https://sveltiacms.app/en/docs/collections/entries#filtering
+ * @see https://sveltiacms.app/en/docs/collections/entries/views#filtering
  */
 
 /**
@@ -1324,7 +1330,7 @@
  * @property {string | RegExp | boolean} [pattern] Regular expression matching pattern or exact
  * value. Required unless one of the comparison options is defined.
  * @see https://decapcms.org/docs/configuration-options/#view_filters
- * @see https://sveltiacms.app/en/docs/collections/entries#filtering
+ * @see https://sveltiacms.app/en/docs/collections/entries/views#filtering
  */
 
 /**
@@ -1338,7 +1344,7 @@
  * @property {ViewFilter[]} filters A list of view filters.
  * @property {string} [default] Default filter name.
  * @see https://staticjscms.netlify.app/docs/collection-overview#view-filters
- * @see https://sveltiacms.app/en/docs/collections/entries#filtering
+ * @see https://sveltiacms.app/en/docs/collections/entries/views#filtering
  */
 
 /**
@@ -1351,7 +1357,7 @@
  * @property {string | RegExp | boolean} [pattern] Regular expression matching pattern or exact
  * value.
  * @see https://decapcms.org/docs/configuration-options/#view_groups
- * @see https://sveltiacms.app/en/docs/collections/entries#grouping
+ * @see https://sveltiacms.app/en/docs/collections/entries/views#grouping
  */
 
 /**
@@ -1365,7 +1371,7 @@
  * @property {ViewGroup[]} groups A list of view groups.
  * @property {string} [default] Default group name.
  * @see https://staticjscms.netlify.app/docs/collection-overview#view-groups
- * @see https://sveltiacms.app/en/docs/collections/entries#grouping
+ * @see https://sveltiacms.app/en/docs/collections/entries/views#grouping
  */
 
 /**
@@ -1377,7 +1383,7 @@
  * `categories`. Entries are grouped by it in reorder mode and can only be reordered within their
  * own group, with the order field numbered group by group. Default: no grouping, so the entry list
  * becomes a single flat sequence while reordering.
- * @see https://sveltiacms.app/en/docs/collections/entries#managing-entry-order
+ * @see https://sveltiacms.app/en/docs/collections/entries/operations#reordering-entries
  */
 
 /**
@@ -1385,6 +1391,7 @@
  * @typedef {object} EditorOptions
  * @property {boolean} [preview] Whether to show the preview pane. Default: `true`.
  * @see https://decapcms.org/docs/configuration-options/#editor
+ * @see https://sveltiacms.app/en/docs/ui/content-editor#disabling-previews
  */
 
 /**
@@ -1398,6 +1405,7 @@
  * @property {boolean} [subfolders] Whether each entry is stored as an index file in its own
  * subfolder. If `false`, entries are regular files placed directly in the folders. Default: `true`.
  * @see https://decapcms.org/docs/collection-nested/
+ * @see https://sveltiacms.app/en/docs/collections/entries/nested#nested-collection-options
  */
 
 /**
@@ -1410,6 +1418,7 @@
  * @property {string} [index_file] File name, without an extension, shared by every entry in the
  * collection, e.g. `_index`. If omitted, each entry keeps its own file name.
  * @see https://decapcms.org/docs/collection-nested/
+ * @see https://sveltiacms.app/en/docs/collections/entries/nested#choosing-a-parent-folder
  */
 
 /**
@@ -1417,15 +1426,22 @@
  * @typedef {object} CollectionMetaData
  * @property {CollectionMetaDataPath} [path] Entry path options.
  * @see https://decapcms.org/docs/collection-nested/
+ * @see https://sveltiacms.app/en/docs/collections/entries/nested#choosing-a-parent-folder
  */
 
 /**
  * Index file inclusion options. See the
- * [documentation](https://sveltiacms.app/en/docs/collections/entries#managing-hugo-s-special-index-file)
+ * [documentation](https://sveltiacms.app/en/docs/collections/entries/listings#managing-hugo-s-special-index-file)
  * for details.
  * @typedef {object} CollectionIndexFile
  * @property {string} [name] Index file name without a locale or file extension. Default: `_index`,
  * which is used for Hugo’s special index file.
+ * @property {FileExtension} [extension] File extension of the index file, if it differs from the
+ * entries’. Default: the collection’s `extension`, or the one that goes with `format` if given.
+ * This allows an Eleventy [directory data file](https://www.11ty.dev/docs/data-template-dir/) like
+ * `posts/posts.json` to be managed beside the Markdown entries in the same folder.
+ * @property {FileFormat} [format] File format of the index file, if it differs from the entries’.
+ * Default: detected from `extension` if given, or the collection’s `format`.
  * @property {string} [label] Label to be displayed in the editor UI. Default: Index File or its
  * localized version.
  * @property {string} [icon] Name of a [Material Symbols
@@ -1509,7 +1525,12 @@
  * Entry collection properties.
  * @typedef {object} EntryCollectionProps
  * @property {string} folder Base folder path relative to the project root. It can contain slashes
- * to create subfolders.
+ * to create subfolders. With i18n enabled, it can also contain the `{{locale}}` placeholder as a
+ * whole folder name, like `content/{{locale}}/posts`, to say where each locale’s folder goes. The
+ * placeholder takes precedence over the `structure` i18n option: the collection then has one
+ * folder per locale wherever the placeholder is, and the `omit_default_locale_from_file_path`
+ * option leaves the default locale’s folder out. See the
+ * [documentation](https://sveltiacms.app/en/docs/i18n/structures) for details.
  * @property {Field[]} fields Set of fields to be included in entries.
  * @property {string} [path] File path relative to `folder`, without a file extension. It can
  * contain slashes to create subfolders. Default: `{{slug}}`. To use Hugo’s page bundle, set this to
@@ -1532,10 +1553,11 @@
  * entry. Default: `title`.
  * @property {string} [slug] Item slug template. Default: `identifier_field` option value. It cannot
  * contain slashes; to organize entries in subfolders, use the `path` option instead. It’s possible
- * to [localize the slug](https://sveltiacms.app/en/docs/i18n#localizing-entry-slugs) or [use a
- * random ID](https://sveltiacms.app/en/docs/collections/entries#slug-template-tags). Also, it’s
- * possible to show a special slug editor field in initial entry drafts by using `{{fields._slug}}`
- * (with an underscore prefix) or `{{fields._slug | localize}}` (to localize the slug).
+ * to [localize the slug](https://sveltiacms.app/en/docs/i18n/slugs#localizing-entry-slugs) or [use
+ * a random ID](https://sveltiacms.app/en/docs/collections/entries/slugs#slug-template-tags). Also,
+ * it’s possible to show a special slug editor field in initial entry drafts by using
+ * `{{fields._slug}}` (with an underscore prefix) or `{{fields._slug | localize}}` (to localize the
+ * slug).
  * @property {number} [slug_length] The maximum number of characters allowed for an entry slug.
  * Default: `Infinity`.
  * DEPRECATED: Use the global `slug.maxlength` option instead.
@@ -1543,7 +1565,7 @@
  * @property {FieldKeyPath[] | SortableFields} [sortable_fields] Custom sortable fields. Default:
  * `title`, `name`, `date`, `author` and `description`. For a Git backend, commit author and commit
  * date are also included by default. See the
- * [documentation](https://sveltiacms.app/en/docs/collections/entries#sorting) for details.
+ * [documentation](https://sveltiacms.app/en/docs/collections/entries/views#sorting) for details.
  * @property {ViewFilter[] | ViewFilters} [view_filters] View filters to be used in the entry list.
  * @property {ViewGroup[] | ViewGroups} [view_groups] View groups to be used in the entry list.
  * @property {NestedCollectionOptions} [nested] Options for a nested collection, which shows the
@@ -1552,7 +1574,7 @@
  * path editor. It has no effect without the `nested` option.
  * @property {CollectionIndexFile | boolean} [index_file] Index file inclusion options. If `true`,
  * the default index file name is `_index`, which is used for Hugo’s special index file. See the
- * [documentation](https://sveltiacms.app/en/docs/collections/entries#managing-hugo-s-special-index-file)
+ * [documentation](https://sveltiacms.app/en/docs/collections/entries/listings#managing-hugo-s-special-index-file)
  * for details.
  * @property {boolean | FieldKeyPath | FieldKeyPath[]} [thumbnail] Whether to show entry thumbnails
  * in the entry list. Default: `true` (auto-detect image/file fields). Set to `false` to disable, or
@@ -1768,10 +1790,10 @@
  * than Netlify, including [Sveltia CMS Authenticator](https://github.com/sveltia/sveltia-cms-auth).
  * Default: `https://gitea.com/`.
  * @property {string} [auth_endpoint] OAuth base URL path. Default: `login/oauth/authorize`.
- * @property {string} [app_id] OAuth application ID. Required for OAuth sign-in; without one,
- * users can still sign in with a personal access token.
+ * @property {string} [app_id] OAuth application ID. Required for OAuth sign-in; without one, users
+ * can still sign in with a personal access token.
  * @see https://decapcms.org/docs/gitea-backend/
- * @see https://sveltiacms.app/en/docs/backends/gitea
+ * @see https://sveltiacms.app/en/docs/backends/gitea-forgejo
  */
 
 /**
@@ -1806,9 +1828,9 @@
 /**
  * Custom logo options.
  * @typedef {object} LogoOptions
- * @property {string} [src] Absolute URL or absolute path to the site logo that will be displayed
- * on the entrance page and the browser’s tab (favicon). A square image works best. Falls back to
- * the deprecated `logo_url` option.
+ * @property {string} [src] Absolute URL or absolute path to the site logo that will be displayed on
+ * the entrance page and the browser’s tab (favicon). A square image works best. Falls back to the
+ * deprecated `logo_url` option.
  * @property {boolean} [show_in_header] Whether to show the logo in the header. Default: `true`.
  */
 
@@ -1828,7 +1850,7 @@
  * CMS. Use `local` to generate slugs based on the local time of the user’s browser, which is more
  * intuitive in most cases.
  * @see https://decapcms.org/docs/configuration-options/#slug-type
- * @see https://sveltiacms.app/en/docs/collections/entries#global-slug-options
+ * @see https://sveltiacms.app/en/docs/collections/entries/slugs#global-slug-options
  */
 
 /**
@@ -1983,9 +2005,9 @@
  * element with a Svelte or Vue component mounted on it) or a React element is inserted as is
  * without sanitization, so the developer is responsible for escaping any user-provided content. An
  * `HTMLElement` preview receives an `Unmount` event once it’s removed from the preview pane, which
- * can be used to destroy the mounted component. The value of a nested RichText or Markdown field
- * is passed verbatim, including any nested component syntax; use `CMS.renderRichText()` to render
- * it within an `HTMLElement` preview.
+ * can be used to destroy the mounted component. The value of a nested RichText or Markdown field is
+ * passed verbatim, including any nested component syntax; use `CMS.renderRichText()` to render it
+ * within an `HTMLElement` preview.
  * @see https://decapcms.org/docs/custom-widgets/#registereditorcomponent
  * @see https://sveltiacms.app/en/docs/api/editor-components
  */
@@ -2186,9 +2208,9 @@
  * either as the value itself or anywhere within an object or array value. When the entry is saved,
  * the blob URL is replaced with the public path of the uploaded file. The file goes to the field’s
  * own `media_folder` if the option is defined, otherwise to the collection’s or the global one, and
- * the field’s or the global `media_library` options, such as `max_file_size` and
- * `transformations`, are applied. It rejects with an error if the file cannot be used. Files that
- * are added but no longer referenced in the value when the entry is saved are discarded.
+ * the field’s or the global `media_library` options, such as `max_file_size` and `transformations`,
+ * are applied. It rejects with an error if the file cannot be used. Files that are added but no
+ * longer referenced in the value when the entry is saved are discarded.
  * @property {(options?: CustomFieldPickFileOptions) => Promise<CustomFieldPickedFile |
  * CustomFieldPickedFile[] | null>} pickFile Function to open the same Select Assets dialog as a
  * built-in File/Image field, so that the user can pick an existing asset, upload a new file, enter
@@ -2197,8 +2219,8 @@
  * when the dialog is dismissed or none of the picked files can be used. The `value` of a picked
  * file is what should be stored in the field value with `onChange`, either as the value itself or
  * anywhere within an object or array value. The dialog lists the asset folders a File/Image field
- * in the same place would offer, and files uploaded through it are handled exactly like files
- * given to `addFile`, including the `media_library` options. Files that are oversized or cannot be
+ * in the same place would offer, and files uploaded through it are handled exactly like files given
+ * to `addFile`, including the `media_library` options. Files that are oversized or cannot be
  * decoded are reported to the user in a dialog. It rejects with an error if the contents of a
  * picked asset cannot be retrieved.
  * @see https://decapcms.org/docs/custom-widgets/#registerwidget
@@ -2213,6 +2235,7 @@
  * - A Promise that resolves to any of the above formats.
  * @typedef {ComponentType<CustomFieldControlProps>} CustomFieldControl
  * @see https://decapcms.org/docs/custom-widgets/#advanced-field-validation
+ * @see https://sveltiacms.app/en/docs/api/field-types#custom-validation
  */
 
 /**

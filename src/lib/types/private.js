@@ -79,8 +79,8 @@
  * @property {Record<string, string>} [apiKeys] API keys for integrations.
  * @property {Record<string, string>} [logins] Log-in credentials (user name and password) for
  * integrations.
- * @property {'auto' | 'dark' | 'light'} [theme] Selected UI theme, or `auto` to follow the
- * system’s color scheme.
+ * @property {'auto' | 'dark' | 'light'} [theme] Selected UI theme, or `auto` to follow the system’s
+ * color scheme.
  * @property {InternalLocaleCode | 'auto'} [locale] Selected UI locale, e.g. `en-US`, or `auto` to
  * follow the browser’s language settings.
  * @property {boolean} [useDraftBackup] Whether to use the entry draft backup mechanism.
@@ -217,6 +217,18 @@
  */
 
 /**
+ * What someone else’s commits have changed on the configured branch, as found by a check made after
+ * the site data was loaded. A modified entry is listed as it is now; a deleted one as it was.
+ * @typedef {object} RemoteChanges
+ * @property {Entry[]} addedEntries Entries that weren’t there before.
+ * @property {Entry[]} modifiedEntries Entries whose files have changed.
+ * @property {Entry[]} deletedEntries Entries whose files are gone.
+ * @property {Asset[]} addedAssets Assets that weren’t there before.
+ * @property {Asset[]} modifiedAssets Assets whose files have changed.
+ * @property {Asset[]} deletedAssets Assets whose files are gone.
+ */
+
+/**
  * State of a deployment created by a CI/CD provider connected to the Git backend.
  * - `checking`: a request to the backend is in flight, or nothing has been reported yet for a
  * commit made moments ago and the provider is being given time to post its first status.
@@ -321,20 +333,24 @@
  * @property {() => RepositoryInfo | undefined} init Function to initialize the backend.
  * @property {(options: SignInOptions) => Promise<User | void>} signIn Function to sign in.
  * @property {() => Promise<void>} signOut Function to sign out.
- * @property {() => Promise<void>} fetchFiles Function to fetch files.
+ * @property {() => Promise<void>} fetchFiles Function to fetch files. Calling it again once the
+ * site data has been loaded brings the stores up to date with the repository, fetching only what
+ * has changed.
+ * @property {() => Promise<{ hash: string, message: string }>} [fetchLastCommit] Function to fetch
+ * the configured branch’s head commit, to tell whether the repository has changed since the site
+ * data was loaded. Git backends only.
  * @property {(asset: Asset) => Promise<Blob>} [fetchBlob] Function to fetch an asset as a Blob. Git
  * backends only.
- * @property {(changes: FileChange[], options: CommitOptions) =>
- * Promise<CommitResults>} commitChanges Function to save file changes, including additions and
- * deletions, and return the commit hash and a map of committed files.
+ * @property {(changes: FileChange[], options: CommitOptions) => Promise<CommitResults>}
+ * commitChanges Function to save file changes, including additions and deletions, and return the
+ * commit hash and a map of committed files.
  * @property {() => Promise<Response>} [triggerDeployment] Function to manually trigger a new
  * deployment on any connected CI/CD provider. GitHub only.
  * @property {() => Promise<string | undefined>} [fetchBranchHeadSHA] Function to resolve the head
  * commit of the configured branch, which is the production deployment target. Git backends only.
- * @property {(targets: DeployTarget[]) =>
- * Promise<Record<string, DeployStatus>>} [fetchDeployments] Function to resolve the deployment
- * status and URL for the given commits, keyed by commit SHA. Git backends only, and only when the
- * service exposes deployment or commit status information.
+ * @property {(targets: DeployTarget[]) => Promise<Record<string, DeployStatus>>} [fetchDeployments]
+ * Function to resolve the deployment status and URL for the given commits, keyed by commit SHA. Git
+ * backends only, and only when the service exposes deployment or commit status information.
  * @property {(paths: string[]) => Promise<FileCommit[]>} [fetchFileCommits] Function to fetch
  * commit history for given file paths. Git backends only.
  * @property {WorkflowBackendService} [workflow] Editorial Workflow implementation. Git backends
@@ -346,6 +362,7 @@
  * corresponding pull request, prefixed with the `cms_label_prefix` backend option value.
  * @typedef {'draft' | 'pending_review' | 'pending_publish' | 'pending_deletion'} WorkflowStatus
  * @see https://decapcms.org/docs/editorial-workflows/
+ * @see https://sveltiacms.app/en/docs/workflows/editorial#statuses
  */
 
 /**
@@ -387,8 +404,8 @@
  * @property {Date} createdDate Date when the pull request was created.
  * @property {Date} updatedDate Date when the pull request was last updated.
  * @property {CommitAuthor} [author] Author of the pull request.
- * @property {string} [headSHA] Git object ID (SHA-1 hash) of the head commit on the pull
- * request’s branch. It’s used to look up the deploy preview created for the pull request.
+ * @property {string} [headSHA] Git object ID (SHA-1 hash) of the head commit on the pull request’s
+ * branch. It’s used to look up the deploy preview created for the pull request.
  * @property {WorkflowFile[]} files Files changed in the pull request.
  */
 
@@ -431,9 +448,9 @@
  * @typedef {object} WorkflowBackendService
  * @property {() => Promise<WorkflowPullRequest[]>} fetchPullRequests Function to fetch all the open
  * pull requests managed by the CMS, along with the changed files.
- * @property {(args: WorkflowSaveOptions) =>
- * Promise<{ commit: CommitResults, pullRequest: WorkflowPullRequest }>} savePullRequest Function to
- * commit changes on the workflow branch, creating the branch and the pull request if needed.
+ * @property {(args: WorkflowSaveOptions) => Promise<{ commit: CommitResults, pullRequest:
+ * WorkflowPullRequest }>} savePullRequest Function to commit changes on the workflow branch,
+ * creating the branch and the pull request if needed.
  * @property {(pullRequest: WorkflowPullRequest, status: WorkflowStatus) =>
  * Promise<WorkflowPullRequest>} updateStatus Function to update the pull request’s status label and
  * draft state.
@@ -471,6 +488,9 @@
  * cloud storage services.
  * @property {string} [password] Password for services that require user authentication, such as
  * cloud storage services.
+ * @property {string} [dirPath] Directory the uploaded files go to, relative to the configured
+ * prefix, e.g. `2024/summer`. An empty string or `undefined` for the prefix itself. Only a cloud
+ * storage service that stores files at paths reads it.
  */
 
 /**
@@ -499,19 +519,19 @@
  * @property {(fieldConfig?: MediaField) => boolean} [isEnabled] Whether the service is enabled.
  * It’s determined by whether the service is defined in the CMS or field configuration.
  * @property {(url: string) => boolean} [isAssetURL] Whether the given URL points to a file on the
- * service, given the site configuration, so that such a file can be told apart from one linked
- * from elsewhere.
+ * service, given the site configuration, so that such a file can be told apart from one linked from
+ * elsewhere.
  * @property {() => Promise<boolean>} [init] Function to initialize the service.
  * @property {(userName: string, password: string) => Promise<boolean>} [signIn] Function to sign in
  * to the service.
- * @property {(query: string, options: MediaLibraryFetchOptions) =>
- * Promise<ExternalAsset[]>} [search] Function to search files.
+ * @property {(query: string, options: MediaLibraryFetchOptions) => Promise<ExternalAsset[]>}
+ * [search] Function to search files.
  * @property {(options: MediaLibraryFetchOptions) => Promise<ExternalAsset[]>} [list] Function to
  * list files. For stock asset services, it should return popular or curated images.
- * @property {(files: File[], options: MediaLibraryFetchOptions) =>
- * Promise<ExternalAsset[]>} [upload] Function to upload files to the cloud storage service.
- * @property {(assets: ExternalAsset[], options: MediaLibraryFetchOptions) =>
- * Promise<void>} [delete] Function to delete files from the cloud storage service.
+ * @property {(files: File[], options: MediaLibraryFetchOptions) => Promise<ExternalAsset[]>}
+ * [upload] Function to upload files to the cloud storage service.
+ * @property {(assets: ExternalAsset[], options: MediaLibraryFetchOptions) => Promise<void>}
+ * [delete] Function to delete files from the cloud storage service.
  * @property {(asset: ExternalAsset, newName: string, options: MediaLibraryFetchOptions) =>
  * Promise<ExternalAsset>} [rename] Function to rename a file on the cloud storage service. Omitted
  * when the service’s API can’t rename a file.
@@ -519,6 +539,31 @@
  * Promise<ExternalAsset>} [replace] Function to replace a file on the cloud storage service with a
  * new file, keeping the file name and URL. Omitted when the service assigns a new URL to every
  * uploaded file.
+ * @property {(options: MediaLibraryFetchOptions) => Promise<ExternalFolderListing>} [browse]
+ * Function to list the files on a cloud storage service that stores them at paths, along with the
+ * empty folders it keeps. The Asset Library and the asset picker then browse the service folder by
+ * folder, reading the folders off the file paths in `description`. Omitted when the service has no
+ * folders, like Uploadcare, or handles them in its own widget, like Cloudinary.
+ * @property {(dirPath: string, options: MediaLibraryFetchOptions) => Promise<void>}
+ * [createFolder] Function to create an empty folder on the service, which keeps a placeholder
+ * object for it, as object storage has no folders of its own. The path is relative to the
+ * configured prefix.
+ * @property {(dirPath: string, options: MediaLibraryFetchOptions) => Promise<void>}
+ * [deleteFolder] Function to remove the placeholder object of a folder once the files in it have
+ * been deleted or moved. A folder without a placeholder is as good as removed.
+ * @property {(asset: ExternalAsset, newPath: string, options: MediaLibraryFetchOptions) =>
+ * Promise<ExternalAsset>} [move] Function to move a file to another path on the service, relative
+ * to the configured prefix, which is how a folder is renamed. Omitted when the service can’t move
+ * a file.
+ */
+
+/**
+ * Files and folders on a cloud storage service that stores files at paths.
+ * @typedef {object} ExternalFolderListing
+ * @property {ExternalAsset[]} assets Files.
+ * @property {string[]} folders Paths of the folders kept by a placeholder object, relative to the
+ * configured prefix, e.g. `2024/summer`. The folders that hold files are read off the file paths
+ * instead.
  */
 
 /**
@@ -626,6 +671,9 @@
  * @property {BodyFieldOptions} [bodyField] Body field options for front matter formats.
  * @property {boolean} [yamlQuote] YAML quote configuration. DEPRECATED in favor of the global YAML
  * format options.
+ * @property {FileConfig} [indexFile] Configuration for the collection’s special index file, when
+ * it has an `extension` or `format` of its own. It shares everything else with the entries,
+ * including `fullPathRegEx`, which matches both. Entry collection only.
  */
 
 /**
@@ -650,7 +698,8 @@
  * @property {string} [folderPath] Folder path. Entry collection only.
  * @property {Record<InternalLocaleCode, string>} [folderPathMap] Folder path map. Entry collection
  * only. Paths in `folderPathMap` are prefixed with a locale if the `multiple_root_folders` i18n
- * structure is used, while `folderPath` is a bare collection `folder` path.
+ * structure is used, or have the `{{locale}}` placeholder filled in if the collection `folder`
+ * option has one, while `folderPath` is a bare collection `folder` path.
  */
 
 /**
@@ -664,13 +713,16 @@
  * specifically in Hugo. It works only for field-level asset folders in an entry collection.
  * @property {string[]} [localeFolderNames] Names of the locale folders that can precede
  * `internalPath`, for an entry-relative folder in a site using the `multiple_root_folders` i18n
- * structure. Unset when the site has no i18n configuration.
+ * structure, or stand in for the `{{locale}}` placeholder in `internalPath`, for an entry-relative
+ * folder of a collection whose `folder` option has one. Unset when the site has no i18n
+ * configuration.
  * @property {string} [componentName] Custom editor component name for a field-level asset folder,
  * registered with `CMS.registerEditorComponent()`.
  * @property {string | undefined} internalPath Folder path on the repository/filesystem, relative to
  * the project root directory. It can be a partial path if the collection’s `media_folder` property
- * is a relative path, because the complete path is entry-specific in that case. It will be
- * `undefined` for the All Assets folder.
+ * is a relative path, because the complete path is entry-specific in that case; it’s then the
+ * collection `folder` path, which may include the `{{locale}}` placeholder. It will be `undefined`
+ * for the All Assets folder.
  * @property {string | undefined} [internalSubPath] Subfolder below the `internalPath`, relative to
  * the entry folder. It will be set when `entryRelative` is `true`.
  * @property {string | undefined} publicPath Absolute folder path that will appear in the public
@@ -774,8 +826,8 @@
 
 /**
  * An entry collection definition.
- * @typedef {EntryCollection & EntryCollectionExtraProps &
- * CollectionExtraProps} InternalEntryCollection
+ * @typedef {EntryCollection & EntryCollectionExtraProps & CollectionExtraProps}
+ * InternalEntryCollection
  */
 
 /**
@@ -788,8 +840,8 @@
 
 /**
  * A file/singleton collection definition.
- * @typedef {FileCollection & FileCollectionExtraProps &
- * CollectionExtraProps} InternalFileCollection
+ * @typedef {FileCollection & FileCollectionExtraProps & CollectionExtraProps}
+ * InternalFileCollection
  */
 
 /**
@@ -880,6 +932,9 @@
  * @typedef {object} EntryFileItem
  * @property {File} file File to be uploaded.
  * @property {AssetFolderInfo | undefined} folder Target asset folder information.
+ * @property {string} [subfolderPath] Path of the subfolder below the target folder that the file is
+ * saved to, relative to it, when the file was picked while browsing a subfolder in the asset
+ * picker. Empty or `undefined` for the folder root.
  * @property {boolean} replace Whether to replace the existing file if there’s a file with the same
  * name in the target folder.
  */
@@ -1059,6 +1114,9 @@
  * @property {boolean} moved Whether the items have been moved.
  * @property {boolean} renamed Whether the items have been renamed.
  * @property {boolean} deleted Whether the items have been deleted.
+ * @property {boolean} [folderCreated] Whether a subfolder has been created in an asset folder.
+ * @property {boolean} [folderRenamed] Whether a subfolder of an asset folder has been renamed.
+ * @property {boolean} [folderDeleted] Whether a subfolder of an asset folder has been deleted.
  * @property {boolean} [deletionPending] Whether the removal awaits publication rather than having
  * taken effect, which is how Editorial Workflow deletes a published entry.
  * @property {boolean} [discarded] Whether the items’ unpublished changes have been thrown away,
@@ -1073,6 +1131,9 @@
  * Asset to be uploaded.
  * @typedef {object} UploadingAssets
  * @property {AssetFolderInfo | undefined} folder Target asset folder info.
+ * @property {string} [subfolderPath] Path of the subfolder below the target folder’s
+ * `internalPath` that the files are saved to, relative to it. Empty or `undefined` for the folder
+ * root.
  * @property {File[]} files File list.
  * @property {Asset[]} [originalAssets] Assets the user picked to be replaced. Each file replaces
  * the asset at the same index, taking over its name and path, so an asset can be replaced with a
@@ -1121,6 +1182,21 @@
 /**
  * Asset item.
  * @typedef {AssetProps & RepositoryFileMetadata} Asset
+ */
+
+/**
+ * Item in a breadcrumb trail of folders.
+ * @typedef {object} BreadcrumbItem
+ * @property {string} label Folder name.
+ * @property {() => void} [onClick] Called when the folder is selected. Not needed for the current
+ * folder, which is shown as text.
+ */
+
+/**
+ * Subfolder of an asset folder, listed in the Asset Library ahead of the assets.
+ * @typedef {object} AssetSubfolder
+ * @property {string} name Folder name.
+ * @property {string} path Folder path, relative to the project root directory.
  */
 
 /**
@@ -1194,6 +1270,8 @@
  * @property {File} [file] File selected from the user’s computer, or an image file downloaded from
  * a stock asset provider.
  * @property {AssetFolderInfo} [folder] Target asset folder info for the `file`.
+ * @property {string} [subfolderPath] Path of the subfolder below the target folder that the `file`
+ * is saved to, relative to it. Empty or `undefined` for the folder root.
  * @property {string} [url] URL from direct input or a hotlinking stock asset.
  * @property {string} [credit] Attribution HTML string for a stock asset, including the photographer
  * name/link and service name/link.
@@ -1221,7 +1299,7 @@
  * @property {string} [key] Target field name.
  * @property {SortOrder} [order] Sort order.
  * @see https://decapcms.org/docs/configuration-options/#sortable_fields
- * @see https://sveltiacms.app/en/docs/collections/entries#sorting
+ * @see https://sveltiacms.app/en/docs/collections/entries/views#sorting
  */
 
 /**
@@ -1232,7 +1310,7 @@
  * @property {string | RegExp | boolean} [pattern] Regular expression matching pattern or exact
  * value. Required unless a comparison operator is defined.
  * @see https://decapcms.org/docs/configuration-options/#view_filters
- * @see https://sveltiacms.app/en/docs/collections/entries#filtering
+ * @see https://sveltiacms.app/en/docs/collections/entries/views#filtering
  */
 
 /**
@@ -1248,7 +1326,7 @@
  * @property {string | RegExp | boolean} [pattern] Regular expression matching pattern or exact
  * value.
  * @see https://decapcms.org/docs/configuration-options/#view_groups
- * @see https://sveltiacms.app/en/docs/collections/entries#grouping
+ * @see https://sveltiacms.app/en/docs/collections/entries/views#grouping
  */
 
 /**
@@ -1657,8 +1735,8 @@
 
 /**
  * The two variants of the configuration schema the validator uses. An unknown property is only
- * worth a warning, but it fails the object holding it all the same, so the violations that are
- * real errors are collected from the variant that accepts it.
+ * worth a warning, but it fails the object holding it all the same, so the violations that are real
+ * errors are collected from the variant that accepts it.
  * @typedef {object} ConfigSchemas
  * @property {Record<string, any>} strict Schema that rejects a property it doesn’t describe, used
  * to find the options the schema doesn’t know about.

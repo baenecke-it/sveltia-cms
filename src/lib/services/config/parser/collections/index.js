@@ -20,9 +20,20 @@ import {
 } from '$lib/services/config/parser/utils/validator';
 import { getReorderGroupName } from '$lib/services/contents/collection/entries/reorder/config';
 import { parseViewOptions } from '$lib/services/contents/collection/view/utils';
+import { mergeI18nConfigs } from '$lib/services/contents/i18n/config/merge';
+import {
+  hasLocalePlaceholder,
+  isValidLocaleFolderPath,
+} from '$lib/services/contents/i18n/placeholder';
 
 /**
- * @import { CmsConfig, Collection, CollectionDivider, EntryCollection } from '$lib/types/public';
+ * @import {
+ * CmsConfig,
+ * Collection,
+ * CollectionDivider,
+ * CollectionIndexFile,
+ * EntryCollection,
+ * } from '$lib/types/public';
  * @import {
  * ConfigParserCollectors,
  * InternalSingletonCollection,
@@ -51,8 +62,9 @@ export const parseEntryCollection = (context, collectors) => {
 
   const {
     extension,
-    format,
     fields,
+    folder,
+    format,
     index_file,
     preview_path,
     preview_path_date_field,
@@ -82,6 +94,29 @@ export const parseEntryCollection = (context, collectors) => {
     addMessage({ strKey: 'collection_no_fields', context, collectors });
   }
 
+  // The type of the `folder` option is checked against the JSON schema
+  if (typeof folder === 'string' && hasLocalePlaceholder(folder)) {
+    // The `{{locale}}` placeholder in the `folder` path is only valid if i18n is enabled for the
+    // collection, which takes the site-level configuration as well as the collection’s own `i18n`
+    // option: with either missing, `checkI18nOverrides()` merely warns that the collection stays
+    // monolingual, but the placeholder would then be replaced with the internal `_default` locale
+    // code, hiding the existing entries and saving new ones in the wrong place
+    if (!mergeI18nConfigs({ cmsConfig, collection })?.locales?.length) {
+      addMessage({ strKey: 'collection_folder_i18n_required', context, collectors });
+    }
+
+    // The placeholder stands for a folder named after the locale, and the entry path matcher can
+    // only capture one
+    if (!isValidLocaleFolderPath(folder)) {
+      addMessage({
+        strKey: 'invalid_collection_folder_locale',
+        values: { folder },
+        context,
+        collectors,
+      });
+    }
+  }
+
   parseFields(fields, context, collectors);
 
   // Validate the `identifier_field` option, and the `title` field it defaults to, against the
@@ -95,6 +130,26 @@ export const parseEntryCollection = (context, collectors) => {
   checkCollectionFilter({ collection, context, collectors });
 
   if (index_file) {
+    // The index file can have an extension and format of its own, which have to agree with each
+    // other like the collection’s
+    if (
+      isObject(index_file) &&
+      isFormatMismatch(
+        /** @type {CollectionIndexFile} */ (index_file).extension,
+        /** @type {CollectionIndexFile} */ (index_file).format,
+      )
+    ) {
+      addMessage({
+        strKey: 'file_format_mismatch',
+        values: {
+          extension: /** @type {CollectionIndexFile} */ (index_file).extension,
+          format: /** @type {CollectionIndexFile} */ (index_file).format,
+        },
+        context: { cmsConfig, collection, isIndexFile: true },
+        collectors,
+      });
+    }
+
     parseFields(
       index_file === true ? fields : (index_file.fields ?? fields),
       { cmsConfig, collection, isIndexFile: true },

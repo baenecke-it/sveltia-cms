@@ -7,13 +7,14 @@
   import AssetPath from '$lib/components/assets/browser/asset-path.svelte';
   import SimpleImageGridItem from '$lib/components/assets/browser/simple-image-grid-item.svelte';
   import SimpleImageGrid from '$lib/components/assets/browser/simple-image-grid.svelte';
+  import SubfolderStrip from '$lib/components/assets/browser/subfolder-strip.svelte';
   import AssetPreview from '$lib/components/assets/shared/asset-preview.svelte';
   import { getAssetKey } from '$lib/services/assets';
   import { hasAllMatches, tokenize } from '$lib/services/search/util';
   import { env } from '$lib/services/user/env.svelte';
 
   /**
-   * @import { Asset, SelectedResource, ViewType } from '$lib/types/private';
+   * @import { Asset, AssetSubfolder, SelectedResource, ViewType } from '$lib/types/private';
    */
 
   /**
@@ -27,7 +28,11 @@
    * @property {boolean} [checkerboard] Whether to show a checkerboard background below a
    * transparent image.
    * @property {SelectedResource[]} [selectedResources] Selected resources.
+   * @property {AssetSubfolder[]} [subfolders] Subfolders of the folder being browsed, listed ahead
+   * of the assets.
    * @property {(detail: { asset: Asset }) => void} [onSelect] Custom `select` event handler.
+   * @property {(subfolder: AssetSubfolder) => void} [onOpenSubfolder] Called when a subfolder is
+   * opened.
    */
 
   /** @type {Props} */
@@ -41,7 +46,9 @@
     gridId = undefined,
     checkerboard = false,
     selectedResources = $bindable([]),
+    subfolders = [],
     onSelect = undefined,
+    onOpenSubfolder = undefined,
     /* eslint-enable prefer-const */
   } = $props();
 
@@ -101,8 +108,11 @@
   };
 </script>
 
-{#if filteredAssets.length}
+{#if filteredAssets.length || subfolders.length}
   <div role="none" class="grid-wrapper">
+    {#if subfolders.length}
+      <SubfolderStrip {subfolders} {viewType} onOpen={onOpenSubfolder} />
+    {/if}
     <SimpleImageGrid {multiple} {gridId} {viewType}>
       <InfiniteScroll items={filteredAssets} itemKey="key">
         {#snippet renderItem(/** @type {Asset & { relPath: string, key: string }} */ asset)}

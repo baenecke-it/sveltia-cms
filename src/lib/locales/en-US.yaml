@@ -71,6 +71,10 @@ primary: Primary
 secondary: Secondary
 collection: Collection
 folder: Folder
+# Label of the subfolder list in the asset picker
+folders: Folders
+# Menu in a breadcrumb holding the folders that don’t fit
+more_folders: More Folders
 
 # ==============================================================================
 # Miscellaneous Labels
@@ -127,6 +131,8 @@ sign_in_with_x: Sign In with {$service}
 # Access token dialog: alternative authentication method
 sign_in_using_access_token: Sign In Using Access Token
 sign_in_using_access_token_description: Enter your token below. It must have read/write access to the repository content.
+# Shown after the description above when Editorial Workflow is enabled, which opens and merges pull requests
+sign_in_using_access_token_workflow_note: Since Editorial Workflow is enabled, it must also have read/write access to pull requests.
 # Inline link text with embedded HTML anchor tag
 # {$service} is the provider name whose user settings page contains the token generator, e.g., GitHub or GitLab
 sign_in_using_access_token_link: You can generate a token on the <a>{$service} user settings page</a>.
@@ -498,6 +504,8 @@ collection_list: Collection List
 back_to_collection_list: Back to Collection List
 asset_folder_list: Asset Folder List
 back_to_asset_folder_list: Back to Asset Folder List
+# Back button shown in place of the one above while browsing a subfolder of an asset folder
+back_to_parent_folder: Back to Parent Folder
 
 # ==============================================================================
 # Search
@@ -555,6 +563,56 @@ no_entries_found: No entries found.
 
 # Upload dialog: title and button label
 upload_assets: Upload New Assets
+
+# New Folder button and dialog in the Asset Library
+new_folder: New Folder
+new_folder_name: Folder Name
+new_folder_create: Create
+# {$folder} is the path of the folder the new one will be created in, starting with a slash
+new_folder_description: The new folder will be created in “{$folder}”.
+# Validation errors for the new folder name
+new_folder_error:
+  empty: The folder name cannot be empty.
+  invalid: The folder name cannot contain slashes or start with a dot.
+  duplicate: A folder or file with this name already exists here.
+# Progress and error messages while the folder is being created
+creating_folder: Creating the folder…
+creating_folder_failed: Couldn’t create the folder.
+
+# Menu on a folder in the Asset Library, and the Rename Folder and Delete Folder dialogs
+folder_options: Folder Options
+show_folder_options: Show Folder Options
+rename_folder: Rename Folder
+delete_folder: Delete Folder
+# Rename Folder dialog body text
+# {$count} is the number of assets in the folder, which are moved along with it
+enter_new_name_for_folder: |
+  .input {$count :integer}
+  .match $count
+    0   {{ Enter a new name below. }}
+    one {{ Enter a new name below. The asset in the folder will be moved along, and any entry using it will be updated. }}
+    *   {{ Enter a new name below. The {$count} assets in the folder will be moved along, and any entries using them will be updated. }}
+# Rename Folder dialog body text for a cloud storage service, whose files are hotlinked from the
+# entries, so a move changes the URLs and the entries aren’t updated
+enter_new_name_for_external_folder: |
+  .input {$count :integer}
+  .match $count
+    0   {{ Enter a new name below. }}
+    one {{ Enter a new name below. The file in the folder will be moved along, and its URL will change, so update any entry using it. }}
+    *   {{ Enter a new name below. The {$count} files in the folder will be moved along, and their URLs will change, so update any entries using them. }}
+# Delete Folder confirmation
+# {$name} is the folder name and {$count} is the number of assets in the folder
+confirm_deleting_folder: |
+  .input {$count :integer}
+  .match $count
+    0   {{ Are you sure you want to delete the empty “{$name}” folder? }}
+    one {{ Are you sure you want to delete the “{$name}” folder and the asset in it? }}
+    *   {{ Are you sure you want to delete the “{$name}” folder and the {$count} assets in it? }}
+# Progress and error messages while the folder is being renamed or deleted
+renaming_folder: Renaming the folder…
+renaming_folder_failed: Couldn’t rename the folder.
+deleting_folder: Deleting the folder…
+deleting_folder_failed: Couldn’t delete the folder.
 
 # Edit options menu: button and item labels
 edit_options: Edit Options
@@ -968,6 +1026,19 @@ assets_deleted: |
   .match $count
     one {{ Asset deleted. }}
     *   {{ {$count} assets deleted. }}
+folder_created: Folder created.
+# Folder info panel in the Asset Library sidebar
+folder_path: Folder Path
+folder_contents: Contents
+# {$count} is the number of subfolders in the folder
+x_folders: |
+  .input {$count :integer}
+  .match $count
+    0   {{ No folders }}
+    one {{ {$count} folder }}
+    *   {{ {$count} folders }}
+folder_renamed: Folder renamed.
+folder_deleted: Folder deleted.
 
 # ==============================================================================
 # Content Editor
@@ -1278,6 +1349,32 @@ saving_entry:
   error:
     title: Error
     description: There was an error while saving the entry. Please try again later.
+
+# Dialog shown when saving the entry would overwrite a change someone else has made in the
+# repository since the entry was opened in the editor
+save_conflict:
+  title: Entry Changed by Someone Else
+  # `{$name}` is the other person’s name, `{$date}` when they made the change
+  modified_by: '{$name} changed this entry on {$date}, after you opened it.'
+  # Shown instead of `modified_by` when the other person isn’t known
+  modified: This entry has been changed in the repository after you opened it.
+  deleted: This entry has been deleted from the repository after you opened it.
+  # Follows `modified_by` or `modified`
+  overwrite_warning: If you save now, their changes will be lost.
+  # Follows `deleted`
+  recreate_warning: If you save now, the entry will be created again.
+  # OK button label
+  save_anyway: Save Anyway
+  # Error shown when the repository was updated between the check above and the commit itself
+  branch_moved: The repository has been updated by someone else while saving. Please try again.
+
+# Notice shown in the entry editor when someone else has changed or deleted the entry in the
+# repository while the user has it open. The change itself is described with the `save_conflict`
+# strings above
+remote_change:
+  reload_entry: Reload Entry
+  # Confirmation shown before reloading when the user has unsaved changes
+  confirm_reloading_entry: Are you sure you want to reload the entry? Your unsaved changes will be lost.
 
 # ==============================================================================
 # Asset Editor
@@ -1661,6 +1758,8 @@ config:
     invalid_filter_no_condition: The `filter` option must have either the `value` or `pattern` option to match entries against.
     # {$option} is an option name such as `slug` or `summary` and {$name} is the field name or template tag from the configuration
     option_field_not_found: The `{$option}` option refers to `{$name}`, but no such field is defined.
+    # {$name} is the field name from the configuration and {$widget} is its field type; Don’t localize `thumbnail`
+    thumbnail_field_not_media: The `thumbnail` option refers to `{$name}`, but it must be an Image or File field, not a `{$widget}` field.
     # {$option} is an option name such as `pattern` or `filter` and {$pattern} is the configured pattern
     invalid_regex: The `{$option}` option contains an invalid regular expression `{$pattern}`, which is ignored.
     # {$name} is the group name from the configuration; Don’t localize `reorder`, `group` and `view_groups`
@@ -1683,6 +1782,10 @@ config:
     # {$name} is the invalid or duplicate view filter name
     invalid_view_filter_name: The view filter name `{$name}` is invalid. It must not contain special characters.
     duplicate_view_filter_name: View filter names must be unique, but `{$name}` is used more than once.
+    # {$name} is the default view group name from the configuration; Don’t localize `default` and `view_groups`
+    invalid_view_group_default: The `default` option of `view_groups` is set to `{$name}`, but no view group has that name.
+    # {$name} is the default view filter name from the configuration; Don’t localize `default` and `view_filters`
+    invalid_view_filter_default: The `default` option of `view_filters` is set to `{$name}`, but no view filter has that name.
     # {$count} is the 1-based collection index in the configuration array; Don’t localize `name`
     missing_collection_name: The collection {$count} must have the `name` option defined as a non-empty string.
     # {$name} is the invalid or duplicate collection name
@@ -1697,6 +1800,11 @@ config:
     collection_no_fields: The collection must have the `fields` option defined with at least one field.
     # Don’t localize `fields`
     collection_file_no_fields: The collection file must have the `fields` option defined with at least one field.
+    # Don’t localize `i18n`, `locale` and `folder`
+    collection_folder_i18n_required: The collection must have the `i18n` option defined if the `locale` placeholder is used in the `folder` path.
+    # {$folder} is the invalid folder path; Don’t localize `locale`, `folder` and the example path. The
+    # curly brackets in the example are escaped with backslashes for MessageFormat 2
+    invalid_collection_folder_locale: The `folder` path `{$folder}` is invalid. The `locale` placeholder must be used only once as a whole folder name, like `content/\{\{locale\}\}/posts`.
     # Don’t localize `i18n`, `locale` and `file`
     collection_file_i18n_required: The collection file must have the `i18n` option defined if the `locale` placeholder is used in the `file` path.
     # {$count} is the 1-based field index in the current fields array; Don’t localize `name`
@@ -1734,6 +1842,32 @@ config:
     select_field_invalid_default: The Select field’s `default` option is set to `{$value}`, but it’s not one of the `options`.
     # Don’t localize `fields` and `types`
     list_field_no_subfields: The List field’s `fields` or `types` option must have at least one item. Omit the option for a list of plain values.
+    # Don’t localize `default`, `fields` and `types`
+    list_field_invalid_default_object: The List field’s `default` option contains an object, but each item must be a plain value because the field has no `fields` or `types`.
+    # {$value} is the default item from the configuration; Don’t localize `default`, `fields` and `types`
+    list_field_invalid_default_item: The List field’s `default` option contains `{$value}`, but each item must be an object because the field has `fields` or `types`.
+    # {$key} is a property name of the default item from the configuration; Don’t localize `default`
+    list_field_invalid_default_key: The List field’s `default` option contains an item with the `{$key}` property, but no subfield has that name.
+    # {$typeKey} is the configured type key, `type` by default; Don’t localize `default` and `types`
+    list_field_default_missing_type: The List field’s `default` option contains an item without the `{$typeKey}` property, which identifies one of the `types`.
+    # {$typeKey} is the configured type key, `type` by default, and {$value} is its value in the default item; Don’t localize `default` and `types`
+    list_field_invalid_default_type: The List field’s `default` option contains an item whose `{$typeKey}` property is `{$value}`, but it’s not one of the `types`.
+    # Don’t localize `default` and `multiple`
+    invalid_default_multiple: The `default` option must be an array because the `multiple` option is `true`.
+    invalid_default_single: The `default` option must be a single value, not an array, because the `multiple` option is not `true`.
+    # {$key} is a property name of the default object from the configuration; Don’t localize `default`
+    object_field_invalid_default_key: The Object field’s `default` option has the `{$key}` property, but no subfield has that name.
+    # {$typeKey} is the configured type key, `type` by default; Don’t localize `default` and `types`
+    object_field_default_missing_type: The Object field’s `default` option doesn’t have the `{$typeKey}` property, which identifies one of the `types`.
+    # {$typeKey} is the configured type key, `type` by default, and {$value} is its value in the default object; Don’t localize `default` and `types`
+    object_field_invalid_default_type: The `{$typeKey}` property of the Object field’s `default` option is `{$value}`, but it’s not one of the `types`.
+    # Don’t localize `default` and `output_code_only`
+    code_field_invalid_default_object: The Code field’s `default` option must be a string because the `output_code_only` option is `true`.
+    # {$key} is a property name of the default object, {$code} and {$lang} are the configured property names; Don’t localize `default` and `keys`
+    code_field_invalid_default_key: The Code field’s `default` option has the `{$key}` property, but the `keys` option only allows `{$code}` and `{$lang}`.
+    # {$value} is the default value and {$valueType} is the configured value type; Don’t localize `default` and `value_type`
+    number_field_default_not_integer: The Number field’s `default` option is set to `{$value}`, but it must be an integer because the `value_type` option is `{$valueType}`.
+    number_field_default_not_number: The Number field’s `default` option is set to `{$value}`, but it must be a number because the `value_type` option is `{$valueType}`.
     # Don’t localize `fields` and `types`
     object_field_no_subfields: The Object field’s `fields` or `types` option must have at least one item.
     # {$collection}, {$file}, and {$field} are referenced names that could not be resolved
@@ -2144,6 +2278,8 @@ file_type_labels:
   avif: AVIF image
   bmp: Bitmap image
   gif: GIF image
+  heic: HEIC image
+  heif: HEIF image
   ico: Icon
   jpeg: JPEG image
   jpg: JPEG image

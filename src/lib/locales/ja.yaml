@@ -71,6 +71,10 @@ primary: プライマリー
 secondary: セカンダリー
 collection: コレクション
 folder: フォルダー
+# Label of the subfolder list in the asset picker
+folders: フォルダー
+# Menu in a breadcrumb holding the folders that don’t fit
+more_folders: その他のフォルダー
 
 # ==============================================================================
 # Miscellaneous Labels
@@ -127,6 +131,8 @@ sign_in_with_x: '{$service} にログイン'
 # Access token dialog: alternative authentication method
 sign_in_using_access_token: アクセストークンを使用してログイン
 sign_in_using_access_token_description: 以下にトークンを入力してください。リポジトリコンテンツへの読み取り・書き込みアクセスが必要です。
+# Shown after the description above when Editorial Workflow is enabled, which opens and merges pull requests
+sign_in_using_access_token_workflow_note: 編集ワークフローが有効になっているため、プルリクエストへの読み取り・書き込みアクセスも必要です。
 # Inline link text with embedded HTML anchor tag
 # {$service} is the provider name whose user settings page contains the token generator, e.g., GitHub or GitLab
 sign_in_using_access_token_link: <a>{$service} ユーザー設定ページ</a> でトークンを生成できます。
@@ -488,6 +494,8 @@ collection_list: コレクションリスト
 back_to_collection_list: コレクションリストへ戻る
 asset_folder_list: アセットフォルダーリスト
 back_to_asset_folder_list: アセットフォルダーリストへ戻る
+# Back button shown in place of the one above while browsing a subfolder of an asset folder
+back_to_parent_folder: 親フォルダーへ戻る
 
 # ==============================================================================
 # Search
@@ -535,6 +543,56 @@ no_entries_found: エントリーは見つかりませんでした。
 
 # Upload dialog: title and button label
 upload_assets: 新しいアセットをアップロード
+
+# New Folder button and dialog in the Asset Library
+new_folder: 新しいフォルダー
+new_folder_name: フォルダー名
+new_folder_create: 作成
+# {$folder} is the path of the folder the new one will be created in, starting with a slash
+new_folder_description: 新しいフォルダーは「{$folder}」内に作成されます。
+# Validation errors for the new folder name
+new_folder_error:
+  empty: フォルダー名は空白にはできません。
+  invalid: フォルダー名にスラッシュを含めたり、ドットで始めたりすることはできません。
+  duplicate: この名前のフォルダーまたはファイルは既に存在します。
+# Progress and error messages while the folder is being created
+creating_folder: フォルダーを作成中…
+creating_folder_failed: フォルダーを作成できませんでした。
+
+# Menu on a folder in the Asset Library, and the Rename Folder and Delete Folder dialogs
+folder_options: フォルダーオプション
+show_folder_options: フォルダーオプションを表示
+rename_folder: フォルダーの名前を変更
+delete_folder: フォルダーを削除
+# Rename Folder dialog body text
+# {$count} is the number of assets in the folder, which are moved along with it
+enter_new_name_for_folder: |
+  .input {$count :integer}
+  .match $count
+    0   {{ 新しい名前を以下に入力してください。 }}
+    1   {{ 新しい名前を以下に入力してください。フォルダー内のアセットも一緒に移動され、それを使用しているエントリーも更新されます。 }}
+    *   {{ 新しい名前を以下に入力してください。フォルダー内の {$count} 個のアセットも一緒に移動され、それらを使用しているエントリーも更新されます。 }}
+# クラウドストレージサービスのフォルダー名変更ダイアログの本文。ファイルは直接リンクされているため、移動すると
+# URL が変わり、エントリーは更新されない
+enter_new_name_for_external_folder: |
+  .input {$count :integer}
+  .match $count
+    0   {{ 新しい名前を以下に入力してください。 }}
+    1   {{ 新しい名前を以下に入力してください。フォルダー内のファイルも一緒に移動され、URL が変わるため、それを使用しているエントリーは更新してください。 }}
+    *   {{ 新しい名前を以下に入力してください。フォルダー内の {$count} 個のファイルも一緒に移動され、URL が変わるため、それらを使用しているエントリーは更新してください。 }}
+# Delete Folder confirmation
+# {$name} is the folder name and {$count} is the number of assets in the folder
+confirm_deleting_folder: |
+  .input {$count :integer}
+  .match $count
+    0   {{ 空の「{$name}」フォルダーを削除してもよろしいですか？ }}
+    1   {{ 「{$name}」フォルダーとその中のアセットを削除してもよろしいですか？ }}
+    *   {{ 「{$name}」フォルダーとその中の {$count} 個のアセットを削除してもよろしいですか？ }}
+# Progress and error messages while the folder is being renamed or deleted
+renaming_folder: フォルダーの名前を変更中…
+renaming_folder_failed: フォルダーの名前を変更できませんでした。
+deleting_folder: フォルダーを削除中…
+deleting_folder_failed: フォルダーを削除できませんでした。
 
 # Edit options menu: button and item labels
 edit_options: 編集オプション
@@ -917,6 +975,18 @@ assets_deleted: |
   .match $count
     1   {{ アセットが削除されました。 }}
     *   {{ {$count} 個のアセットが削除されました。 }}
+folder_created: フォルダーが作成されました。
+# Folder info panel in the Asset Library sidebar
+folder_path: フォルダーのパス
+folder_contents: 内容
+# {$count} is the number of subfolders in the folder
+x_folders: |
+  .input {$count :integer}
+  .match $count
+    0   {{ フォルダーなし }}
+    *   {{ {$count} 個のフォルダー }}
+folder_renamed: フォルダーの名前が変更されました。
+folder_deleted: フォルダーが削除されました。
 
 # ==============================================================================
 # Content Editor
@@ -1206,6 +1276,32 @@ saving_entry:
   error:
     title: エラー
     description: エントリーを保存中に問題が発生しました。後で再度お試しください。
+
+# Dialog shown when saving the entry would overwrite a change someone else has made in the
+# repository since the entry was opened in the editor
+save_conflict:
+  title: 他のユーザーがエントリーを変更しました
+  # `{$name}` is the other person’s name, `{$date}` when they made the change
+  modified_by: あなたがこのエントリーを開いた後、{$date} に {$name} がこのエントリーを変更しました。
+  # Shown instead of `modified_by` when the other person isn’t known
+  modified: あなたがこのエントリーを開いた後、リポジトリ上でこのエントリーが変更されました。
+  deleted: あなたがこのエントリーを開いた後、リポジトリからこのエントリーが削除されました。
+  # Follows `modified_by` or `modified`
+  overwrite_warning: 今保存すると、その変更は失われます。
+  # Follows `deleted`
+  recreate_warning: 今保存すると、エントリーが再作成されます。
+  # OK button label
+  save_anyway: このまま保存
+  # Error shown when the repository was updated between the check above and the commit itself
+  branch_moved: 保存中に他のユーザーがリポジトリを更新しました。再度お試しください。
+
+# Notice shown in the entry editor when someone else has changed or deleted the entry in the
+# repository while the user has it open. The change itself is described with the `save_conflict`
+# strings above
+remote_change:
+  reload_entry: エントリーを再読み込み
+  # Confirmation shown before reloading when the user has unsaved changes
+  confirm_reloading_entry: エントリーを再読み込みしてもよろしいですか？未保存の変更は失われます。
 
 # ==============================================================================
 # Asset Editor
@@ -1572,6 +1668,8 @@ config:
     invalid_filter_no_condition: '`filter` オプションには、エントリーを照合するための `value` または `pattern` オプションが必要です。'
     # {$option} is an option name such as `slug` or `summary` and {$name} is the field name or template tag from the configuration
     option_field_not_found: '`{$option}` オプションで `{$name}` が参照されていますが、そのフィールドは定義されていません。'
+    # {$name} is the field name from the configuration and {$widget} is its field type; Don’t localize `thumbnail`
+    thumbnail_field_not_media: '`thumbnail` オプションに `{$name}` が指定されていますが、`{$widget}` フィールドではなく Image または File フィールドでなければなりません。'
     # {$option} is an option name such as `pattern` or `filter` and {$pattern} is the configured pattern
     invalid_regex: '`{$option}` オプションに無効な正規表現 `{$pattern}` が含まれているため、無視されます。'
     # {$name} is the group name from the configuration; Don’t localize `reorder`, `group` and `view_groups`
@@ -1594,6 +1692,10 @@ config:
     # {$name} is the invalid or duplicate view filter name
     invalid_view_filter_name: ビューフィルター名 `{$name}` は無効です。特殊文字を含めることはできません。
     duplicate_view_filter_name: ビューフィルター名は一意である必要がありますが、`{$name}` が複数回使用されています。
+    # {$name} is the default view group name from the configuration; Don’t localize `default` and `view_groups`
+    invalid_view_group_default: '`view_groups` の `default` オプションに `{$name}` が指定されていますが、その名前のビューグループはありません。'
+    # {$name} is the default view filter name from the configuration; Don’t localize `default` and `view_filters`
+    invalid_view_filter_default: '`view_filters` の `default` オプションに `{$name}` が指定されていますが、その名前のビューフィルターはありません。'
     # {$count} is the 1-based collection index in the configuration array; Don’t localize `name`
     missing_collection_name: コレクション {$count} には `name` オプションを空でない文字列として定義する必要があります。
     # {$name} is the invalid or duplicate collection name
@@ -1608,6 +1710,11 @@ config:
     collection_no_fields: コレクションには少なくとも 1 つのフィールドを定義する必要があります。
     # Don’t localize `fields`
     collection_file_no_fields: コレクションファイルには少なくとも 1 つのフィールドを定義する必要があります。
+    # Don’t localize `i18n`, `locale` and `folder`
+    collection_folder_i18n_required: コレクションには、`folder` パスで `locale` プレースホルダーを使用する場合、`i18n` オプションを定義する必要があります。
+    # {$folder} is the invalid folder path; Don’t localize `locale`, `folder` and the example path. The
+    # curly brackets in the example are escaped with backslashes for MessageFormat 2
+    invalid_collection_folder_locale: '`folder` パス `{$folder}` は無効です。`locale` プレースホルダーは `content/\{\{locale\}\}/posts` のように、フォルダー名全体として一度だけ使用できます。'
     # Don’t localize `i18n`, `locale` and `file`
     collection_file_i18n_required: コレクションファイルには、`file` パスで `locale` プレースホルダーを使用する場合、`i18n` オプションを定義する必要があります。
     # {$count} is the 1-based field index in the current fields array; Don’t localize `name`
@@ -1645,6 +1752,32 @@ config:
     select_field_invalid_default: Select フィールドの `default` オプションに `{$value}` が指定されていますが、`options` に含まれていません。
     # Don’t localize `fields` and `types`
     list_field_no_subfields: List フィールドの `fields` または `types` オプションには少なくとも 1 つの項目が必要です。単純な値のリストにする場合は、オプションを省略してください。
+    # Don’t localize `default`, `fields` and `types`
+    list_field_invalid_default_object: List フィールドの `default` オプションにオブジェクトが含まれていますが、フィールドに `fields` も `types` もないため、各項目は単純な値でなければなりません。
+    # {$value} is the default item from the configuration; Don’t localize `default`, `fields` and `types`
+    list_field_invalid_default_item: List フィールドの `default` オプションに `{$value}` が含まれていますが、フィールドに `fields` または `types` があるため、各項目はオブジェクトでなければなりません。
+    # {$key} is a property name of the default item from the configuration; Don’t localize `default`
+    list_field_invalid_default_key: List フィールドの `default` オプションの項目に `{$key}` プロパティが含まれていますが、その名前のサブフィールドはありません。
+    # {$typeKey} is the configured type key, `type` by default; Don’t localize `default` and `types`
+    list_field_default_missing_type: List フィールドの `default` オプションの項目に、`types` のいずれかを識別する `{$typeKey}` プロパティがありません。
+    # {$typeKey} is the configured type key, `type` by default, and {$value} is its value in the default item; Don’t localize `default` and `types`
+    list_field_invalid_default_type: List フィールドの `default` オプションの項目の `{$typeKey}` プロパティが `{$value}` ですが、`types` に含まれていません。
+    # Don’t localize `default` and `multiple`
+    invalid_default_multiple: '`multiple` オプションが `true` のため、`default` オプションは配列でなければなりません。'
+    invalid_default_single: '`multiple` オプションが `true` ではないため、`default` オプションは配列ではなく単一の値でなければなりません。'
+    # {$key} is a property name of the default object from the configuration; Don’t localize `default`
+    object_field_invalid_default_key: Object フィールドの `default` オプションに `{$key}` プロパティが含まれていますが、その名前のサブフィールドはありません。
+    # {$typeKey} is the configured type key, `type` by default; Don’t localize `default` and `types`
+    object_field_default_missing_type: Object フィールドの `default` オプションに、`types` のいずれかを識別する `{$typeKey}` プロパティがありません。
+    # {$typeKey} is the configured type key, `type` by default, and {$value} is its value in the default object; Don’t localize `default` and `types`
+    object_field_invalid_default_type: Object フィールドの `default` オプションの `{$typeKey}` プロパティが `{$value}` ですが、`types` に含まれていません。
+    # Don’t localize `default` and `output_code_only`
+    code_field_invalid_default_object: '`output_code_only` オプションが `true` のため、Code フィールドの `default` オプションは文字列でなければなりません。'
+    # {$key} is a property name of the default object, {$code} and {$lang} are the configured property names; Don’t localize `default` and `keys`
+    code_field_invalid_default_key: Code フィールドの `default` オプションに `{$key}` プロパティが含まれていますが、`keys` オプションで許可されているのは `{$code}` と `{$lang}` のみです。
+    # {$value} is the default value and {$valueType} is the configured value type; Don’t localize `default` and `value_type`
+    number_field_default_not_integer: Number フィールドの `default` オプションに `{$value}` が指定されていますが、`value_type` オプションが `{$valueType}` のため、整数でなければなりません。
+    number_field_default_not_number: Number フィールドの `default` オプションに `{$value}` が指定されていますが、`value_type` オプションが `{$valueType}` のため、数値でなければなりません。
     # Don’t localize `fields` and `types`
     object_field_no_subfields: Object フィールドの `fields` または `types` オプションには少なくとも 1 つの項目が必要です。
     # {$collection}, {$file}, and {$field} are referenced names that could not be resolved
@@ -2051,6 +2184,8 @@ file_type_labels:
   avif: AVIF 画像
   bmp: Bitmap 画像
   gif: GIF 画像
+  heic: HEIC 画像
+  heif: HEIF 画像
   ico: アイコン
   jpeg: JPEG 画像
   jpg: JPEG 画像

@@ -105,7 +105,7 @@ const getFilterCondition = (collection) => {
  * @param {Entry} entry Entry.
  * @returns {boolean} Result.
  * @see https://decapcms.org/docs/collection-folder/#filtered-folder-collections
- * @see https://sveltiacms.app/en/docs/collections/entries#filtering-entries
+ * @see https://sveltiacms.app/en/docs/collections/entries/listings#filtering-entries
  */
 export const matchesCollectionFilter = (collection, entry) => {
   const condition = getFilterCondition(collection);
@@ -119,19 +119,24 @@ export const matchesCollectionFilter = (collection, entry) => {
 
   const { field, pattern, values } = condition;
 
-  const value =
-    getPropertyValue({
-      entry,
-      locale: collection._i18n.defaultLocale,
-      collectionName: collection.name,
-      key: field,
-    }) ?? null;
+  const value = getPropertyValue({
+    entry,
+    locale: collection._i18n.defaultLocale,
+    collectionName: collection.name,
+    key: field,
+  });
+
+  // A multi-value field, such as a List field or a Relation field with `multiple: true`, yields an
+  // array of its items, and the entry passes when any of them does. An entry without a value only
+  // passes when `null` is one of the filter values, which is how it’s stored in YAML
+  // @see https://github.com/sveltia/sveltia-cms/issues/997
+  const items = Array.isArray(value) ? value : [value ?? null];
 
   if (pattern) {
-    return pattern.test(value);
+    return items.some((item) => pattern.test(item));
   }
 
-  return values.includes(value);
+  return items.some((item) => values.includes(item));
 };
 
 /**
@@ -228,7 +233,7 @@ export const _resetEntriesByCollectionCache = () => {
  * @param {string} collectionName Collection name.
  * @returns {Entry[]} Entries.
  * @see https://decapcms.org/docs/collection-folder/#filtered-folder-collections
- * @see https://sveltiacms.app/en/docs/collections/entries#filtering-entries
+ * @see https://sveltiacms.app/en/docs/collections/entries/listings#filtering-entries
  */
 export const getEntriesByCollection = (collectionName) => {
   const entrySource = allEntries.current;
