@@ -46,11 +46,10 @@
     );
 
     return matchingEntry
-      ? getEntrySummary(collection, matchingEntry,
-      {
-        useTemplate: true, allowMarkdown: true,
-      }
-      ) || slug
+      ? getEntrySummary(collection, matchingEntry, {
+          useTemplate: true,
+          allowMarkdown: true,
+        }) || slug
       : slug;
   };
 </script>
