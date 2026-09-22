@@ -11,11 +11,12 @@
   import { focusedSubfolder, selectedSubfolderPath } from '$lib/services/assets/subfolders';
   import { assetGroups, listedAssets, listedSubfolders } from '$lib/services/assets/view';
   import { currentView } from '$lib/services/assets/view/settings';
+  import { getCollection } from '$lib/services/contents/collection';
+  import { getEntriesByCollection } from '$lib/services/contents/collection/entries';
+  import { getEntrySummary } from '$lib/services/contents/entry/summary';
   import { openAuthoring } from '$lib/services/workflow/open-authoring';
 
-  /**
-   * @import { Asset } from '$lib/types/private';
-   */
+  /** @import { Asset, InternalEntryCollection } from '$lib/types/private'; */
 
   const viewType = $derived(currentView.current.type);
   const folder = $derived(targetAssetFolder.current);
@@ -24,6 +25,34 @@
   // through review, so it’s not something an Open Authoring contributor can do. An asset attached
   // to an entry is committed with that entry, so it’s unaffected
   const uploadDisabled = $derived(openAuthoring.current || !canCreateAsset(folder));
+  const collection = $derived(
+    folder?.collectionName && getCollection(folder.collectionName)?._type === 'entry'
+      ? /** @type {InternalEntryCollection} */ (getCollection(folder.collectionName))
+      : undefined,
+  );
+
+  /**
+   * Get an entry title for a collection folder, falling back to the folder’s slug.
+   * @param {string} slug Entry slug.
+   * @returns {string} Display label.
+   */
+  const getSubfolderLabel = (slug) => {
+    if (!collection) {
+      return slug;
+    }
+
+    const matchingEntry = getEntriesByCollection(collection.name).find(
+      (entry) => entry.slug === slug,
+    );
+
+    return matchingEntry
+      ? getEntrySummary(collection, matchingEntry,
+      {
+        useTemplate: true, allowMarkdown: true,
+      }
+      ) || slug
+      : slug;
+  };
 </script>
 
 <AssetListContainer
@@ -44,7 +73,11 @@
 >
   {#snippet subfolders()}
     {#each listedSubfolders.current as subfolder, index (subfolder.path)}
-      <SubfolderListItem {subfolder} rowIndex={index} {viewType} />
+      <SubfolderListItem
+        subfolder={{ ...subfolder, name: getSubfolderLabel(subfolder.name) }}
+        rowIndex={index}
+        {viewType}
+      />
     {/each}
   {/snippet}
   {#snippet renderItem(/** @type {Asset} */ asset)}
