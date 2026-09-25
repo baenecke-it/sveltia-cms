@@ -1,106 +1,79 @@
 <script>
   import { _ } from '@sveltia/i18n';
   import { Icon, SelectButton, SelectButtonGroup } from '@sveltia/ui';
-  import { untrack } from 'svelte';
 
-  import BacklinksPanel from '$lib/components/contents/details/sidebar/panels/backlinks-panel.svelte';
-  import HistoryPanel from '$lib/components/contents/details/sidebar/panels/history-panel.svelte';
-  import ValidationPanel from '$lib/components/contents/details/sidebar/panels/validation-panel.svelte';
-  import { backend } from '$lib/services/backends';
+  import SidebarPanel from '$lib/components/contents/details/sidebar/sidebar-panel.svelte';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
   import { entryEditorSettings } from '$lib/services/contents/editor/settings';
-  import { getReferencingRelationFields } from '$lib/services/contents/entry/relations';
-
-  /**
-   * @import { Component } from 'svelte';
-   */
-
-  /**
-   * @typedef {object} SidebarTab
-   * @property {string} key Unique key of the tab.
-   * @property {string} label Tab label.
-   * @property {string} icon Material icon name.
-   * @property {boolean} disabled Whether the tab is disabled.
-   * @property {Component} panel The panel component to render when the tab is active.
-   */
+  import { getSidebarPanels } from '$lib/services/contents/editor/sidebar';
+  import { needsSlugInput } from '$lib/services/contents/editor/slug';
+  import { watch } from '$lib/services/utils/state.svelte';
 
   const entryDraft = getEntryDraftContext();
 
-  /** Whether any Relation field anywhere in the site can reference the current entry. */
-  const isReferenced = $derived.by(() => {
-    const collectionName = entryDraft.current?.collectionName;
+  const panels = $derived(getSidebarPanels(entryDraft.current));
+  // The panel is remembered in the settings, which can also be updated from elsewhere, e.g. the
+  // Show Errors button on the validation toast
+  const savedKey = $derived(entryEditorSettings.current?.sidebarPanel ?? null);
+  /**
+   * Panel opened for the current draft without being remembered: the Slug panel for a new entry
+   * whose slug has to be typed in, so the field isn’t missed. `null` shows the remembered panel.
+   * @type {string | null}
+   */
+  let draftPanelKey = $state(null);
+  /** @type {string | undefined} */
+  let lastDraftId;
 
-    return (
-      !!collectionName &&
-      getReferencingRelationFields({ collectionName, fileName: entryDraft.current?.fileName })
-        .length > 0
-    );
-  });
-
-  /** @type {SidebarTab[]} */
-  const tabs = $derived([
-    {
-      key: 'validation',
-      label: _('entry_sidebar.validation.title'),
-      icon: 'check_circle',
-      disabled: false,
-      panel: ValidationPanel,
-    },
-    {
-      key: 'history',
-      label: _('entry_sidebar.history.title'),
-      icon: 'history',
-      disabled: !backend.current?.isGit || !!entryDraft.current?.isNew,
-      panel: HistoryPanel,
-    },
-    {
-      key: 'backlinks',
-      label: _('entry_sidebar.backlinks.title'),
-      icon: 'article_shortcut',
-      disabled: !isReferenced,
-      panel: BacklinksPanel,
-    },
-  ]);
-
-  /** @type {string | null} */
-  let activeTab = $state(entryEditorSettings.current?.sidebarPanel ?? null);
-
-  /** The displayed tab, falling back to Validation if the saved tab is unavailable. */
-  const EffectiveTab = $derived(
-    activeTab ? (tabs.find((t) => t.key === activeTab) ?? tabs[0]) : null,
+  /** The displayed panel, falling back to Validation if the saved panel is unknown. */
+  const activeKey = $derived(
+    draftPanelKey ??
+      (savedKey ? (panels.find((p) => p.key === savedKey)?.key ?? 'validation') : null),
   );
 
-  $effect(() => {
-    // Only track `activeTab`, not the settings being updated
-    const settings = untrack(() => entryEditorSettings.current);
+  watch(
+    () => [entryDraft.current?.id, savedKey],
+    () => {
+      const draft = entryDraft.current;
 
-    entryEditorSettings.current = { ...settings, sidebarPanel: activeTab };
-  });
+      if (draft?.id !== lastDraftId) {
+        lastDraftId = draft?.id;
+        draftPanelKey = needsSlugInput(draft) ? 'slug' : null;
+      } else {
+        // A panel opened elsewhere, e.g. with the Show Errors button, takes over
+        draftPanelKey = null;
+      }
+    },
+  );
 </script>
 
 <div role="none" class="sidebar">
   <SelectButtonGroup
     class="tabs"
     ariaLabel={_('entry_sidebar.sidebar_panels')}
-    aria-controls={EffectiveTab ? 'entry-sidebar-content' : undefined}
+    aria-controls={activeKey ? 'entry-sidebar-content' : undefined}
   >
-    {#each tabs as { key, label, icon, disabled } (key)}
+    {#each panels as { key, icon, disabled } (key)}
       <SelectButton
         iconic
-        aria-label={label}
-        selected={EffectiveTab?.key === key}
+        aria-label={_(`entry_sidebar.${key}.title`)}
+        selected={activeKey === key}
         {disabled}
         onclick={() => {
-          activeTab = activeTab === key ? null : key;
+          // Clicking the active tab closes the panel. Read it before the panel opened for the
+          // draft is dismissed, as that changes the active tab
+          const sidebarPanel = activeKey === key ? null : key;
+
+          draftPanelKey = null;
+          entryEditorSettings.current = { ...entryEditorSettings.current, sidebarPanel };
         }}
       >
         <Icon name={icon} />
       </SelectButton>
     {/each}
   </SelectButtonGroup>
-  {#if EffectiveTab}
+  {#if activeKey}
     <div role="none" class="content" id="entry-sidebar-content">
-      <EffectiveTab.panel />
+      <SidebarPanel key={activeKey} />
     </div>
   {/if}
 </div>

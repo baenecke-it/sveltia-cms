@@ -90,6 +90,12 @@ vi.mock('$lib/services/contents/collection', () => ({
 vi.mock('$lib/services/contents/collection/entries', () => ({
   getEntriesByCollection: vi.fn(() => []),
   selectedEntries: _selectedEntries,
+  // The real one drops the collection’s index file, which it tells by the entry’s path; here a
+  // test marks that entry with `_isIndexFile` instead
+  countCollectionEntries: vi.fn(
+    (_collectionName, entries) =>
+      entries.filter((/** @type {any} */ { _isIndexFile }) => !_isIndexFile).length,
+  ),
 }));
 
 vi.mock('$lib/services/contents/collection/files', () => ({
@@ -236,6 +242,69 @@ describe('collection/view/index', () => {
 
     // Should handle empty entries gracefully
     expect(entryGroups).toBeDefined();
+  });
+
+  test('entryGroups only reruns the steps whose view conditions have changed', async () => {
+    /** @type {any} */
+    const mockEntries = [
+      { id: '1', slug: 'post-1', locales: {}, sha: 'abc', collectionName: 'posts' },
+      { id: '2', slug: 'post-2', locales: {}, sha: 'def', collectionName: 'posts' },
+    ];
+
+    vi.mocked(getEntriesByCollection).mockReturnValue(mockEntries);
+    vi.mocked(getCollectionFilesByEntry).mockReturnValue([]);
+    vi.mocked(sortEntries).mockImplementation((entries) => [...entries]);
+    vi.mocked(filterEntries).mockImplementation((entries) => [...entries]);
+    vi.mocked(groupEntries).mockImplementation((entries) => [{ name: '*', entries }]);
+
+    _allEntries.current = mockEntries;
+    _selectedCollection.current = /** @type {any} */ ({ name: 'posts', _type: 'entry' });
+    await wait();
+
+    /** @type {any} */
+    const view = {
+      type: 'list',
+      sort: { key: 'title', order: 'ascending' },
+      filters: [{ field: 'status', pattern: 'published' }],
+      group: { field: 'category' },
+    };
+
+    currentView.current = view;
+
+    const groups = entryGroups.current;
+
+    expect(sortEntries).toHaveBeenCalledTimes(1);
+    expect(filterEntries).toHaveBeenCalledTimes(1);
+    expect(groupEntries).toHaveBeenCalledTimes(1);
+
+    // Switching to the grid view and collapsing a group leave the conditions as they were, even
+    // though the view is a new object with copies of them
+    currentView.current = {
+      ...structuredClone(view),
+      type: 'grid',
+      collapsedGroups: { category: ['news'] },
+    };
+
+    expect(entryGroups.current).toBe(groups);
+    expect(sortEntries).toHaveBeenCalledTimes(1);
+    expect(filterEntries).toHaveBeenCalledTimes(1);
+    expect(groupEntries).toHaveBeenCalledTimes(1);
+
+    // A new filter doesn’t sort the entries again
+    currentView.current = { ...view, filters: [{ field: 'status', pattern: 'draft' }] };
+
+    expect(entryGroups.current).not.toBe(groups);
+    expect(sortEntries).toHaveBeenCalledTimes(1);
+    expect(filterEntries).toHaveBeenCalledTimes(2);
+    expect(groupEntries).toHaveBeenCalledTimes(2);
+
+    // A new sort order reruns every step
+    currentView.current = { ...view, sort: { key: 'title', order: 'descending' } };
+    void entryGroups.current;
+
+    expect(sortEntries).toHaveBeenCalledTimes(2);
+    expect(filterEntries).toHaveBeenCalledTimes(3);
+    expect(groupEntries).toHaveBeenCalledTimes(3);
   });
 
   test('entryGroups skips processing for file/singleton collections', async () => {
@@ -1130,6 +1199,53 @@ describe('collection/view/index', () => {
       // The root folder only lists two of the three entries
       expect(listedEntries.current).toHaveLength(2);
       expect(collectionState.current.remaining).toBe(7);
+    });
+
+    test('quota leaves out the collection’s index file', async () => {
+      const mockEntries = /** @type {any[]} */ ([
+        { id: '1', slug: '_index', _isIndexFile: true },
+        { id: '2', slug: 'a' },
+      ]);
+
+      vi.mocked(getEntriesByCollection).mockReturnValue(mockEntries);
+      _allEntries.current = mockEntries;
+      await wait();
+      _selectedCollection.current = /** @type {any} */ ({
+        name: 'posts',
+        _type: 'entry',
+        create: true,
+        index_file: true,
+        limit: 2,
+      });
+      await wait();
+
+      // Only `a` takes up a slot, so one is left rather than none
+      // @see https://github.com/sveltia/sveltia-cms/issues/1005
+      expect(collectionState.current.remaining).toBe(1);
+      expect(collectionState.current.creationDisabled).toBe(false);
+    });
+
+    test('quota leaves out the index file of a nested collection', async () => {
+      const mockEntries = /** @type {any[]} */ ([
+        { id: '1', slug: '_index', subPath: '_index', _isIndexFile: true },
+        { id: '2', slug: 'docs/_index', subPath: 'docs/_index' },
+        { id: '3', slug: 'docs/intro/_index', subPath: 'docs/intro/_index' },
+      ]);
+
+      vi.mocked(getEntriesByCollection).mockReturnValue(mockEntries);
+      _allEntries.current = mockEntries;
+      await wait();
+      _selectedCollection.current = /** @type {any} */ ({
+        name: 'pages',
+        _type: 'entry',
+        folder: 'content/pages',
+        nested: {},
+        create: true,
+        index_file: true,
+        limit: 10,
+      });
+
+      expect(collectionState.current.remaining).toBe(8);
     });
 
     test('creationDisabled is false when canCreate is true and entries are under quota', async () => {

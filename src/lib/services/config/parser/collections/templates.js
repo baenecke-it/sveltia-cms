@@ -1,5 +1,6 @@
 import { DATE_TIME_FIELDS, UUID_TYPES } from '$lib/services/common/template/constants';
 import { checkFieldReferences } from '$lib/services/config/parser/utils/references';
+import { getConfiguredSlugTemplate } from '$lib/services/contents/collection/slug';
 
 /**
  * @import { ConfigParserCollectors, ConfigParserContext } from '$lib/types/private';
@@ -9,7 +10,7 @@ import { checkFieldReferences } from '$lib/services/config/parser/utils/referenc
 /**
  * Template tags a slug or path template can use that don’t refer to a field: the date and time of
  * creation, a random ID, and the slug of the entry itself, which `{{slug}}` derives from the
- * identifier field and `{{fields._slug}}` reads from the slug editor.
+ * identifier field and the legacy `{{fields._slug}}` reads from the slug editor.
  * @type {string[]}
  */
 const SLUG_SPECIAL_TAGS = [
@@ -53,7 +54,7 @@ const SUMMARY_SPECIAL_TAGS = [
  * @param {ConfigParserCollectors} args.collectors Collectors.
  */
 export const checkCollectionTemplates = ({ collection, context, collectors }) => {
-  const { fields, slug, path, summary, thumbnail } = collection;
+  const { fields, path, summary, thumbnail } = collection;
 
   // A collection without fields is reported separately
   if (!fields?.length) {
@@ -65,7 +66,7 @@ export const checkCollectionTemplates = ({ collection, context, collectors }) =>
   checkFieldReferences({
     ...args,
     option: 'slug',
-    template: slug,
+    template: getConfiguredSlugTemplate(collection),
     specialTags: SLUG_SPECIAL_TAGS,
   });
 
@@ -86,6 +87,14 @@ export const checkCollectionTemplates = ({ collection, context, collectors }) =>
   // The `thumbnail` option lists key paths rather than a template; a boolean turns the thumbnails
   // on or off
   if (typeof thumbnail === 'string' || Array.isArray(thumbnail)) {
-    checkFieldReferences({ ...args, option: 'thumbnail', keyPaths: thumbnail });
+    /** @type {any[]} */ (Array.isArray(thumbnail) ? thumbnail : [thumbnail]).forEach((item) => {
+      // A path starting with a slash is a template like `preview_path`, whose bare tags may be
+      // special ones such as `{{slug}}`, so only the tags with the `fields.` prefix are checked
+      if (typeof item === 'string' && item.startsWith('/')) {
+        checkFieldReferences({ ...args, option: 'thumbnail', template: item, prefixedOnly: true });
+      } else {
+        checkFieldReferences({ ...args, option: 'thumbnail', keyPaths: item });
+      }
+    });
   }
 };

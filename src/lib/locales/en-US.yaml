@@ -211,6 +211,10 @@ sign_in: Sign In
 sign_in_with_mobile: Sign In with Mobile
 # Instructions shown in the mobile sign-in dialog for passwordless authentication
 sign_in_with_mobile_instruction: Scan the QR code below with your phone or tablet for passwordless sign-in. Your settings will be automatically copied.
+# Confirmation dialog shown when the CMS is opened with a sign-in link from the mobile sign-in
+# QR code. {$account} is the account name, {$service} is the Git service name, e.g. GitHub
+sign_in_with_link: Sign In with Link
+sign_in_with_link_confirmation: This link signs you in as {$account} on {$service} and copies the settings from the device it was created on. Continue only if you created the link yourself.
 
 # Account menu: user status and repository mode indicators
 # Shown at the top of the account dropdown menu
@@ -950,6 +954,8 @@ entry_validation_errors: |
   .match $count
     one {{ One field has an error. Please correct it to save the entry. }}
     *   {{ {$count} fields have errors. Please correct them to save the entry. }}
+# Button on the validation error toast that opens the Validation panel listing the errors
+show_errors: Show Errors
 
 # ==============================================================================
 # Success Notifications
@@ -1333,6 +1339,12 @@ entry_sidebar:
     # Button in the panel header that validates the entry on demand
     validate: Validate
 
+  # Slug panel: shows the entry slug and lets the user edit it
+  slug:
+    title: Slug
+    generated_on_save: The slug is generated from the entry’s content when it’s saved. Any date and time in it will be those of the save.
+    unavailable: This entry doesn’t have a slug.
+
   # History panel: shows entry commit history
   history:
     title: History
@@ -1497,6 +1509,7 @@ assets_dialog:
   title:
     file: Select File
     image: Select Image
+    folder: Select Folder
 
   # Search input labels
   search_for_file: Search for Files
@@ -1504,6 +1517,16 @@ assets_dialog:
 
   # Locations panel aria-label
   locations: Locations
+
+  # Folder selection mode for a File field with the `select_folder` option. {$path} is the public
+  # path of the folder to be selected, and {$count} is the number of folders selected
+  selected_folder: 'Selected folder: {$path}'
+  selected_folders: |
+    .input {$count :integer}
+    .match $count
+      one {{ {$count} folder selected }}
+      *   {{ {$count} folders selected }}
+  no_subfolders: This folder has no subfolders.
 
   # Asset folder options
   folder:
@@ -1925,6 +1948,8 @@ config:
     preview_path_field_not_found: The `preview_path` option refers to `{$name}`, but no such field is defined in the collection, so the preview link won’t be shown.
     # {$name} is the default identifier field name; Don’t localize `identifier_field` and `slug`
     missing_identifier_field: The collection has no `{$name}` field to name new entries with, so each new entry gets a random slug. Add a `{$name}` field, or set the `identifier_field` or `slug` option.
+    # Don’t localize `slug`, `i18n`, `multiple_files`, `multiple_folders` and `multiple_root_folders`
+    slug_i18n_ineffective: The `i18n` option of `slug` has no effect, because the collection doesn’t use the `multiple_files`, `multiple_folders` or `multiple_root_folders` i18n structure, where each locale has a file of its own.
     # Don’t localize `i18n`
     i18n_not_configured: The `i18n` option is enabled, but i18n is not configured at the top level of the configuration or in the collection, so the option has no effect.
     # {$option} is an option path from the configuration, such as `filter.Regulation`

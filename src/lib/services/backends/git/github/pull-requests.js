@@ -1,5 +1,6 @@
 import { fetchBlobText } from '$lib/services/backends/git/github/files';
 import { getWorkflowRepository } from '$lib/services/backends/git/github/fork';
+import { fetchAliasedBatch } from '$lib/services/backends/git/github/graphql';
 import { repository } from '$lib/services/backends/git/github/repository';
 import { fetchAPI, fetchGraphQL } from '$lib/services/backends/git/shared/api';
 import { runConcurrently } from '$lib/services/backends/git/shared/concurrency';
@@ -28,6 +29,37 @@ export const MAX_ITEMS = {
 };
 
 /**
+ * Convert the changed files of a pull request, as listed by the GraphQL API, to workflow files.
+ * @param {{ path: string, changeType: string }[]} nodes File nodes.
+ * @returns {WorkflowFile[]} Files.
+ */
+export const parseFileNodes = (nodes) =>
+  nodes.map(({ path, changeType }) => ({
+    path,
+    sha: '',
+    size: 0,
+    deleted: changeType === 'DELETED',
+    // The previous path of a renamed file isn’t available here; it’s filled in by
+    // {@link fetchPullRequestFileList}
+    renamed: changeType === 'RENAMED',
+  }));
+
+/**
+ * Convert the changed files of a pull request or comparison, as listed by the REST API, to workflow
+ * files.
+ * @param {Record<string, any>[]} files Files.
+ * @returns {WorkflowFile[]} Files.
+ */
+export const parseRestFiles = (files) =>
+  files.map(({ filename, status, previous_filename: previousPath }) => ({
+    path: filename,
+    sha: '',
+    size: 0,
+    deleted: status === 'removed',
+    previousPath,
+  }));
+
+/**
  * Re-fetch the list of files changed in the given pull request with the REST API, which is the only
  * one that reports the path a renamed file had before. The GraphQL API used by
  * `fetchPullRequests()` has a `RENAMED` change type but no matching previous-path field, so
@@ -45,14 +77,14 @@ export const fetchPullRequestFileList = async (pullRequest) => {
     )
   );
 
-  pullRequest.files = files.map(({ filename, status, previous_filename: previousPath }) => ({
-    path: filename,
-    sha: '',
-    size: 0,
-    deleted: status === 'removed',
-    previousPath,
-  }));
+  pullRequest.files = parseRestFiles(files);
 };
+
+/**
+ * Number of changed files whose content is requested per GraphQL query. With up to 100 files in
+ * each of up to 100 pull requests, asking for all of them at once could exceed the API’s limits.
+ */
+const FILES_CHUNK_SIZE = 100;
 
 /**
  * Fetch the content of the files changed in the given pull requests, and populate the
@@ -76,44 +108,38 @@ export const fetchPullRequestFiles = async (pullRequests) => {
     return;
   }
 
-  const innerQuery = targets
-    .map(
-      ({ pullRequest, file }, index) => `
-        file_${index}: object(expression: ${JSON.stringify(`${pullRequest.branch}:${file.path}`)}) {
-          ... on Blob {
-            oid
-            byteSize
-            isBinary
-            isTruncated
-            text
-          }
-        }
-      `,
-    )
-    .join('');
-
   // A workflow branch lives in the contributor’s fork with Open Authoring, so that’s where the
   // blobs have to be read from
   const workflowRepository = getWorkflowRepository();
 
-  const { repository: result } = /** @type {{ repository: Record<string, any> }} */ (
-    await fetchGraphQL(
-      `
-        query($owner: String!, $repo: String!) {
-          repository(owner: $owner, name: $repo) {
-            ${innerQuery}
-          }
+  const blobs = await fetchAliasedBatch({
+    items: targets,
+    alias: 'file',
+    /**
+     * Build the field selection for a changed file on its pull request branch.
+     * @param {{ pullRequest: WorkflowPullRequest, file: WorkflowFile }} target Target.
+     * @returns {string} Field selection.
+     */
+    getFragment: ({ pullRequest, file }) => `
+      object(expression: ${JSON.stringify(`${pullRequest.branch}:${file.path}`)}) {
+        ... on Blob {
+          oid
+          byteSize
+          isBinary
+          isTruncated
+          text
         }
-      `,
-      workflowRepository,
-    )
-  );
+      }
+    `,
+    chunkSize: FILES_CHUNK_SIZE,
+    variables: workflowRepository,
+  });
 
   /** @type {WorkflowFile[]} */
   const truncatedFiles = [];
 
   targets.forEach(({ file }, index) => {
-    const blob = result?.[`file_${index}`];
+    const blob = blobs[index];
 
     if (blob) {
       Object.assign(file, {

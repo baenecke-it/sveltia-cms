@@ -16,7 +16,8 @@ import { forkedRepository } from '$lib/services/workflow/open-authoring';
 vi.mock('$lib/services/backends/git/github/fork');
 vi.mock('$lib/services/backends/git/github/repository');
 vi.mock('$lib/services/backends/git/shared/api');
-vi.mock('$lib/services/backends/git/shared/commits', () => ({
+vi.mock('$lib/services/backends/git/shared/commits', async (importOriginal) => ({
+  dedupeFileCommits: /** @type {any} */ (await importOriginal()).dedupeFileCommits,
   createCommitMessage: vi.fn().mockReturnValue('Test commit message'),
 }));
 vi.mock('$lib/services/backends/git/shared/fetch', () => ({
@@ -845,6 +846,39 @@ describe('GitHub commits service', () => {
       const result = await fetchFileCommits(['file.md']);
 
       expect(result).toEqual([]);
+    });
+
+    test('splits a long path list into several queries', async () => {
+      vi.mocked(fetchGraphQL).mockImplementation(async (query) => ({
+        repository: Object.fromEntries(
+          [.../** @type {string} */ (query).matchAll(/history_(\d+):/g)].map(([, i]) => [
+            `history_${i}`,
+            {
+              target: {
+                history: {
+                  nodes: [
+                    {
+                      oid: `sha${i}`,
+                      author: { name: 'A', email: 'a@example.com', avatarUrl: '', user: null },
+                      committedDate: '2023-01-01T00:00:00Z',
+                    },
+                  ],
+                },
+              },
+            },
+          ]),
+        ),
+      }));
+
+      const result = await fetchFileCommits(Array.from({ length: 60 }, (_, i) => `file${i}.md`));
+
+      // 60 paths / 50 per query = 2 requests
+      expect(fetchGraphQL).toHaveBeenCalledTimes(2);
+      expect(fetchGraphQL).toHaveBeenCalledWith(
+        expect.stringContaining('query($owner: String!, $repo: String!, $branch: String!)'),
+        {},
+      );
+      expect(result).toHaveLength(60);
     });
   });
   describe('Open Authoring', () => {

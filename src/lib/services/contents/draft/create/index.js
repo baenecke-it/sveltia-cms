@@ -10,11 +10,13 @@ import {
   getMetaPathConfig,
   nestedFilterPath,
 } from '$lib/services/contents/collection/nested';
-import { revokeDraftFileURLs } from '$lib/services/contents/draft';
+import { getSlugOptions } from '$lib/services/contents/collection/slug';
+import { revokeDraftFileURLs, STATIC_DRAFT_KEYS } from '$lib/services/contents/draft';
 import { restoreBackupIfNeeded } from '$lib/services/contents/draft/backup';
 import { normalizeContentMap } from '$lib/services/contents/draft/create/normalize';
 import { createProxy } from '$lib/services/contents/draft/create/proxy.svelte';
 import { getDefaultValues } from '$lib/services/contents/draft/defaults';
+import { hasLocalizedSlugs } from '$lib/services/contents/draft/slugs';
 import { resetCustomFieldValidation } from '$lib/services/contents/draft/validate/custom-fields';
 import { createState } from '$lib/services/utils/state.svelte';
 import { isPendingDeletion } from '$lib/services/workflow';
@@ -33,46 +35,43 @@ import { isPendingDeletion } from '$lib/services/workflow';
  */
 
 /**
- * Tag to enable the slug editor for the default locale.
- */
-export const SLUG_EDITOR_TAG = '{{fields._slug}}';
-
-/**
- * Tag to enable the slug editor for all locales.
- */
-export const LOCALIZED_SLUG_EDITOR_TAG = '{{fields._slug | localize}}';
-
-/**
  * Get the `slugEditor` property for an entry draft.
  * @param {object} args Arguments.
  * @param {InternalCollection} args.collection Collection that the entry belongs to.
  * @param {InternalCollectionFile} [args.collectionFile] Collection file. File/singleton collection
  * only.
  * @param {LocaleSlugMap} args.originalSlugs Original slugs for each locale.
+ * @param {boolean} [args.isIndexFile] Whether the entry is the collection’s index file, whose name
+ * is fixed.
  * @returns {Record<string, boolean | 'readonly'>} Whether to show the slug editor for each locale.
- * If the `slug` template contains the `{{fields._slug}}` tag, the slug editor will be enabled for
- * the default locale and disabled (read-only) for other locales. If the `slug` template contains
- * the `{{fields._slug | localize}}` tag, the slug editor will be enabled for all locales.
- * Otherwise, the slug editor will be disabled for all locales. Note that the slug editor will only
- * be shown for new entries in entry collections.
+ * If the slug is editable on creation, the slug editor will be enabled for the default locale and
+ * disabled (read-only) for other locales, which share its slug, or enabled for all locales if the
+ * slug is localized. Otherwise, the slug editor will be disabled for all locales. Note that the
+ * slug editor will only be shown for new entries in entry collections.
  * @see https://github.com/sveltia/sveltia-cms/issues/499
+ * @see https://github.com/sveltia/sveltia-cms/issues/999
  */
-export const getSlugEditorProp = ({ collection, collectionFile, originalSlugs }) => {
+export const getSlugEditorProp = ({
+  collection,
+  collectionFile,
+  originalSlugs,
+  isIndexFile = false,
+}) => {
   const isEntryCollection = collection._type === 'entry';
   const { allLocales, defaultLocale } = (collectionFile ?? collection)._i18n;
 
   // The slug editor is only relevant for entry collections
-  if (!isEntryCollection) {
+  if (!isEntryCollection || isIndexFile) {
     return Object.fromEntries(allLocales.map((locale) => [locale, false]));
   }
 
   const {
-    identifier_field: identifierField = 'title',
-    slug: slugTemplate = `{{${identifierField}}}`,
-  } = collection;
+    editable: { create: slugEditorEnabled },
+  } = getSlugOptions(collection);
 
-  const localizedSlugEditorEnabled = slugTemplate.includes(LOCALIZED_SLUG_EDITOR_TAG);
-  const slugEditorEnabled = slugTemplate.includes(SLUG_EDITOR_TAG) || localizedSlugEditorEnabled;
+  // Each locale has a slug of its own when the slug is localized, with the `i18n` slug option or
+  // the `localize` flag in the template, e.g. `{{title | localize}}`
+  const localized = hasLocalizedSlugs(collection);
 
   return Object.fromEntries(
     allLocales.map((locale) => {
@@ -80,8 +79,52 @@ export const getSlugEditorProp = ({ collection, collectionFile, originalSlugs })
         return [locale, false];
       }
 
-      return [locale, locale === defaultLocale || localizedSlugEditorEnabled || 'readonly'];
+      return [locale, locale === defaultLocale || localized || 'readonly'];
     }),
+  );
+};
+
+/**
+ * Get the locales whose slug is set when the slug editor of the given locale is filled in: the
+ * locale itself and, for the default locale, the read-only locales that share its slug.
+ * @param {object} args Arguments.
+ * @param {Record<string, boolean | 'readonly'>} args.slugEditor Whether the slug editor is shown
+ * for each locale. See {@link getSlugEditorProp}.
+ * @param {string} args.locale Locale of the slug editor.
+ * @param {string} args.defaultLocale Default locale.
+ * @returns {string[]} Locales.
+ */
+export const getSlugTargetLocales = ({ slugEditor, locale, defaultLocale }) =>
+  Object.entries(slugEditor)
+    .filter(
+      ([_locale, enabled]) =>
+        _locale === locale || (locale === defaultLocale && enabled === 'readonly'),
+    )
+    .map(([_locale]) => _locale);
+
+/**
+ * Get the slugs a new entry starts with, when a slug is given through the `_slug` URL parameter.
+ * The slug is only accepted where the user could type it in: the default locale’s slug editor, and
+ * the read-only locales that share its slug. Otherwise it’s ignored, so a link can’t set a slug the
+ * collection doesn’t let users edit.
+ * @param {object} args Arguments.
+ * @param {Record<string, boolean | 'readonly'>} args.slugEditor Whether the slug editor is shown
+ * for each locale. See {@link getSlugEditorProp}.
+ * @param {string} args.defaultLocale Default locale.
+ * @param {string} [args.initialSlug] Slug given through the URL parameter.
+ * @returns {LocaleSlugMap} Slugs.
+ * @see https://github.com/sveltia/sveltia-cms/discussions/938
+ */
+export const getInitialSlugs = ({ slugEditor, defaultLocale, initialSlug }) => {
+  if (!initialSlug?.trim() || slugEditor[defaultLocale] !== true) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    getSlugTargetLocales({ slugEditor, locale: defaultLocale, defaultLocale }).map((locale) => [
+      locale,
+      initialSlug,
+    ]),
   );
 };
 
@@ -130,6 +173,8 @@ export const getOriginalPath = ({ collection, originalEntry, initialPath }) => {
  * entry draft.
  * @param {string} [args.initialPath] Folder for a new entry in a collection with the `meta.path`
  * option enabled, passed through the `path` URL parameter.
+ * @param {string} [args.initialSlug] Slug for a new entry, passed through the `_slug` URL
+ * parameter. See {@link getInitialSlugs}.
  * @param {boolean} [args.isIndexFile] Whether to edit the collection’s index file.
  * @returns {EntryDraft} Entry draft.
  */
@@ -141,6 +186,7 @@ export const buildDraft = ({
   extraValues,
   expanderStates,
   initialPath,
+  initialSlug,
   isIndexFile = isCollectionIndexFile(collection, originalEntry),
 }) => {
   const collectionName = collection.name;
@@ -205,39 +251,47 @@ export const buildDraft = ({
     normalizeContentMap({ fields, contentMap: originalValues, defaultLocale });
   }
 
+  const slugEditor = getSlugEditorProp({ collection, collectionFile, originalSlugs, isIndexFile });
+
   /** @type {EntryDraft} */
-  const draft = createState({
-    id: isNew ? crypto.randomUUID() : id,
-    createdAt: Date.now(),
-    isNew,
-    isIndexFile,
-    canPreview,
-    collectionName,
-    collection,
-    fileName,
-    collectionFile,
-    fields,
-    originalEntry: isNew ? undefined : originalEntry,
-    defaultLocale,
-    originalLocales,
-    currentLocales: structuredClone(originalLocales),
-    originalSlugs,
-    currentSlugs: structuredClone(originalSlugs),
-    originalPath,
-    currentPath: originalPath,
-    originalValues,
-    // The value proxies are created below, as they need a reference to the reactive draft
-    currentValues: {},
-    files: {},
-    extraValues: extraValues ?? Object.fromEntries(allLocales.map((locale) => [locale, {}])),
-    validities: Object.fromEntries(allLocales.map((locale) => [locale, {}])),
-    validationMessages: Object.fromEntries(allLocales.map((locale) => [locale, {}])),
-    // Any locale-agnostic view states will be put under the `_` key
-    expanderStates: expanderStates ?? { _: {} },
-    slugEditor: getSlugEditorProp({ collection, collectionFile, originalSlugs }),
-    interacted: false,
-    pendingEntries: [],
-  });
+  const draft = createState(
+    {
+      id: isNew ? crypto.randomUUID() : id,
+      createdAt: Date.now(),
+      isNew,
+      isIndexFile,
+      canPreview,
+      collectionName,
+      collection,
+      fileName,
+      collectionFile,
+      fields,
+      originalEntry: isNew ? undefined : originalEntry,
+      defaultLocale,
+      originalLocales,
+      currentLocales: structuredClone(originalLocales),
+      originalSlugs,
+      currentSlugs: {
+        ...structuredClone(originalSlugs),
+        ...getInitialSlugs({ slugEditor, defaultLocale, initialSlug }),
+      },
+      originalPath,
+      currentPath: originalPath,
+      originalValues,
+      // The value proxies are created below, as they need a reference to the reactive draft
+      currentValues: {},
+      files: {},
+      extraValues: extraValues ?? Object.fromEntries(allLocales.map((locale) => [locale, {}])),
+      validities: Object.fromEntries(allLocales.map((locale) => [locale, {}])),
+      validationMessages: Object.fromEntries(allLocales.map((locale) => [locale, {}])),
+      // Any locale-agnostic view states will be put under the `_` key
+      expanderStates: expanderStates ?? { _: {} },
+      slugEditor,
+      interacted: false,
+      pendingEntries: [],
+    },
+    STATIC_DRAFT_KEYS,
+  );
 
   enabledLocales.forEach((locale) => {
     draft.currentValues[locale] = createProxy({
@@ -267,6 +321,8 @@ export const buildDraft = ({
  * entry draft.
  * @param {string} [args.initialPath] Folder for a new entry in a collection with the `meta.path`
  * option enabled, passed through the `path` URL parameter.
+ * @param {string} [args.initialSlug] Slug for a new entry, passed through the `_slug` URL
+ * parameter.
  * @param {boolean} [args.isIndexFile] Whether to edit the collection’s index file.
  * @returns {EntryDraft} Created draft.
  */

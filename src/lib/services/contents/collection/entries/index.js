@@ -1,13 +1,13 @@
 /* eslint-disable no-continue */
-/* eslint-disable no-await-in-loop */
 /* eslint-disable no-restricted-syntax */
 
-import { getMediaFieldURL } from '$lib/services/assets/info';
+import { getMediaFieldSource } from '$lib/services/assets/info';
 import { cmsConfig } from '$lib/services/config';
 import { allEntries, allEntryFolders } from '$lib/services/contents';
 import { getCollection } from '$lib/services/contents/collection';
 import {
   getIndexFile,
+  getIndexFileName,
   isCollectionIndexFile,
 } from '$lib/services/contents/collection/entries/index-file';
 import { getCollectionFilesByEntry } from '$lib/services/contents/collection/files';
@@ -151,8 +151,57 @@ export const getListedCollections = (entry) =>
   );
 
 /**
- * Scan `allEntries` for the entries belonging to the given collection. This is the uncached
- * implementation of {@link getEntriesByCollection}.
+ * Cache for {@link getEntriesByCollection}, keyed by collection name and invalidated whenever
+ * `allEntries` or `allEntryFolders` is replaced.
+ * @type {{
+ * entrySource: Entry[] | undefined,
+ * folderSource: EntryFolderInfo[] | undefined,
+ * buckets: Map<string, Entry[]> | undefined,
+ * map: Map<string, Entry[]>,
+ * }}
+ */
+const entriesByCollectionCache = {
+  entrySource: undefined,
+  folderSource: undefined,
+  buckets: undefined,
+  map: new Map(),
+};
+
+/**
+ * Sort every entry into the collections it belongs to, in one pass over `allEntries`. The sidebar
+ * asks for the entries of every collection whenever the entry list changes, so looking each one up
+ * with its own scan would cost a pass per collection. The collections of an entry are cached with
+ * the entry object, which survives a save or a refresh unless the entry itself has changed, so this
+ * is mostly lookups.
+ * @returns {Map<string, Entry[]>} Entries by collection name, in the order of `allEntries`.
+ */
+const getCollectionBuckets = () => {
+  if (!entriesByCollectionCache.buckets) {
+    /** @type {Map<string, Entry[]>} */
+    const buckets = new Map();
+
+    allEntries.current.forEach((entry) => {
+      // A collection can match an entry through more than one of its folders
+      new Set(getAssociatedCollections(entry).map(({ name }) => name)).forEach((name) => {
+        const bucket = buckets.get(name);
+
+        if (bucket) {
+          bucket.push(entry);
+        } else {
+          buckets.set(name, [entry]);
+        }
+      });
+    });
+
+    entriesByCollectionCache.buckets = buckets;
+  }
+
+  return entriesByCollectionCache.buckets;
+};
+
+/**
+ * Get the entries belonging to the given collection. This is the uncached implementation of
+ * {@link getEntriesByCollection}.
  * @param {string} collectionName Collection name.
  * @returns {Entry[]} Entries.
  */
@@ -163,51 +212,9 @@ const queryEntriesByCollection = (collectionName) => {
     return [];
   }
 
-  // Pre-compute membership check to avoid calling getAssociatedCollections() per entry, which
-  // internally does allEntryFolders.current.filter().sort() for each entry.
-  let isMember;
-
-  if (collection._type === 'entry') {
-    const fullPathRegEx = collection._file?.fullPathRegEx;
-
-    isMember = fullPathRegEx
-      ? (/** @type {Entry} */ entry) =>
-          fullPathRegEx.test(Object.values(entry.locales)[0]?.path ?? '')
-      : (/** @type {Entry} */ entry) =>
-          getAssociatedCollections(entry).some(({ name }) => name === collectionName);
-  } else {
-    const validPaths = new Set(
-      allEntryFolders.current
-        .filter(({ collectionName: name }) => name === collectionName)
-        .flatMap(({ filePathMap }) => (filePathMap ? Object.values(filePathMap) : [])),
-    );
-
-    // eslint-disable-next-line jsdoc/require-jsdoc
-    isMember = (/** @type {Entry} */ entry) => {
-      const entryPath = Object.values(entry.locales)[0]?.path;
-
-      return !!entryPath && validPaths.has(entryPath);
-    };
-  }
-
-  return allEntries.current.filter(
-    (entry) => isMember(entry) && matchesCollectionFilter(collection, entry),
+  return (getCollectionBuckets().get(collectionName) ?? []).filter((entry) =>
+    matchesCollectionFilter(collection, entry),
   );
-};
-
-/**
- * Cache for {@link getEntriesByCollection}, keyed by collection name and invalidated whenever
- * `allEntries` or `allEntryFolders` is replaced.
- * @type {{
- * entrySource: Entry[] | undefined,
- * folderSource: EntryFolderInfo[] | undefined,
- * map: Map<string, Entry[]>,
- * }}
- */
-const entriesByCollectionCache = {
-  entrySource: undefined,
-  folderSource: undefined,
-  map: new Map(),
 };
 
 /**
@@ -217,6 +224,7 @@ const entriesByCollectionCache = {
 export const _resetEntriesByCollectionCache = () => {
   entriesByCollectionCache.entrySource = undefined;
   entriesByCollectionCache.folderSource = undefined;
+  entriesByCollectionCache.buckets = undefined;
   entriesByCollectionCache.map = new Map();
 };
 
@@ -245,6 +253,7 @@ export const getEntriesByCollection = (collectionName) => {
   ) {
     entriesByCollectionCache.entrySource = entrySource;
     entriesByCollectionCache.folderSource = folderSource;
+    entriesByCollectionCache.buckets = undefined;
     entriesByCollectionCache.map = new Map();
   }
 
@@ -275,9 +284,9 @@ export const getEntriesByCollection = (collectionName) => {
  * @param {boolean} args.isIndexFile Whether the corresponding entry is the collection’s special
  * index file used specifically in Hugo.
  * @param {InternalCollectionFile} [args.collectionFile] Collection file. File collection only.
- * @returns {Promise<boolean>} Result.
+ * @returns {boolean} Result.
  */
-export const hasAsset = async ({
+export const hasAsset = ({
   assetURL,
   newURL,
   collectionName,
@@ -296,13 +305,29 @@ export const hasAsset = async ({
   }
 
   const isBlobURL = assetURL.startsWith('blob:');
-  const getURLArgs = { entry, collectionName, fileName };
   const { widget: fieldType = 'string' } = field;
 
+  /**
+   * Check whether the given field value points to the asset.
+   * @param {string} src Field value or image source found in it.
+   * @returns {boolean} Result.
+   */
+  const isMatch = (src) => {
+    if (!isBlobURL) {
+      return src === assetURL;
+    }
+
+    // Resolve the value to its asset without loading it. The asset’s blob URL is created once and
+    // kept on the asset object, so only the asset being looked up can hold the given one — and
+    // there’s no need to download every other asset the entries reference just to compare URLs
+    const { url, asset } =
+      getMediaFieldSource({ entry, collectionName, fileName, value: src }) ?? {};
+
+    return (url ?? asset?.blobURL) === assetURL;
+  };
+
   if (MEDIA_FIELD_TYPES.includes(fieldType)) {
-    const match = isBlobURL
-      ? (await getMediaFieldURL({ ...getURLArgs, value })) === assetURL
-      : value === assetURL;
+    const match = isMatch(value);
 
     if (match && newURL) {
       content[keyPath] = newURL;
@@ -316,21 +341,17 @@ export const hasAsset = async ({
     const matches = [...value.matchAll(MARKDOWN_IMAGE_REGEX)];
 
     if (matches.length) {
-      return (
-        await Promise.all(
-          matches.map(async ([, src]) => {
-            const match =
-              (isBlobURL ? await getMediaFieldURL({ ...getURLArgs, value: src }) : src) ===
-              assetURL;
+      return matches
+        .map(([, src]) => {
+          const match = isMatch(src);
 
-            if (match && newURL) {
-              content[keyPath] = content[keyPath].replace(src, newURL);
-            }
+          if (match && newURL) {
+            content[keyPath] = content[keyPath].replace(src, newURL);
+          }
 
-            return match;
-          }),
-        )
-      ).some(Boolean);
+          return match;
+        })
+        .some(Boolean);
     }
   }
 
@@ -346,90 +367,92 @@ export const hasAsset = async ({
  * @param {boolean} [options.every] Whether to report every field holding the asset. Otherwise the
  * search of an entry stops at the first field, unless the URL is being replaced.
  * @param {(reference: AssetReference) => void} [options.onMatch] Called for each field found.
- * @returns {Promise<boolean[]>} Whether each entry holds the asset, in the order given.
+ * @returns {boolean[]} Whether each entry holds the asset, in the order given.
  */
-const findAssetReferences = async (url, { entries, newURL = '', every = false, onMatch }) => {
+const findAssetReferences = (url, { entries, newURL = '', every = false, onMatch }) => {
   const baseURL = cmsConfig.current?._baseURL;
   const assetURL = baseURL && !url.startsWith('blob:') ? url.replace(baseURL, '') : url;
   const isBlobURL = assetURL.startsWith('blob:');
   const exhaustive = !!newURL || every;
 
-  return Promise.all(
-    entries.map(async (entry) => {
-      const { locales } = entry;
-      const collections = getAssociatedCollections(entry);
-      let found = false;
+  return entries.map((entry) => {
+    const { locales } = entry;
+    /** @type {InternalCollection[] | undefined} */
+    let collections;
+    let found = false;
 
-      for (const [locale, { content }] of Object.entries(locales)) {
-        for (const [keyPath, value] of Object.entries(content)) {
-          if (typeof value !== 'string' || !value) continue;
-          // Pre-filter: skip values that can’t possibly contain the asset URL, avoiding the
-          // expensive getField() call for the vast majority of fields.
-          if (!isBlobURL && !value.includes(assetURL)) continue;
+    for (const [locale, { content }] of Object.entries(locales)) {
+      for (const [keyPath, value] of Object.entries(content)) {
+        if (typeof value !== 'string' || !value) continue;
+        // Pre-filter: skip values that can’t possibly contain the asset URL, avoiding the
+        // expensive getField() call for the vast majority of fields.
+        if (!isBlobURL && !value.includes(assetURL)) continue;
 
-          for (const collection of collections) {
-            const isIndexFile = isCollectionIndexFile(collection, entry);
+        // Resolved only once a value passes the pre-filter, as most entries have none that does
+        collections ??= getAssociatedCollections(entry);
 
-            const hasAssetArgs = {
-              assetURL,
-              newURL,
-              collectionName: collection.name,
-              entry,
-              content,
-              keyPath,
-              value,
-              isIndexFile,
-            };
+        for (const collection of collections) {
+          const isIndexFile = isCollectionIndexFile(collection, entry);
 
-            const collectionFiles = getCollectionFilesByEntry(collection, entry);
-            /** @type {(InternalCollectionFile | undefined)[]} */
-            const files = collectionFiles.length ? collectionFiles : [undefined];
+          const hasAssetArgs = {
+            assetURL,
+            newURL,
+            collectionName: collection.name,
+            entry,
+            content,
+            keyPath,
+            value,
+            isIndexFile,
+          };
 
-            const matches = await Promise.all(
-              files.map((collectionFile) => hasAsset({ ...hasAssetArgs, collectionFile })),
-            );
+          const collectionFiles = getCollectionFilesByEntry(collection, entry);
+          /** @type {(InternalCollectionFile | undefined)[]} */
+          const files = collectionFiles.length ? collectionFiles : [undefined];
 
-            matches.forEach((matched, index) => {
-              if (!matched || !onMatch) {
-                return;
-              }
+          const matches = files.map((collectionFile) =>
+            hasAsset({ ...hasAssetArgs, collectionFile }),
+          );
 
-              const collectionFile = files[index];
-
-              onMatch({
-                entry,
-                collection,
-                collectionFile,
-                locale,
-                keyPath,
-                // The field is known to be configured, as `hasAsset()` bails out otherwise
-                fieldConfig: /** @type {Field} */ (
-                  getField({
-                    collectionName: collection.name,
-                    fileName: collectionFile?.name,
-                    valueMap: content,
-                    keyPath,
-                    isIndexFile,
-                  })
-                ),
-              });
-            });
-
-            if (matches.includes(true)) {
-              found = true;
-              if (!exhaustive) break;
+          matches.forEach((matched, index) => {
+            if (!matched || !onMatch) {
+              return;
             }
-          }
 
-          if (found && !exhaustive) break;
+            const collectionFile = files[index];
+
+            onMatch({
+              entry,
+              collection,
+              collectionFile,
+              locale,
+              keyPath,
+              // The field is known to be configured, as `hasAsset()` bails out otherwise
+              fieldConfig: /** @type {Field} */ (
+                getField({
+                  collectionName: collection.name,
+                  fileName: collectionFile?.name,
+                  valueMap: content,
+                  keyPath,
+                  isIndexFile,
+                })
+              ),
+            });
+          });
+
+          if (matches.includes(true)) {
+            found = true;
+            if (!exhaustive) break;
+          }
         }
 
         if (found && !exhaustive) break;
       }
 
-      return found;
-    }),
-  );
+      if (found && !exhaustive) break;
+    }
+
+    return found;
+  });
 };
 
 /**
@@ -444,7 +467,7 @@ export const getEntriesByAssetURL = async (
   url,
   { entries = allEntries.current, newURL = '' } = {},
 ) => {
-  const results = await findAssetReferences(url, { entries, newURL });
+  const results = findAssetReferences(url, { entries, newURL });
 
   return entries.filter((_entry, index) => results[index]);
 };
@@ -469,22 +492,52 @@ export const getAssetReferences = async (url, { entries = allEntries.current } =
     references.push(reference);
   };
 
-  await findAssetReferences(url, { entries, every: true, onMatch });
+  findAssetReferences(url, { entries, every: true, onMatch });
 
   return references;
 };
 
 /**
- * Check if index file creation is allowed in the collection.
+ * Count the entries in the collection, leaving out Hugo’s special index file. The index file stands
+ * for the collection’s own page rather than for one of the entries in it, so it’s not part of the
+ * count shown next to the collection in the sidebar. It’s still listed in the entry list, where it
+ * has an icon and a label of its own that tell it from the entries.
+ *
+ * The entries are passed in rather than looked up, because the caller merges the pending changes
+ * into them, so an entry that only exists in a pull request is counted as well. The collection is
+ * looked up so that the index file can be told by the entry’s path in this collection, as another
+ * collection’s index file can be listed here — see {@link isCollectionIndexFile}.
+ * @param {string} collectionName Collection name.
+ * @param {Entry[]} entries Entries in the collection.
+ * @returns {number} Count.
+ * @see https://github.com/sveltia/sveltia-cms/issues/1005
+ */
+export const countCollectionEntries = (collectionName, entries) => {
+  const collection = getCollection(collectionName);
+
+  // A collection without an index file has nothing to leave out, which is the common case, so skip
+  // the pass over the entries rather than testing each one
+  if (!collection || getIndexFileName(collection) === undefined) {
+    return entries.length;
+  }
+
+  return entries.filter((entry) => !isCollectionIndexFile(collection, entry)).length;
+};
+
+/**
+ * Check if index file creation is allowed in the collection. The listed entries can include another
+ * collection’s index file, when that collection’s folder sits below this one’s, so each entry is
+ * tested by its path rather than by the slug the owning collection computed for it.
  * @param {InternalCollection} collection Collection.
  * @returns {boolean} Result. It returns `false` if the index file already exists.
+ * @see https://github.com/sveltia/sveltia-cms/issues/1005
  */
 export const canCreateIndexFile = (collection) => {
-  const indexFile = getIndexFile(collection);
-
-  if (!indexFile) {
+  if (!getIndexFile(collection)) {
     return false;
   }
 
-  return !getEntriesByCollection(collection.name).some(({ slug }) => slug === indexFile.name);
+  return !getEntriesByCollection(collection.name).some((entry) =>
+    isCollectionIndexFile(collection, entry),
+  );
 };

@@ -1,18 +1,45 @@
+import { unique } from '@sveltia/utils/array';
 import { getPathInfo } from '@sveltia/utils/file';
 import { escapeRegExp } from '@sveltia/utils/string';
 
 import { allAssets, getAssetByPath, isRelativePath } from '$lib/services/assets';
 import { getAssetFolder, getAssetFoldersByPath } from '$lib/services/assets/folders';
-import { getMediaFieldURL } from '$lib/services/assets/info';
+import { getMediaFieldSource, getMediaFieldURL } from '$lib/services/assets/info';
+import { canCreateThumbnail } from '$lib/services/assets/kinds';
 import { getCollection } from '$lib/services/contents/collection';
 import { getEntriesByCollection } from '$lib/services/contents/collection/entries';
 import { isCollectionIndexFile } from '$lib/services/contents/collection/entries/index-file';
+import { fillEntryPathTemplate } from '$lib/services/contents/entry';
 import { getField } from '$lib/services/contents/entry/fields';
+import { MEDIA_FIELD_TYPES } from '$lib/services/contents/fields';
+import { getOrCreate } from '$lib/services/utils/cache';
 
 /**
  * @import { Asset, Entry, InternalEntryCollection } from '$lib/types/private';
  * @import { FieldKeyPath } from '$lib/types/public';
  */
+
+/**
+ * Cache of the regular expressions matching a wildcard thumbnail field name, keyed by the name.
+ * The entry list asks for a thumbnail once per row, so the pattern is compiled once per collection
+ * rather than once per entry.
+ * @type {Map<string, RegExp>}
+ */
+const thumbnailFieldRegexCache = new Map();
+
+/**
+ * A field value or filled file path to look for an entry thumbnail.
+ * @typedef {object} ThumbnailCandidate
+ * @property {any} value Field value or file path.
+ * @property {FieldKeyPath} [keyPath] Field key path. Not available for a file path.
+ */
+
+/**
+ * Check if the given `thumbnail` option item is a path template rather than a field key path.
+ * @param {string} name Field key path or path template.
+ * @returns {boolean} Result.
+ */
+export const isThumbnailPath = (name) => name.startsWith('/');
 
 /**
  * Get the given entry’s thumbnail URL.
@@ -23,12 +50,15 @@ import { getField } from '$lib/services/contents/entry/fields';
 export const getEntryThumbnail = async (collection, entry) => {
   const {
     name: collectionName,
+    fields = [],
+    preview_path_date_field: dateFieldName,
     _i18n: { defaultLocale },
     _thumbnailFieldNames,
   } = collection;
 
   const { locales } = entry;
-  const { content } = locales[defaultLocale] ?? Object.values(locales)[0] ?? {};
+  const locale = defaultLocale in locales ? defaultLocale : Object.keys(locales)[0];
+  const { content, slug, path: entryFilePath } = locales[locale] ?? {};
 
   if (!content) {
     return undefined;
@@ -38,31 +68,54 @@ export const getEntryThumbnail = async (collection, entry) => {
     ? Object.keys(content)
     : undefined;
 
-  /** @type {FieldKeyPath[]} */
-  const keyPathList = _thumbnailFieldNames.flatMap((name) => {
-    // Support a wildcard in the key path, e.g. `images.*.src`
-    if (name.includes('*')) {
-      const regex = new RegExp(`^${escapeRegExp(name).replace('\\*', '.+')}$`);
+  /** @type {ThumbnailCandidate[]} */
+  const candidates = _thumbnailFieldNames.flatMap((name) => {
+    // Fill in a path template like `/images/{{slug}}.webp`, which works like a field value
+    if (isThumbnailPath(name)) {
+      const value = fillEntryPathTemplate({
+        pathTemplate: name,
+        dateFieldName,
+        fields,
+        collection,
+        locale,
+        slug,
+        entryFilePath,
+        content,
+        isIndexFile: isCollectionIndexFile(collection, entry),
+      });
 
-      return /** @type {string[]} */ (contentKeys).filter((keyPath) => regex.test(keyPath));
+      return /** @type {ThumbnailCandidate[]} */ ([{ value }]);
     }
 
-    return name;
+    // Support a wildcard in the key path, e.g. `images.*.src`
+    if (name.includes('*')) {
+      const regex = getOrCreate(
+        thumbnailFieldRegexCache,
+        name,
+        () => new RegExp(`^${escapeRegExp(name).replace('\\*', '.+')}$`),
+      );
+
+      return /** @type {string[]} */ (contentKeys)
+        .filter((keyPath) => regex.test(keyPath))
+        .map((keyPath) => ({ value: content[keyPath], keyPath }));
+    }
+
+    return [{ value: content[name], keyPath: name }];
   });
 
   // Cannot use `Promise.all` or `Promise.any` here because we need the first available URL
   // eslint-disable-next-line no-restricted-syntax
-  for (const keyPath of keyPathList) {
-    const url = content[keyPath]
-      ? // eslint-disable-next-line no-await-in-loop
-        await getMediaFieldURL({
-          value: content[keyPath],
-          entry,
-          collectionName,
-          typedKeyPath: keyPath,
-          thumbnail: true,
-        })
-      : undefined;
+  for (const { value, keyPath } of candidates) {
+    const args = { value, entry, collectionName, typedKeyPath: keyPath };
+    const { asset } = (value && getMediaFieldSource(args)) || {};
+
+    // Skip a file without a thumbnail, like a document, rather than show it as a broken image, and
+    // try the next candidate instead
+    const url =
+      value && (!asset || canCreateThumbnail(asset))
+        ? // eslint-disable-next-line no-await-in-loop
+          await getMediaFieldURL({ ...args, thumbnail: true })
+        : undefined;
 
     if (url) {
       return url;
@@ -73,35 +126,97 @@ export const getEntryThumbnail = async (collection, entry) => {
 };
 
 /**
- * Collect the folders below the given one that hold an entry of their own. In a nested collection,
- * an entry can have others stored beneath it, and each of those keeps its media in its own folder,
- * so those files belong to the descendant rather than to the entry being looked at.
- * @param {object} args Arguments.
- * @param {string} args.collectionName Name of the collection the entry belongs to.
- * @param {Entry} args.entry Entry being looked at.
- * @param {string} args.entryFolderPath Folder the entry is stored in.
- * @returns {Set<string>} Folder paths. A folder the entry shares with another one is not included,
- * because neither entry owns it.
+ * Cache of {@link getEntryIdsByFolder} results, keyed by a collection’s entry list, which keeps its
+ * identity until the entries change.
+ * @type {WeakMap<Entry[], Map<string, Set<string>>>}
  */
-const getDescendantEntryFolderPaths = ({ collectionName, entry, entryFolderPath }) => {
-  /** @type {Set<string>} */
-  const paths = new Set();
+const entryIdsByFolderCache = new WeakMap();
 
-  getEntriesByCollection(collectionName).forEach((otherEntry) => {
-    if (otherEntry.id === entry.id) {
-      return;
-    }
+/**
+ * Index the entries of the given collection by the folders their files are stored in.
+ * @param {string} collectionName Collection name.
+ * @returns {Map<string, Set<string>>} IDs of the entries with a file in each folder.
+ */
+const getEntryIdsByFolder = (collectionName) => {
+  const entries = getEntriesByCollection(collectionName);
+  let index = entryIdsByFolderCache.get(entries);
 
-    Object.values(otherEntry.locales).forEach(({ path }) => {
-      const dirPath = getPathInfo(path).dirname;
+  if (!index) {
+    /** @type {Map<string, Set<string>>} */
+    const map = new Map();
 
-      if (dirPath !== undefined && dirPath.startsWith(`${entryFolderPath}/`)) {
-        paths.add(dirPath);
+    entries.forEach(({ id, locales }) => {
+      Object.values(locales).forEach(({ path }) => {
+        const dirPath = getPathInfo(path).dirname;
+
+        if (dirPath !== undefined) {
+          getOrCreate(map, dirPath, () => new Set()).add(id);
+        }
+      });
+    });
+
+    index = map;
+    entryIdsByFolderCache.set(entries, index);
+  }
+
+  return index;
+};
+
+/**
+ * An asset along with the folder it’s stored in.
+ * @typedef {object} IndexedAsset
+ * @property {Asset} asset Asset.
+ * @property {string} dirPath Folder the asset is stored in.
+ */
+
+/**
+ * Index of `allAssets` by folder, rebuilt when the store is replaced. See
+ * {@link getAssetsBelowFolder}.
+ */
+const assetsByFolderCache = {
+  source: /** @type {Asset[] | undefined} */ (undefined),
+  /** @type {Map<string, IndexedAsset[]>} */
+  map: new Map(),
+};
+
+/**
+ * Get the assets stored in the given folder or any of its subfolders. Every asset is indexed under
+ * its own folder and each folder above it, so this is a lookup rather than a scan of the whole
+ * asset library — which would otherwise be repeated for every entry being deleted at once.
+ * @param {string} folderPath Folder path.
+ * @returns {IndexedAsset[]} Assets, in the order of `allAssets`.
+ */
+const getAssetsBelowFolder = (folderPath) => {
+  const { current: _allAssets } = allAssets;
+
+  if (_allAssets !== assetsByFolderCache.source) {
+    /** @type {Map<string, IndexedAsset[]>} */
+    const map = new Map();
+
+    _allAssets.forEach((asset) => {
+      const dirPath = getPathInfo(asset.path).dirname;
+
+      if (dirPath === undefined) {
+        return;
+      }
+
+      const item = { asset, dirPath };
+
+      // Walk up to the top-level folder
+      for (let path = dirPath; ; path = path.slice(0, path.lastIndexOf('/'))) {
+        getOrCreate(map, path, () => []).push(item);
+
+        if (!path.includes('/')) {
+          break;
+        }
       }
     });
-  });
 
-  return paths;
+    assetsByFolderCache.source = _allAssets;
+    assetsByFolderCache.map = map;
+  }
+
+  return assetsByFolderCache.map.get(folderPath) ?? [];
 };
 
 /**
@@ -122,38 +237,39 @@ export const getAssociatedAssets = ({ entry, collectionName, fileName, relative 
   }
 
   const isIndexFile = isCollectionIndexFile(collection, entry);
-  const seen = new Set();
 
   const assets = /** @type {Asset[]} */ (
-    Object.values(locales)
-      .flatMap(({ content }) =>
-        Object.entries(content ?? {}).map(([keyPath, value]) => {
-          if (typeof value === 'string' && (relative ? isRelativePath(value) : true)) {
-            const widget = getField({ collectionName, keyPath, isIndexFile })?.widget ?? 'string';
+    unique(
+      Object.values(locales)
+        .flatMap(({ content }) =>
+          Object.entries(content ?? {}).map(([keyPath, value]) => {
+            if (typeof value === 'string' && (relative ? isRelativePath(value) : true)) {
+              const widget = getField({ collectionName, keyPath, isIndexFile })?.widget ?? 'string';
 
-            if (widget !== 'image' && widget !== 'file') {
-              return undefined;
+              if (!MEDIA_FIELD_TYPES.includes(widget)) {
+                return undefined;
+              }
+
+              const asset = getAssetByPath({ value, entry, collectionName, fileName });
+
+              if (
+                asset &&
+                getAssetFoldersByPath(asset.path).some(
+                  (f) =>
+                    f.collectionName === collectionName &&
+                    f.fileName === fileName &&
+                    (relative ? f.entryRelative : true),
+                )
+              ) {
+                return asset;
+              }
             }
 
-            const asset = getAssetByPath({ value, entry, collectionName, fileName });
-
-            if (
-              asset &&
-              getAssetFoldersByPath(asset.path).some(
-                (f) =>
-                  f.collectionName === collectionName &&
-                  f.fileName === fileName &&
-                  (relative ? f.entryRelative : true),
-              )
-            ) {
-              return asset;
-            }
-          }
-
-          return undefined;
-        }),
-      )
-      .filter((value) => !!value && !seen.has(value) && (seen.add(value), true))
+            return undefined;
+          }),
+        )
+        .filter(Boolean),
+    )
   );
 
   // Add orphaned/unused entry-relative assets
@@ -169,18 +285,13 @@ export const getAssociatedAssets = ({ entry, collectionName, fileName, relative 
     );
 
     const existingPaths = new Set(assets.map(({ path }) => path));
-    const _allAssets = allAssets.current;
+    const entryIdsByFolder = getEntryIdsByFolder(collectionName);
 
     entryFolderPaths.forEach((entryFolderPath) => {
-      const descendantFolderPaths = getDescendantEntryFolderPaths({
-        collectionName,
-        entry,
-        entryFolderPath,
-      });
-
       /**
        * Check whether the given folder belongs to an entry stored below this one, which owns the
-       * files in it.
+       * files in it. In a nested collection, an entry can have others stored beneath it, and each
+       * of those keeps its media in its own folder.
        * @param {string} assetFolderPath Folder holding an asset, at or below the entry folder.
        * @returns {boolean} Result.
        */
@@ -189,7 +300,9 @@ export const getAssociatedAssets = ({ entry, collectionName, fileName, relative 
         let dirPath = assetFolderPath;
 
         while (dirPath.length > entryFolderPath.length) {
-          if (descendantFolderPaths.has(dirPath)) {
+          const entryIds = entryIdsByFolder.get(dirPath);
+
+          if (entryIds && [...entryIds].some((id) => id !== entry.id)) {
             return true;
           }
 
@@ -199,17 +312,9 @@ export const getAssociatedAssets = ({ entry, collectionName, fileName, relative 
         return false;
       };
 
-      _allAssets.forEach((asset) => {
-        const assetFolderPath = getPathInfo(asset.path).dirname;
-
-        if (
-          assetFolderPath !== undefined &&
-          // Include assets in the entry folder and its subfolders
-          (assetFolderPath === entryFolderPath ||
-            assetFolderPath.startsWith(`${entryFolderPath}/`)) &&
-          !isDescendantEntryFolder(assetFolderPath) &&
-          !existingPaths.has(asset.path)
-        ) {
+      // Include assets in the entry folder and its subfolders
+      getAssetsBelowFolder(entryFolderPath).forEach(({ asset, dirPath }) => {
+        if (!isDescendantEntryFolder(dirPath) && !existingPaths.has(asset.path)) {
           assets.push(asset);
           existingPaths.add(asset.path);
         }

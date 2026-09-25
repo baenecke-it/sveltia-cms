@@ -1,3 +1,4 @@
+import equal from 'fast-deep-equal';
 import { untrack } from 'svelte';
 
 /**
@@ -7,9 +8,36 @@ import { untrack } from 'svelte';
  * @template {object} T
  * @param {T} value Plain object to wrap. A value that is already a `$state` proxy is returned as
  * is.
+ * @param {string[]} [staticKeys] Properties holding data that never changes while the state
+ * object is alive, such as the collection configuration in an entry draft. Svelte’s proxy leaves a
+ * read-only property alone, so these are handed out as they are: the reader gets the original
+ * object rather than a proxy of it, and doesn’t depend on anything in it.
+ *
+ * This is not just an optimization. A proxy is created per state object, so two state objects
+ * built from the same configuration hand out two different proxies of it. Replacing one with the
+ * other — which is what saving an entry with the editor left open does — then looks like a new
+ * value to every keyed `{#each}` block iterating the fields, and Svelte answers a write made while
+ * an effect is running by walking the derived graph below it in search of the effect itself. That
+ * walk doesn’t memoize, so in a deeply nested entry editor, where every level multiplies the
+ * number of paths to the same derived, it takes exponentially longer with each level of nesting
+ * and eventually hangs the browser.
  * @returns {T} Reactive proxy.
+ * @see https://github.com/sveltia/sveltia-cms/issues/1006
  */
-export const createState = (value) => {
+export const createState = (value, staticKeys = []) => {
+  staticKeys.forEach((key) => {
+    // A key the object doesn’t carry is skipped rather than defined as `undefined`, so that one
+    // list can be shared by callers that assemble the object slightly differently
+    if (Object.hasOwn(value, key)) {
+      Object.defineProperty(value, key, {
+        value: /** @type {any} */ (value)[key],
+        writable: false,
+        enumerable: true,
+        configurable: true,
+      });
+    }
+  });
+
   const state = $state(value);
 
   return state;
@@ -89,6 +117,32 @@ export const createDerivedState = (getter) => {
       return current;
     },
   };
+};
+
+/**
+ * Create a read-only reactive box like {@link createDerivedState}, but keep handing out the
+ * previous value as long as the new one is deeply equal to it. A derived value only notifies what
+ * depends on it when it’s a different object, so this stops a change that leaves the value as it
+ * was from rippling any further. For example, the sort conditions picked out of a view object stay
+ * the same object when the view is replaced to switch from list to grid, so the sorted list isn’t
+ * recomputed.
+ * @template T
+ * @param {() => T} getter Function computing the value.
+ * @returns {{ readonly current: T }} Reactive box.
+ */
+export const createStableDerivedState = (getter) => {
+  /** @type {T | undefined} */
+  let previous;
+
+  return createDerivedState(() => {
+    const value = getter();
+
+    if (!equal(value, previous)) {
+      previous = value;
+    }
+
+    return /** @type {T} */ (previous);
+  });
 };
 
 /**

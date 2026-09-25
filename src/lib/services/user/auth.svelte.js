@@ -39,6 +39,12 @@ export const auth = $state({
   unauthenticated: true,
   /** Whether a sign-in is in progress. */
   signingIn: false,
+  /**
+   * Account that a magic link signs the user in to, while they’re asked whether to go ahead. The
+   * link can be crafted by anyone, so it’s only used once the user has recognized the account.
+   * @type {{ account: User, resolve: (confirmed: boolean) => void } | undefined}
+   */
+  magicLinkConfirmation: undefined,
 });
 
 /**
@@ -170,18 +176,94 @@ export const getBackend = (_user) => {
 };
 
 /**
+ * Verify the token passed with a magic link, and ask the user to confirm the account it belongs
+ * to. Since anyone can craft a link, it could otherwise sign the user in to someone else’s account
+ * without their knowledge, overwriting their session, and copy the settings in the link, such as a
+ * deploy hook URL, to their device.
+ * @param {string} token Token passed with the link.
+ * @returns {Promise<User | undefined>} User info if the token is valid and the user has confirmed
+ * the account, or `undefined` otherwise.
+ */
+export const confirmMagicLink = async (token) => {
+  const _backend = getBackend(undefined);
+
+  if (!_backend) {
+    return undefined;
+  }
+
+  /** @type {User | undefined} */
+  let account = undefined;
+
+  auth.signingIn = true;
+
+  try {
+    // The user store is left untouched, so an existing session stays cached until the user agrees
+    // to replace it
+    account = /** @type {User | undefined} */ (await _backend.signIn({ token, auto: true }));
+  } catch {
+    //
+  }
+
+  auth.signingIn = false;
+
+  if (!account) {
+    return undefined;
+  }
+
+  const confirmed = await new Promise((resolve) => {
+    auth.magicLinkConfirmation = { account: /** @type {User} */ (account), resolve };
+  });
+
+  auth.magicLinkConfirmation = undefined;
+
+  return confirmed ? account : undefined;
+};
+
+/**
+ * Copy the user preferences passed with a magic link. The deploy hook URL and its `Authorization`
+ * header are only copied together, so a link that has a URL but no header can’t leave the header
+ * already on this device to be sent to the new URL.
+ * @param {Record<string, any>} copiedPrefs Preferences passed with the link.
+ */
+export const copyMagicLinkPrefs = (copiedPrefs) => {
+  if ('deployHookURL' in copiedPrefs) {
+    delete prefs.deployHookAuthHeader;
+  }
+
+  Object.assign(prefs, copiedPrefs);
+};
+
+/**
+ * Load the files and unpublished entries from the backend the user has just signed in to, then
+ * start keeping them up to date.
+ * @param {BackendService} _backend Backend.
+ */
+const loadRepositoryData = async (_backend) => {
+  // The pull requests don’t depend on the files, so they’re requested at the same time
+  const pullRequests = startLoadingPullRequests();
+
+  await _backend.fetchFiles();
+  await loadUnpublishedEntries(pullRequests);
+  // The deploy state is a nicety, so it’s resolved in the background rather than delaying the UI
+  initDeployments();
+  // From here on, someone else’s commits are picked up as they land
+  startRemoteChangePolling();
+};
+
+/**
  * Check if the user info is cached, set the backend, and automatically start loading files if the
  * backend is Git-based and user’s auth token is found.
  */
 export const signInAutomatically = async () => {
   resetError();
 
+  const { _user: magicLinkUser, copiedPrefs } = parseMagicLink();
   /** @type {Record<string, any> | undefined} */
-  let _user = undefined;
-  /** @type {Record<string, any> | undefined} */
-  let copiedPrefs = undefined;
+  let _user = magicLinkUser ? await confirmMagicLink(magicLinkUser.token) : undefined;
+  // The account has been verified already if the user has accepted a magic link
+  const verified = !!_user;
 
-  ({ _user, copiedPrefs } = parseMagicLink());
+  // Fall back to the cached user, which also covers a declined or invalid magic link
   _user ??= await getUserCache();
 
   // Initialize the backend, which is needed on the login page
@@ -192,7 +274,7 @@ export const signInAutomatically = async () => {
     return;
   }
 
-  if (_user && _backend) {
+  if (!verified && _backend) {
     // Temporarily populate the `user` store with the cache, otherwise it’s not updated in
     // `refreshAccessToken`
     user.account = /** @type {User} */ (_user);
@@ -221,20 +303,12 @@ export const signInAutomatically = async () => {
   user.account = /** @type {User} */ (_user);
 
   // Copy user preferences passed with QR code
-  if (copiedPrefs) {
-    Object.assign(prefs, copiedPrefs);
+  if (verified && copiedPrefs) {
+    copyMagicLinkPrefs(copiedPrefs);
   }
 
   try {
-    // The pull requests don’t depend on the files, so they’re requested at the same time
-    const pullRequests = startLoadingPullRequests();
-
-    await _backend.fetchFiles();
-    await loadUnpublishedEntries(pullRequests);
-    // The deploy state is a nicety, so it’s resolved in the background rather than delaying the UI
-    initDeployments();
-    // From here on, someone else’s commits are picked up as they land
-    startRemoteChangePolling();
+    await loadRepositoryData(_backend);
   } catch (/** @type {any} */ ex) {
     // The API request may fail if the cached token has been expired or revoked. Then let the user
     // sign in again. 404 Not Found is also considered an authentication error.
@@ -296,15 +370,7 @@ export const signInManually = async (_backendName, token) => {
   user.account = _user;
 
   try {
-    // The pull requests don’t depend on the files, so they’re requested at the same time
-    const pullRequests = startLoadingPullRequests();
-
-    await _backend.fetchFiles();
-    await loadUnpublishedEntries(pullRequests);
-    // The deploy state is a nicety, so it’s resolved in the background rather than delaying the UI
-    initDeployments();
-    // From here on, someone else’s commits are picked up as they land
-    startRemoteChangePolling();
+    await loadRepositoryData(_backend);
   } catch (/** @type {any} */ ex) {
     logError(ex, 'dataFetch');
     await clearUserCacheIfNeeded(ex);

@@ -7,6 +7,7 @@ import {
   createDerivedState,
   createRawState,
   createRootEffect,
+  createStableDerivedState,
   createState,
   getSnapshot,
   watch,
@@ -37,6 +38,34 @@ describe('utils/state', () => {
       const state = createState({ a: 1 });
 
       expect(createState(state)).toBe(state);
+    });
+
+    it('should hand out a static property as it is, rather than a proxy of it', () => {
+      const config = { nested: { b: 2 } };
+      const reactive = { nested: { b: 2 } };
+      const state = createState({ config, reactive }, ['config']);
+
+      expect(state.config).toBe(config);
+      // A reactive property, in contrast, is handed out as a proxy
+      expect(state.reactive).not.toBe(reactive);
+      expect(state.reactive).toEqual(reactive);
+    });
+
+    it('should skip a static key the object doesn’t carry', () => {
+      const state = createState({ a: 1 }, ['config']);
+
+      expect('config' in state).toBe(false);
+      expect(state.a).toBe(1);
+    });
+
+    it('should hand out the same static property to every state built from it', () => {
+      // Two proxies of the same configuration would look like a change to every reader
+      // @see https://github.com/sveltia/sveltia-cms/issues/1006
+      const config = { nested: { b: 2 } };
+
+      expect(createState({ config }, ['config']).config).toBe(
+        createState({ config }, ['config']).config,
+      );
     });
   });
 
@@ -78,6 +107,37 @@ describe('createDerivedState()', () => {
 
     state.current = 3;
     expect(derived.current).toBe(6);
+  });
+});
+
+describe('createStableDerivedState()', () => {
+  it('should keep the previous value while the new one is deeply equal', () => {
+    const state = createRawState({ sort: { key: 'title' }, type: 'list' });
+    const derived = createStableDerivedState(() => state.current.sort);
+    const dependent = createDerivedState(() => ({ sort: derived.current }));
+    const first = derived.current;
+    const firstDependent = dependent.current;
+
+    expect(first).toEqual({ key: 'title' });
+
+    // A different object with the same value is not passed on, so the dependent isn’t recomputed
+    state.current = { sort: { key: 'title' }, type: 'grid' };
+    expect(derived.current).toBe(first);
+    expect(dependent.current).toBe(firstDependent);
+
+    state.current = { sort: { key: 'date' }, type: 'grid' };
+    expect(derived.current).toEqual({ key: 'date' });
+    expect(dependent.current).not.toBe(firstDependent);
+  });
+
+  it('should hand out the first value even when it is undefined', () => {
+    const state = createRawState(/** @type {string | undefined} */ (undefined));
+    const derived = createStableDerivedState(() => state.current);
+
+    expect(derived.current).toBeUndefined();
+
+    state.current = 'a';
+    expect(derived.current).toBe('a');
   });
 });
 

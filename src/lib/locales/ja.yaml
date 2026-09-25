@@ -208,6 +208,10 @@ sign_in: ログイン
 sign_in_with_mobile: モバイルでログイン
 # Instructions shown in the mobile sign-in dialog for passwordless authentication
 sign_in_with_mobile_instruction: 以下の QR コードを携帯電話かタブレットでスキャンすると、パスワードなしでログインできます。ユーザー設定は自動的にコピーされます。
+# Confirmation dialog shown when the CMS is opened with a sign-in link from the mobile sign-in
+# QR code. {$account} is the account name, {$service} is the Git service name, e.g. GitHub
+sign_in_with_link: リンクでログイン
+sign_in_with_link_confirmation: このリンクを使うと {$service} に {$account} としてログインし、リンクを作成したデバイスのユーザー設定がコピーされます。ご自身で作成したリンクの場合のみ続行してください。
 
 # Account menu: user status and repository mode indicators
 # Shown at the top of the account dropdown menu
@@ -899,6 +903,8 @@ entry_validation_errors: |
   .match $count
     1   {{ ひとつのフィールドにエラーがあります。エントリーを保存するには問題を修正してください。 }}
     *   {{ {$count} 個のフィールドにエラーがあります。エントリーを保存するには問題を修正してください。 }}
+# Button on the validation error toast that opens the Validation panel listing the errors
+show_errors: エラーを表示
 
 # ==============================================================================
 # Success Notifications
@@ -1260,6 +1266,12 @@ entry_sidebar:
     # Button in the panel header that validates the entry on demand
     validate: 検証
 
+  # Slug panel: shows the entry slug and lets the user edit it
+  slug:
+    title: スラッグ
+    generated_on_save: スラッグはエントリーの保存時にその内容から生成されます。スラッグに含まれる日時は保存時のものになります。
+    unavailable: このエントリーにはスラッグがありません。
+
   # History panel: shows entry commit history
   history:
     title: 履歴
@@ -1413,6 +1425,7 @@ assets_dialog:
   title:
     file: ファイルを選択
     image: 画像を選択
+    folder: フォルダーを選択
 
   # Search input labels
   search_for_file: ファイルを検索
@@ -1420,6 +1433,12 @@ assets_dialog:
 
   # Locations panel aria-label
   locations: 場所
+
+  # Folder selection mode for a File field with the `select_folder` option. {$path} is the public
+  # path of the folder to be selected, and {$count} is the number of folders selected
+  selected_folder: '選択中のフォルダー: {$path}'
+  selected_folders: '{$count} 個のフォルダーを選択中'
+  no_subfolders: このフォルダーにはサブフォルダーがありません。
 
   # Asset folder options
   folder:
@@ -1835,6 +1854,8 @@ config:
     preview_path_field_not_found: '`preview_path` オプションで `{$name}` が参照されていますが、そのフィールドはコレクションに定義されていないため、プレビューリンクは表示されません。'
     # {$name} is the default identifier field name; Don’t localize `identifier_field` and `slug`
     missing_identifier_field: コレクションに新しいエントリーの名前となる `{$name}` フィールドがないため、新しいエントリーにはランダムなスラッグが付けられます。`{$name}` フィールドを追加するか、`identifier_field` または `slug` オプションを設定してください。
+    # Don’t localize `slug`, `i18n`, `multiple_files`, `multiple_folders` and `multiple_root_folders`
+    slug_i18n_ineffective: コレクションが各ロケールのファイルを個別に持つ `multiple_files`、`multiple_folders`、`multiple_root_folders` のいずれの i18n 構造も使用していないため、`slug` の `i18n` オプションは効果がありません。
     # Don’t localize `i18n`
     i18n_not_configured: '`i18n` オプションが有効になっていますが、設定のトップレベルまたはコレクションで i18n が設定されていないため、このオプションは効果がありません。'
     # {$option} is an option path from the configuration, such as `filter.Regulation`

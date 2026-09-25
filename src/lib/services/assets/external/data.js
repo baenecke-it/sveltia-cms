@@ -11,7 +11,7 @@ import {
   selectedExternalAssets,
   selectedExternalDirPath,
 } from '$lib/services/assets/external';
-import { processFile } from '$lib/services/assets/process';
+import { partitionProcessedFiles, processFile } from '$lib/services/assets/process';
 import { cmsConfig } from '$lib/services/config';
 import { UPDATE_TOAST_DEFAULT_STATE } from '$lib/services/contents/collection/data';
 import { createDeepState, createRawState } from '$lib/services/utils/state.svelte';
@@ -79,6 +79,24 @@ const setAssets = (assets) => {
       ...externalAssetCounts.current,
       [service.serviceId]: assets.length,
     };
+  }
+};
+
+/**
+ * Drop the given assets from the list, the selection and the focus, once a deletion has removed
+ * them from the service.
+ * @param {ExternalAsset[]} assets Assets that no longer exist.
+ */
+const forgetDeletedAssets = (assets) => {
+  const deletedIds = new Set(assets.map(({ id }) => id));
+
+  setAssets(externalAssets.current?.filter(({ id }) => !deletedIds.has(id)));
+  selectedExternalAssets.current = selectedExternalAssets.current.filter(
+    ({ id }) => !deletedIds.has(id),
+  );
+
+  if (focusedExternalAsset.current && deletedIds.has(focusedExternalAsset.current.id)) {
+    focusedExternalAsset.current = undefined;
   }
 };
 
@@ -209,16 +227,9 @@ export const uploadExternalAssets = async (files, { originalAsset } = {}) => {
   const service = selectedCloudService.current;
   const sharedOptions = getSharedMediaLibraryOptions();
   const processed = await Promise.all(files.map((file) => processFile(file, sharedOptions)));
-
-  const validFiles = processed
-    .filter(({ oversized, invalid }) => !oversized && !invalid)
-    .map(({ file }) => file);
-
-  const oversizedFileNames = processed
-    .filter(({ oversized, invalid }) => oversized && !invalid)
-    .map(({ file }) => file.name);
-
-  const invalidFileNames = processed.filter(({ invalid }) => invalid).map(({ file }) => file.name);
+  const { validFiles, oversizedFiles, invalidFiles } = partitionProcessedFiles(processed);
+  const oversizedFileNames = oversizedFiles.map(({ name }) => name);
+  const invalidFileNames = invalidFiles.map(({ name }) => name);
 
   if (service && validFiles.length) {
     externalAssetsToast.current = {
@@ -284,17 +295,7 @@ export const deleteExternalAssets = async (assets) => {
     return false;
   }
 
-  const deletedIds = new Set(assets.map(({ id }) => id));
-
-  setAssets(externalAssets.current?.filter(({ id }) => !deletedIds.has(id)));
-  selectedExternalAssets.current = selectedExternalAssets.current.filter(
-    ({ id }) => !deletedIds.has(id),
-  );
-
-  if (focusedExternalAsset.current && deletedIds.has(focusedExternalAsset.current.id)) {
-    focusedExternalAsset.current = undefined;
-  }
-
+  forgetDeletedAssets(assets);
   reportSuccess('deleted', assets.length);
 
   return true;
@@ -336,6 +337,15 @@ export const renameExternalAsset = async (asset, newName) => {
  */
 export const getExternalSubfolderAssets = (dirPath) =>
   (externalAssets.current ?? []).filter(({ description }) => description.startsWith(`${dirPath}/`));
+
+/**
+ * Get a folder on the selected cloud storage service and every folder below it, which are what a
+ * rename rebases and a deletion removes.
+ * @param {string} dirPath Folder path relative to the configured prefix.
+ * @returns {string[]} Folder paths.
+ */
+const getExternalFolderTree = (dirPath) =>
+  externalFolders.current.filter((path) => path === dirPath || path.startsWith(`${dirPath}/`));
 
 /**
  * Create an empty folder in the folder being browsed on the selected cloud storage service. The
@@ -391,10 +401,7 @@ export const renameExternalFolder = async ({ path: dirPath }, newName) => {
   const rebase = (path) => `${newDirPath}${path.slice(dirPath.length)}`;
   const fetchOptions = getFetchOptions(service);
   const assets = getExternalSubfolderAssets(dirPath);
-
-  const folders = externalFolders.current.filter(
-    (path) => path === dirPath || path.startsWith(`${dirPath}/`),
-  );
+  const folders = getExternalFolderTree(dirPath);
 
   externalAssetsToast.current = { show: true, status: 'info', message: 'renaming_folder' };
 
@@ -449,10 +456,7 @@ export const deleteExternalFolder = async ({ path: dirPath }) => {
 
   const fetchOptions = getFetchOptions(service);
   const assets = getExternalSubfolderAssets(dirPath);
-
-  const folders = externalFolders.current.filter(
-    (path) => path === dirPath || path.startsWith(`${dirPath}/`),
-  );
+  const folders = getExternalFolderTree(dirPath);
 
   externalAssetsToast.current = { show: true, status: 'info', message: 'deleting_folder' };
 
@@ -473,17 +477,8 @@ export const deleteExternalFolder = async ({ path: dirPath }) => {
     return false;
   }
 
-  const deletedIds = new Set(assets.map(({ id }) => id));
-
-  setAssets(externalAssets.current?.filter(({ id }) => !deletedIds.has(id)));
+  forgetDeletedAssets(assets);
   externalFolders.current = externalFolders.current.filter((path) => !folders.includes(path));
-  selectedExternalAssets.current = selectedExternalAssets.current.filter(
-    ({ id }) => !deletedIds.has(id),
-  );
-
-  if (focusedExternalAsset.current && deletedIds.has(focusedExternalAsset.current.id)) {
-    focusedExternalAsset.current = undefined;
-  }
 
   // The Info pane has nothing to describe once the folder is gone
   if (focusedExternalSubfolder.current?.path === dirPath) {

@@ -1,6 +1,8 @@
 import { beforeAll, describe, expect, test, vi } from 'vitest';
 import { page } from 'vitest/browser';
 
+import { entryEditorSettings } from '$lib/services/contents/editor/settings';
+import { env } from '$lib/services/user/env.svelte';
 import { initTestConfig } from '$lib/test/config';
 import { createMockDraft, renderWithDraft } from '$lib/test/draft';
 
@@ -77,6 +79,25 @@ describe('ValidationPanel', () => {
     );
   });
 
+  test('hands the selected field over when asked to', async () => {
+    const onSelectField = vi.fn();
+    const postMessage = vi.spyOn(window, 'postMessage');
+
+    await renderWithDraft(ValidationPanel, {
+      draft: createMockDraft({
+        collectionName: 'pages',
+        fields,
+        values: { _default: { title: '', body: 'long enough text' } },
+      }),
+      props: { onSelectField },
+    });
+    await page.getByRole('button', { name: 'Validate' }).click();
+    await page.getByRole('button', { name: /Title/ }).click();
+
+    expect(onSelectField).toHaveBeenCalledExactlyOnceWith({ locale: '_default', keyPath: 'title' });
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
   test('has nothing to validate without a draft', async () => {
     await renderWithDraft(ValidationPanel, { draft: /** @type {any} */ (null) });
 
@@ -97,5 +118,30 @@ describe('ValidationPanel', () => {
     await expect.element(page.getByText('No errors found.')).toBeInTheDocument();
     // A single locale has no heading
     expect(page.getByRole('heading', { level: 4 }).elements()).toHaveLength(0);
+  });
+
+  test('lists a slug error, which opens the Slug panel', async () => {
+    env.isSmallScreen = false;
+
+    const draft = createMockDraft({
+      fields,
+      values: { _default: { title: 'Hello', body: 'long enough, yes', note: '' } },
+      draft: { slugEditor: { _default: true }, currentSlugs: { _default: '' } },
+    });
+
+    // The slug is only given with the slug editor, so it’s required
+    /** @type {any} */ (draft.collection).slug = { editable: true };
+
+    await renderWithDraft(ValidationPanel, { draft });
+
+    const panel = page.getByRole('group', { name: 'Validation' });
+
+    await panel.getByRole('button', { name: 'Validate' }).click();
+
+    const slugButton = panel.getByRole('button', { name: /Slug/ });
+
+    await expect.element(slugButton).toMatchTextContent(/Slug.*The slug cannot be empty\./);
+    await slugButton.click();
+    expect(entryEditorSettings.current?.sidebarPanel).toBe('slug');
   });
 });

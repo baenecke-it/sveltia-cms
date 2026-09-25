@@ -606,6 +606,10 @@
  * File field properties.
  * @typedef {object} FileFieldProps
  * @property {'file'} widget Field type.
+ * @property {boolean} [select_folder] Whether to select a folder instead of a file. The public
+ * path of the selected folder, e.g. `/images/gallery`, is saved as the field value. Only an asset
+ * folder with a fixed path can be browsed, so entry-relative folders and folders with template tags
+ * are not available, nor are external media storage providers. Default: `false`.
  * @see https://decapcms.org/docs/widgets/#File
  * @see https://sveltiacms.app/en/docs/fields/file
  */
@@ -980,7 +984,7 @@
 
 /**
  * Select field option value.
- * @typedef {string | number | null} SelectFieldValue
+ * @typedef {string | number | boolean | null} SelectFieldValue
  */
 
 /**
@@ -1318,7 +1322,13 @@
  * @property {ViewComparisonValue[]} [in] Values one of which the field value has to be equal to.
  * @property {ViewComparisonValue[]} [not_in] Values the field value has to be different from. An
  * entry without a value for the field also matches.
+ * @property {boolean} [empty] Whether the field value has to be empty (`true`) or not (`false`). A
+ * value is empty if the field is missing from the entry, e.g. because it was added to the
+ * configuration after the entry was created, or if it’s `null`, an empty string, an empty list, or
+ * an Object field whose subfields are all empty. This works in every configuration format,
+ * including TOML, which has no `null`.
  * @see https://sveltiacms.app/en/docs/collections/entries/views#filtering
+ * @see https://github.com/sveltia/sveltia-cms/issues/1004
  */
 
 /**
@@ -1551,13 +1561,14 @@
  * @property {FileExtension} [extension] File extension. Default: `md`.
  * @property {FieldKeyPath} [identifier_field] Field name to be used as the title and slug of an
  * entry. Default: `title`.
- * @property {string} [slug] Item slug template. Default: `identifier_field` option value. It cannot
- * contain slashes; to organize entries in subfolders, use the `path` option instead. It’s possible
- * to [localize the slug](https://sveltiacms.app/en/docs/i18n/slugs#localizing-entry-slugs) or [use
- * a random ID](https://sveltiacms.app/en/docs/collections/entries/slugs#slug-template-tags). Also,
- * it’s possible to show a special slug editor field in initial entry drafts by using
- * `{{fields._slug}}` (with an underscore prefix) or `{{fields._slug | localize}}` (to localize the
- * slug).
+ * @property {string | CollectionSlugOptions} [slug] Item slug template, or an object with the
+ * template and the options to let users edit the slug. Default: `identifier_field` option value.
+ * The template cannot contain slashes; to organize entries in subfolders, use the `path` option
+ * instead. It’s possible to [localize the
+ * slug](https://sveltiacms.app/en/docs/i18n/slugs#localizing-entry-slugs) or [use a random
+ * ID](https://sveltiacms.app/en/docs/collections/entries/slugs#slug-template-tags). The
+ * `{{fields._slug}}` and `{{fields._slug | localize}}` tags, which show a slug editor in new entry
+ * drafts, are deprecated; use the object form with the `editable` and `i18n` options instead.
  * @property {number} [slug_length] The maximum number of characters allowed for an entry slug.
  * Default: `Infinity`.
  * DEPRECATED: Use the global `slug.maxlength` option instead.
@@ -1579,8 +1590,11 @@
  * @property {boolean | FieldKeyPath | FieldKeyPath[]} [thumbnail] Whether to show entry thumbnails
  * in the entry list. Default: `true` (auto-detect image/file fields). Set to `false` to disable, or
  * provide a field key path (e.g., `heroImage.src`) or an array of paths for fallbacks. Supports
- * nested fields with dot notation and wildcards (e.g., `images.*.src`). An empty array equals
- * `false`.
+ * nested fields with dot notation and wildcards (e.g., `images.*.src`). A value starting with a
+ * slash is a file path instead, resolved like an Image field value, which can contain template tags
+ * like the `preview_path` option, e.g. `/images/thumbnails/{{slug}}.webp`. Date and time tags are
+ * filled from the field named with the `preview_path_date_field` option, or the first DateTime
+ * field. An empty array equals `false`.
  * @property {number} [limit] The maximum number of entries that can be created in the collection.
  * Default: `Infinity`.
  * @property {FieldKeyPath | boolean} [aliases_field] Property name used to store URL aliases
@@ -1592,6 +1606,36 @@
  * defined in the `fields` option, in which case the property is left to the editor to manage.
  * @see https://decapcms.org/docs/collection-folder/
  * @see https://sveltiacms.app/en/docs/collections/entries
+ */
+
+/**
+ * Stage of an entry’s life at which its slug can be edited: when the entry is created, or once it
+ * has been saved.
+ * @typedef {'create' | 'update'} SlugEditableStage
+ */
+
+/**
+ * Entry slug options for an entry collection. Not to be confused with the global `slug` option,
+ * which defines how slugs are formatted across the site.
+ * @typedef {object} CollectionSlugOptions
+ * @property {string} [template] Slug template. Default: `identifier_field` option value. It cannot
+ * contain slashes; to organize entries in subfolders, use the `path` option instead.
+ * @property {boolean | SlugEditableStage[]} [editable] Whether users can edit the slug. `true`
+ * means both when an entry is created and once it has been saved, `false` means neither, and an
+ * array like `[create]` or `[update]` picks the stages. Default: `true`. When the slug is editable
+ * on creation, a new entry draft shows a slug field, prefilled with the slug the template fills,
+ * whose value takes over from the template once it’s typed in. If the option is set to allow it
+ * without a `template`, the slug has to be typed in.
+ * @property {boolean | 'duplicate'} [i18n] Whether each locale has a slug of its own. `true` lets
+ * users edit the slug for each locale, and fills every field tag in the template with the locale’s
+ * own value. `duplicate` (default) shares the default locale’s slug with the other locales. It only
+ * has an effect with the `multiple_files`, `multiple_folders` or `multiple_root_folders` i18n
+ * structure.
+ * @property {string} [hint] Short description shown with the slug field.
+ * @property {[string | RegExp, string]} [pattern] Validation format of the slug. The first argument
+ * is a regular expression matching pattern for a valid slug, and the second argument is an error
+ * message to be displayed when the slug does not match the pattern.
+ * @see https://github.com/sveltia/sveltia-cms/issues/999
  */
 
 /**

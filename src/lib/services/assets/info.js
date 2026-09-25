@@ -4,6 +4,7 @@ import mime from 'mime';
 
 import { allAssets, getAssetByPath, isRelativePath } from '$lib/services/assets';
 import { getAssetFoldersByPath, globalAssetFolder } from '$lib/services/assets/folders';
+import { canCreateThumbnail, hasPDFThumbnail } from '$lib/services/assets/kinds';
 import { backend } from '$lib/services/backends';
 import {
   TEMPLATE_TAG_REGEX,
@@ -12,8 +13,10 @@ import {
 import { cmsConfig } from '$lib/services/config';
 import { allCloudStorageServices } from '$lib/services/integrations/media-libraries/cloud';
 import { getMergedLibraryOptions } from '$lib/services/integrations/media-libraries/cloud/cloudinary';
+import { shareInFlight } from '$lib/services/utils/cache';
 import { getRepositoryDatabase } from '$lib/services/utils/database';
 import { createPath, createPathRegEx, encodeFilePath } from '$lib/services/utils/file';
+import { createInertSVG } from '$lib/services/utils/media/image/svg';
 import {
   THUMBNAIL_TRANSFORM_OPTIONS,
   transformImage,
@@ -24,6 +27,7 @@ import { renderPDF } from '$lib/services/utils/media/pdf';
  * @import { IndexedDB } from '@sveltia/utils/storage';
  * @import {
  * Asset,
+ * AssetFolderInfo,
  * Entry,
  * InternalCmsConfig,
  * MediaFieldSource,
@@ -64,13 +68,20 @@ export const _resetAssetBlobCache = () => {
 };
 
 /**
- * Give the asset an object URL for the given blob if it doesn’t have one yet.
+ * Give the asset an object URL for the given blob if it doesn’t have one yet. An SVG image gets the
+ * URL of a wrapper that can’t run any script, because the URL has the CMS origin and could be
+ * opened in a new tab from a preview; the blob itself is left untouched.
  * @param {Asset} asset Asset.
  * @param {Blob} blob Blob.
- * @returns {Blob} The same blob.
+ * @returns {Promise<Blob>} The same blob.
  */
-const cacheAssetBlobURL = (asset, blob) => {
-  asset.blobURL ??= URL.createObjectURL(blob);
+const cacheAssetBlobURL = async (asset, blob) => {
+  if (!asset.blobURL) {
+    const displayBlob = blob.type === 'image/svg+xml' ? await createInertSVG(blob) : blob;
+
+    // Another caller may have created the URL while the wrapper was being made
+    asset.blobURL ??= URL.createObjectURL(displayBlob);
+  }
 
   return blob;
 };
@@ -80,10 +91,10 @@ const cacheAssetBlobURL = (asset, blob) => {
  * callers can have it without reading the URL back.
  * @param {Asset} asset Asset.
  * @param {Blob} blob Blob.
- * @returns {Blob} The same blob.
+ * @returns {Promise<Blob>} The same blob.
  */
-const cacheAssetBlob = (asset, blob) => {
-  cacheAssetBlobURL(asset, blob);
+const cacheAssetBlob = async (asset, blob) => {
+  await cacheAssetBlobURL(asset, blob);
 
   if (asset.blobURL) {
     cachedBlobs.set(asset.blobURL, blob);
@@ -99,19 +110,7 @@ const cacheAssetBlob = (asset, blob) => {
  * @param {() => Promise<Blob>} download Function that performs the download.
  * @returns {Promise<Blob>} Blob.
  */
-const downloadOnce = (key, download) => {
-  let pending = pendingAssetBlobs.get(key);
-
-  if (!pending) {
-    pending = download().finally(() => {
-      pendingAssetBlobs.delete(key);
-    });
-
-    pendingAssetBlobs.set(key, pending);
-  }
-
-  return pending;
-};
+const downloadOnce = (key, download) => shareInFlight(pendingAssetBlobs, key, download);
 
 /**
  * Download the given asset from the backend.
@@ -158,7 +157,7 @@ export const getAssetBlob = async (asset) => {
 
   if (handle) {
     try {
-      return cacheAssetBlob(asset, await handle.getFile());
+      return await cacheAssetBlob(asset, await handle.getFile());
     } catch {
       throw new Error('Failed to retrieve blob from file handle');
     }
@@ -262,35 +261,28 @@ export const hasCachedThumbnail = async (sha) => {
  * so it can be revoked independently.
  */
 export const getAssetThumbnailURL = async (asset, { cacheOnly = false } = {}) => {
-  const isPDF = asset.name.endsWith('.pdf');
-
-  if (!(['image', 'video'].includes(asset.kind) || isPDF)) {
+  if (!canCreateThumbnail(asset)) {
     return undefined;
   }
+
+  const isPDF = hasPDFThumbnail(asset.name);
 
   initThumbnailDB();
 
   const { sha } = asset;
-  let pending = pendingThumbnailBlobs.get(sha);
 
-  if (!pending) {
-    if (cacheOnly) {
-      // Nothing is being generated for this asset, so stick to a cache lookup as requested
-      const cachedBlob = await thumbnailDB?.get(sha);
+  if (cacheOnly && !pendingThumbnailBlobs.has(sha)) {
+    // Nothing is being generated for this asset, so stick to a cache lookup as requested
+    const cachedBlob = await thumbnailDB?.get(sha);
 
-      return cachedBlob ? URL.createObjectURL(cachedBlob) : undefined;
-    }
-
-    pending = resolveThumbnailBlob(asset, isPDF).finally(() => {
-      pendingThumbnailBlobs.delete(sha);
-    });
-
-    pendingThumbnailBlobs.set(sha, pending);
+    return cachedBlob ? URL.createObjectURL(cachedBlob) : undefined;
   }
 
   // A `cacheOnly` caller joins an in-flight resolution rather than reading the database again: the
   // work is already happening, so waiting for it costs nothing extra
-  const thumbnailBlob = await pending;
+  const thumbnailBlob = await shareInFlight(pendingThumbnailBlobs, sha, () =>
+    resolveThumbnailBlob(asset, isPDF),
+  );
 
   return thumbnailBlob ? URL.createObjectURL(thumbnailBlob) : undefined;
 };
@@ -467,6 +459,26 @@ export const getAssetPublicURL = (
   }
 
   return `${baseURL}${path}`;
+};
+
+/**
+ * Get the public path of a directory in an asset folder, which is saved as the value of a File
+ * field with the `select_folder` option.
+ * @param {object} args Arguments.
+ * @param {AssetFolderInfo} args.folder Asset folder with a fixed path, which can be browsed by
+ * subfolder.
+ * @param {string} args.subfolderPath Path of the directory below the folder, relative to it. Empty
+ * for the folder root.
+ * @returns {string} Public path, e.g. `/images/gallery`.
+ */
+export const getFolderPublicPath = ({ folder, subfolderPath }) => {
+  const { output: { encode_file_path: encodingEnabled = false } = {} } =
+    /** @type {InternalCmsConfig} */ (cmsConfig.current);
+
+  const basePath = (folder.publicPath ?? '').replace(/\/$/, '');
+  const path = (subfolderPath ? `${basePath}/${subfolderPath}` : basePath) || '/';
+
+  return encodingEnabled ? encodeFilePath(path) : path;
 };
 
 /**

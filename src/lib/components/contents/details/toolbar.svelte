@@ -22,7 +22,6 @@
 
   import CascadeDeleteNote from '$lib/components/common/cascade-delete-note.svelte';
   import BackButton from '$lib/components/common/page-toolbar/back-button.svelte';
-  import EditSlugDialog from '$lib/components/contents/details/edit-slug-dialog.svelte';
   import PreviewLinkButton from '$lib/components/contents/details/preview-link-button.svelte';
   import EntryStatusMenu from '$lib/components/workflow/entry-status-menu.svelte';
   import PublishEntryButton from '$lib/components/workflow/publish-entry-button.svelte';
@@ -37,11 +36,7 @@
   } from '$lib/services/contents/collection/data';
   import { deleteEntries } from '$lib/services/contents/collection/data/delete';
   import { getCollectionFileLabel } from '$lib/services/contents/collection/files';
-  import {
-    getSharedEntryFileName,
-    isNestedCollection,
-    nestedFilterPath,
-  } from '$lib/services/contents/collection/nested';
+  import { isNestedCollection, nestedFilterPath } from '$lib/services/contents/collection/nested';
   import { collectionState } from '$lib/services/contents/collection/view';
   import { createDraft } from '$lib/services/contents/draft/create';
   import { duplicateDraft } from '$lib/services/contents/draft/create/duplicate';
@@ -52,6 +47,8 @@
   import { validateDraft } from '$lib/services/contents/draft/validate';
   import { activeInlineEditors, copyFromLocaleToast } from '$lib/services/contents/editor';
   import { entryEditorSettings } from '$lib/services/contents/editor/settings';
+  import { getSidebarPanels, showSidebarPanel } from '$lib/services/contents/editor/sidebar';
+  import { canUpdateSlug } from '$lib/services/contents/editor/slug';
   import { getAssociatedAssets } from '$lib/services/contents/entry/assets';
   import { planCascadeDelete } from '$lib/services/contents/entry/relations/cascade/delete';
   import { getEntrySummary } from '$lib/services/contents/entry/summary';
@@ -68,6 +65,7 @@
     isWorkflowEnabled,
     workflowEnabled,
   } from '$lib/services/workflow';
+  import { getDiscardDialogStrings } from '$lib/services/workflow/dialogs';
   import { openAuthoring } from '$lib/services/workflow/open-authoring';
   import {
     deleteWorkflowEntry,
@@ -104,7 +102,6 @@
   // count: the fields are revalidated as they’re corrected, and a toast counting down to “0 fields
   // have errors” while it’s still on screen would be confusing
   let errorCount = $state(0);
-  let showEditSlugDialog = $state(false);
   let showDeleteDialog = $state(false);
   let showReviewDialog = $state(false);
   /**
@@ -140,14 +137,6 @@
   const isIndexFile = $derived(!!entryDraft.current?.isIndexFile);
   const collection = $derived(entryDraft.current?.collection);
   const entryCollection = $derived(collection?._type === 'entry' ? collection : undefined);
-  /**
-   * Whether an entry is identified by its path within the collection folder rather than by a name
-   * of its own, which is the case in a nested collection that doesn’t store every entry as an index
-   * file. The slug editor can’t rename such an entry without relocating it, so it’s not offered.
-   */
-  const slugIsEntryPath = $derived(
-    !!collection && isNestedCollection(collection) && !getSharedEntryFileName(collection),
-  );
   const collectionFile = $derived(entryDraft.current?.collectionFile);
   const originalEntry = $derived(entryDraft.current?.originalEntry);
   const { i18nEnabled, allLocales, defaultLocale } = $derived(
@@ -236,6 +225,16 @@
   // An entry awaiting deletion is read-only: there’s nothing to save or move through the stages,
   // only the deletion itself to carry out or call off
   const pendingDeletion = $derived(isPendingDeletion(unpublishedEntry));
+  // The menu item either throws the pull request away or deletes the entry outright, depending on
+  // whether it has been published
+  const discardItemStrings = $derived(
+    getDiscardDialogStrings({ pendingDeletion, publishedVersionExists }),
+  );
+  // The discard dialog is only opened for an entry with a published version. Its text is kept as it
+  // is when the discarded entry goes away, so it doesn’t change while the dialog is closing
+  const discardDialogStrings = $derived(
+    getDiscardDialogStrings({ pendingDeletion, publishedVersionExists: true }),
+  );
   // What the deletion means for the entries referencing this one through Relation fields. Nothing
   // on the configured branch can reference a draft that has never been published, and the scan is
   // only worth doing while the dialog is open
@@ -612,6 +611,20 @@
       <Menu ariaLabel={_('editor_options')}>
         {#if env.isSmallScreen}
           {@render overflowButtons()}
+          <!-- The sidebar doesn’t fit on a small screen, so its panels open in a bottom sheet. The
+            menu can’t be opened while the toolbar is disabled -->
+          {#if !notFound}
+            {#each getSidebarPanels(entryDraft.current) as { key, disabled: panelDisabled } (key)}
+              <MenuItem
+                label={_(`entry_sidebar.${key}.title`)}
+                disabled={panelDisabled}
+                onclick={() => {
+                  showSidebarPanel(key);
+                }}
+              />
+            {/each}
+            <Divider />
+          {/if}
         {/if}
         {#if !disabled && !isNew}
           {@const canDuplicate =
@@ -650,18 +663,8 @@
             <MenuItem
               variant="ghost"
               disabled={controlsDisabled}
-              label={_(
-                pendingDeletion
-                  ? 'workflow.cancel_deletion'
-                  : publishedVersionExists
-                    ? 'discard'
-                    : 'delete',
-              )}
-              aria-label={pendingDeletion
-                ? _('workflow.cancel_deletion')
-                : publishedVersionExists
-                  ? _('workflow.discard_changes')
-                  : _('delete_entries', { values: { count: 1 } })}
+              label={discardItemStrings.label}
+              aria-label={discardItemStrings.title}
               onclick={() => {
                 if (publishedVersionExists) {
                   showDiscardDialog = true;
@@ -680,18 +683,17 @@
             }}
           />
         {/if}
-        <MenuItem
-          label={_('edit_slug')}
-          disabled={!!collectionFile ||
-            isNew ||
-            isIndexFile ||
-            pendingDeletion ||
-            entryCollection?.delete === false ||
-            slugIsEntryPath}
-          onclick={() => {
-            showEditSlugDialog = true;
-          }}
-        />
+        <!-- A shortcut to the Slug panel, which a small screen lists above along with the other
+          sidebar panels -->
+        {#if !env.isSmallScreen}
+          <MenuItem
+            label={_('edit_slug')}
+            disabled={!canUpdateSlug(entryDraft.current)}
+            onclick={() => {
+              showSidebarPanel('slug');
+            }}
+          />
+        {/if}
         <MenuItem
           label={_('revert_all_changes')}
           disabled={!modified || pendingDeletion}
@@ -756,6 +758,15 @@
 <Toast bind:show={showValidationToast}>
   <Alert status="error">
     {_('entry_validation_errors', { values: { count: errorCount } })}
+    <Button
+      variant="secondary"
+      size="small"
+      label={_('show_errors')}
+      onclick={() => {
+        showValidationToast = false;
+        showSidebarPanel('validation');
+      }}
+    />
   </Alert>
 </Toast>
 
@@ -770,8 +781,6 @@
     })}
   </Alert>
 </Toast>
-
-<EditSlugDialog bind:open={showEditSlugDialog} />
 
 <ConfirmationDialog
   bind:open={showReviewDialog}
@@ -824,8 +833,8 @@
 
 <ConfirmationDialog
   bind:open={showDiscardDialog}
-  title={_(pendingDeletion ? 'workflow.cancel_deletion' : 'workflow.discard_changes')}
-  okLabel={_(pendingDeletion ? 'workflow.cancel_deletion' : 'discard')}
+  title={discardDialogStrings.title}
+  okLabel={discardDialogStrings.label}
   onOk={async () => {
     await discardChanges();
   }}
@@ -833,11 +842,7 @@
     menuButton?.focus();
   }}
 >
-  {_(
-    pendingDeletion
-      ? 'workflow.confirm_cancelling_deletion'
-      : 'workflow.confirm_discarding_entry_changes',
-  )}
+  {discardDialogStrings.message}
 </ConfirmationDialog>
 
 <ConfirmationDialog

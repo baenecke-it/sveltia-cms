@@ -21,23 +21,22 @@
   import UploadButton from '$lib/components/contents/details/fields/file/upload-button.svelte';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
   import {
+    addMultiValueItems,
     moveMultiValueItem,
     removeMultiValueItem,
   } from '$lib/services/contents/draft/update/list';
   import { checkDuplicates } from '$lib/services/contents/fields/file/duplicates.svelte';
+  import { getTargetFolderPath, listAssets } from '$lib/services/contents/fields/file/helpers';
+  import { getUnsavedAssets } from '$lib/services/contents/fields/file/process';
   import {
-    getAssetLibraryFolderMap,
-    getDefaultAssetFolder,
-    getTargetFolderPath,
-    listAssets,
-  } from '$lib/services/contents/fields/file/helpers';
-  import { getUnsavedAssets, processResource } from '$lib/services/contents/fields/file/process';
-  import { allCloudStorageServices } from '$lib/services/integrations/media-libraries/cloud';
-  import {
-    getAcceptedImageTypes,
-    getDefaultMediaLibraryOptions,
-  } from '$lib/services/integrations/media-libraries/default';
+    getMediaFieldAssetOptions,
+    getRejectedFileNames,
+    processResources,
+    toFieldValue,
+  } from '$lib/services/contents/fields/file/resources';
+  import { getAcceptedImageTypes } from '$lib/services/integrations/media-libraries/default';
   import { isMultiple } from '$lib/services/integrations/media-libraries/shared';
+  import { focusReorderControl } from '$lib/services/utils/drag-sorting';
   import { createDragSorter } from '$lib/services/utils/drag-sorting.svelte';
 
   /**
@@ -47,7 +46,7 @@
    * FieldEditorProps,
    * SelectedResource,
    * } from '$lib/types/private';
-   * @import { MediaField } from '$lib/types/public';
+   * @import { FileField, MediaField } from '$lib/types/public';
    */
 
   /**
@@ -109,6 +108,10 @@
     accept,
     choose_url: canEnterURL = true,
   } = $derived(fieldConfig);
+  /** Whether the field takes a folder instead of a file, with the File field’s own option. */
+  const selectFolder = $derived(
+    fieldType === 'file' && /** @type {FileField} */ (fieldConfig).select_folder === true,
+  );
   const entry = $derived(entryDraft.current?.originalEntry);
   /* v8 ignore start -- the editor is only rendered while the draft is there */
   const collectionName = $derived(entryDraft.current?.collectionName ?? '');
@@ -117,23 +120,24 @@
   /* v8 ignore stop */
   const isImageField = $derived(fieldType === 'image');
   const kind = $derived(isImageField ? 'image' : undefined);
-  const defaultLibraryOptions = $derived(getDefaultMediaLibraryOptions({ fieldConfig }));
-  const libraryConfig = $derived(defaultLibraryOptions.config);
+  const assetOptions = $derived(
+    getMediaFieldAssetOptions({
+      collectionName,
+      fileName,
+      isIndexFile,
+      componentName,
+      typedKeyPath,
+      fieldConfig,
+    }),
+  );
+  const libraryConfig = $derived(assetOptions.libraryConfig);
   // An image field accepts HEIC photos only if they’re converted on upload
   const acceptedTypes = $derived(
     accept ??
       (isImageField ? getAcceptedImageTypes(libraryConfig.transformations).join(',') : undefined),
   );
-  const assetLibraryFolderMap = $derived(
-    getAssetLibraryFolderMap({
-      collectionName,
-      fileName,
-      componentName,
-      typedKeyPath,
-      isIndexFile,
-    }),
-  );
-  const targetFolder = $derived(getDefaultAssetFolder(assetLibraryFolderMap));
+  const assetLibraryFolderMap = $derived(assetOptions.folderMap);
+  const targetFolder = $derived(assetOptions.folder);
   const targetFolderPath = $derived(
     getTargetFolderPath({ entry: entryDraft.current?.originalEntry, folder: targetFolder }),
   );
@@ -172,15 +176,11 @@
     typedKeyPath,
     entry,
   });
-  const enabledCloudServiceEntries = $derived(
-    Object.entries(allCloudStorageServices).filter(
-      ([, { isEnabled }]) => isEnabled?.(fieldConfig) ?? true,
-    ),
-  );
+  const enabledCloudServiceEntries = $derived(assetOptions.cloudServiceEntries);
   /**
    * Whether the default (internal) media library is available as a storage provider.
    */
-  const isDefaultLibraryAvailable = $derived(defaultLibraryOptions.enabled && !!targetFolder);
+  const isDefaultLibraryAvailable = $derived(assetOptions.enabled && !!targetFolder);
   /**
    * The total number of available media storage providers (default and/or cloud).
    */
@@ -189,9 +189,9 @@
   );
   /**
    * Disable the drop zone if there are no providers or multiple providers are available, to avoid
-   * confusion about where dropped files will be stored.
+   * confusion about where dropped files will be stored. A folder can’t be dropped at all.
    */
-  const allowDrop = $derived(totalProviders === 1);
+  const allowDrop = $derived(totalProviders === 1 && !selectFolder);
 
   /**
    * Reset the current selection.
@@ -228,55 +228,33 @@
 
     // The field must not stay in the processing state if something goes wrong along the way
     try {
-      const resources = await Promise.all(
-        selectedResources.map((resource) => {
-          // Set the target folder for non-hotlinking stock assets from Pexels, etc.
-          if (resource.file && !resource.folder) {
-            resource.folder = targetFolder;
-          }
-
-          return processResource({ draft, resource, libraryConfig });
-        }),
-      );
-
-      /** @type {string[]} */
-      const credits = [];
-      let hasValidResource = false;
-
-      const lastIndex = multiple
-        ? (Object.keys(draft[valueStoreKey][locale])
-            .filter((key) => key.startsWith(`${keyPath}.`))
-            .map((key) => Number(key.replace(`${keyPath}.`, '')))
-            .pop() ?? -1)
-        : -1;
-
-      resources.forEach(({ value, credit, oversizedFileName, invalidFileName }, index) => {
-        if (value) {
-          hasValidResource = true;
-
-          if (multiple) {
-            const targetIndex = replaceMode ? replaceIndex : lastIndex + 1 + index;
-
-            draft[valueStoreKey][locale][`${keyPath}.${targetIndex}`] = value;
-          } else {
-            // Encode spaces as `%20` when the field is used in the rich text editor component to
-            // avoid issues with Markdown parsers that do not support unencoded spaces in URLs.
-            currentValue = inEditorComponent ? value.replaceAll(' ', '%20') : value;
-          }
-        }
-
-        if (credit) {
-          credits.push(credit);
-        }
-
-        if (oversizedFileName) {
-          oversizedFileNames.push(oversizedFileName);
-        }
-
-        if (invalidFileName) {
-          invalidFileNames.push(invalidFileName);
-        }
+      const resources = await processResources({
+        draft,
+        resources: selectedResources,
+        folder: targetFolder,
+        libraryConfig,
       });
+
+      const values = resources.flatMap(({ value }) => value ?? []);
+      const hasValidResource = !!values.length;
+
+      if (multiple) {
+        addMultiValueItems({
+          draft,
+          locale,
+          valueStoreKey,
+          keyPath,
+          newValues: values,
+          replaceIndex: replaceMode ? replaceIndex : undefined,
+        });
+      } else if (hasValidResource) {
+        // A single-value field takes the last file, like it would if they were picked in turn
+        currentValue = toFieldValue(/** @type {string} */ (values.at(-1)), inEditorComponent);
+      }
+
+      const credits = resources.flatMap(({ credit }) => credit || []);
+
+      ({ oversizedFileNames, invalidFileNames } = getRejectedFileNames(resources));
 
       // Restore the previous value if no valid resources were processed, so that a failed
       // upload/replace doesn’t leave an empty or invalid reference in the YAML
@@ -364,11 +342,7 @@
     moveMultiValueItem({ draft, locale, valueStoreKey, keyPath, from, to });
 
     await sleep(50);
-    // Move the focus back to the control on the item that was just moved, so that it can be used
-    // repeatedly without having to find it again
-    /** @type {HTMLElement | null | undefined} */ (
-      itemList?.children[to]?.querySelector(`button[data-action="${action}"]`)
-    )?.focus();
+    focusReorderControl({ listElement: itemList, index: to, action });
   };
 
   const sorter = createDragSorter({
@@ -409,11 +383,14 @@
     {processing}
     {isImageField}
     {multiple}
+    {selectFolder}
     bind:showSelectAssetsDialog
     bind:replaceMode
-    onFilePaste={(file) => {
-      onResourcesSelect([{ file, folder: targetFolder }]);
-    }}
+    onFilePaste={selectFolder
+      ? undefined
+      : (file) => {
+          onResourcesSelect([{ file, folder: targetFolder }]);
+        }}
   />
 {/snippet}
 
@@ -498,6 +475,7 @@
   multiple={replaceMode ? false : multiple}
   accept={acceptedTypes}
   {canEnterURL}
+  {selectFolder}
   draft={entryDraft.current}
   {fieldConfig}
   {assetLibraryFolderMap}

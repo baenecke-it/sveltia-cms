@@ -1,4 +1,5 @@
 import { dependencies, UNPKG_BASE_URL, version } from '$lib/services/app';
+import { BUNDLED_MARKER_ICON_URL, BUNDLED_MODULE_LOADERS } from '$lib/services/app/bundled-modules';
 
 /**
  * URL of the script the CMS was loaded from, captured while it’s running. `document.currentScript`
@@ -31,7 +32,18 @@ export const getUnpkgURL = (name) => {
  * @returns {Promise<any>} Module.
  */
 export const loadModule = async (library, path) =>
-  import(/* @vite-ignore */ `${getUnpkgURL(library)}/${path}`);
+  // The npm build has no fallback to UNPKG: webpack would take the variable specifier as a request
+  // to bundle every file in the package
+  import.meta.env.NPM_BUILD
+    ? BUNDLED_MODULE_LOADERS[library]()
+    : import(/* @vite-ignore */ `${getUnpkgURL(library)}/${path}`);
+
+/**
+ * Get the URL of the Leaflet map marker icon, which is bundled with the npm build as an asset.
+ * @returns {Promise<string>} URL.
+ */
+export const getLeafletMarkerIconURL = async () =>
+  BUNDLED_MARKER_ICON_URL ?? `${getUnpkgURL('leaflet')}/dist/images/marker-icon-2x.png`;
 
 /**
  * Get the URLs a chunk of the CMS bundle can be loaded from, in order of preference: next to the
@@ -63,12 +75,13 @@ export const getChunkURLs = (name, base = scriptURL) => {
  * imports, so the chunks stay out of the bundle.
  * @type {Record<string, () => Promise<any>>}
  */
-const devChunkLoaders = import.meta.env.DEV
-  ? {
-      // eslint-disable-next-line jsdoc/require-jsdoc
-      'react-dom': () => import('$lib/chunks/react-dom.js'),
-    }
-  : /* v8 ignore next */ {};
+const devChunkLoaders =
+  import.meta.env.DEV || import.meta.env.NPM_BUILD
+    ? {
+        // eslint-disable-next-line jsdoc/require-jsdoc
+        'react-dom': () => import('$lib/chunks/react-dom.js'),
+      }
+    : /* v8 ignore next */ {};
 
 /**
  * Load a chunk of the CMS bundle: a part of the app that’s built separately and only fetched when
@@ -78,7 +91,7 @@ const devChunkLoaders = import.meta.env.DEV
  * @throws {Error} If the chunk can’t be loaded from any location.
  */
 export const loadChunk = async (name) => {
-  if (name in devChunkLoaders) {
+  if (import.meta.env.NPM_BUILD || name in devChunkLoaders) {
     return devChunkLoaders[name]();
   }
 

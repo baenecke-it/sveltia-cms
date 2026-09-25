@@ -19,10 +19,10 @@ import { createRootEffect } from '$lib/services/utils/state.svelte';
 /**
  * Comparison operators a view filter or group can define in addition to, or instead of, `pattern`.
  * Listed in the order the operators are written to a condition key by {@link getConditionKey}.
- * @type {('eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte' | 'in' | 'not_in')[]}
+ * @type {('eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte' | 'in' | 'not_in' | 'empty')[]}
  * @see https://sveltiacms.app/en/docs/collections/entries/views#filtering
  */
-export const COMPARISON_OPERATORS = ['eq', 'ne', 'lt', 'lte', 'gt', 'gte', 'in', 'not_in'];
+export const COMPARISON_OPERATORS = ['eq', 'ne', 'lt', 'lte', 'gt', 'gte', 'in', 'not_in', 'empty'];
 
 /**
  * Get the conditions a view filter or group option defines, leaving out the `name` and `label`,
@@ -149,6 +149,27 @@ export const buildGroupMap = (items, pattern, getValue) => {
   });
 
   return Object.entries(groups).sort(([a], [b]) => compare(getGroupLabel(a), getGroupLabel(b)));
+};
+
+/**
+ * Group the given items by a view group’s conditions.
+ * @template T
+ * @param {T[]} items Items to group.
+ * @param {GroupingConditions | null | undefined} conditions Grouping conditions.
+ * @param {(item: T, field: string) => any} getValue Function to get the groupable field value from
+ * an item.
+ * @returns {Record<string, T[]>} Grouped items, where the key is a group name, displayed with
+ * {@link getGroupLabel}, and the value is an item list. Without a field to group by, all the items
+ * are in a single group named `*`.
+ */
+export const groupItems = (items, conditions, getValue) => {
+  const { field, pattern } = conditions ?? {};
+
+  if (!field) {
+    return items.length ? { '*': items } : {};
+  }
+
+  return Object.fromEntries(buildGroupMap(items, pattern, (item) => getValue(item, field)));
 };
 
 /**

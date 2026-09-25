@@ -89,6 +89,16 @@ describe('checkCollectionTemplates', () => {
       check({ slug: '{{locale}}-{{title}}' });
       expectReported([['slug', 'locale']]);
     });
+
+    test('check the template in the object form of the slug option', () => {
+      check({ slug: { template: '{{titel}}', editable: true } });
+      expectReported([['slug', 'titel']]);
+    });
+
+    test('leave the default slug template to the identifier field check', () => {
+      check({ slug: { editable: ['update'] }, fields: [{ name: 'name', widget: 'string' }] });
+      expectReported([]);
+    });
   });
 
   describe('summary', () => {
@@ -135,6 +145,22 @@ describe('checkCollectionTemplates', () => {
       expectReported([
         ['thumbnail', 'hero'],
         ['thumbnail', 'gallery.*.url'],
+      ]);
+    });
+
+    test('accepts a path whose field tags name fields', () => {
+      check({ thumbnail: '/images/{{slug}}/{{title}}.webp' });
+      check({ thumbnail: ['/images/{{fields.cover}}', 'cover'] });
+      expectReported([]);
+    });
+
+    test('reports field tags in a path that name no field', () => {
+      check({ thumbnail: '/images/{{fields.hero}}.webp' });
+      check({ thumbnail: ['/images/{{fields.icon}}.webp', 'hero'] });
+      expectReported([
+        ['thumbnail', 'fields.hero'],
+        ['thumbnail', 'fields.icon'],
+        ['thumbnail', 'hero'],
       ]);
     });
   });

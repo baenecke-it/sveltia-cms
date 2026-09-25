@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 // Create hoisted mocks
 const {
   mockGetMediaFieldURL,
+  mockGetMediaFieldSource,
   mockGetCollection,
   mockIsCollectionIndexFile,
   mockGetField,
@@ -16,8 +17,10 @@ const {
   mockAllAssets,
   mockGetPathInfo,
   mockGetEntriesByCollection,
+  mockFillEntryPathTemplate,
 } = vi.hoisted(() => ({
   mockGetMediaFieldURL: vi.fn(),
+  mockGetMediaFieldSource: vi.fn(),
   mockGetCollection: vi.fn(),
   mockIsCollectionIndexFile: vi.fn(),
   mockGetField: vi.fn(),
@@ -27,6 +30,7 @@ const {
   mockAllAssets: { current: /** @type {any} */ (undefined) },
   mockGetPathInfo: vi.fn(),
   mockGetEntriesByCollection: vi.fn(() => /** @type {any[]} */ ([])),
+  mockFillEntryPathTemplate: vi.fn(),
 }));
 
 // Mock the dependencies with hoisted functions
@@ -47,6 +51,7 @@ vi.mock('$lib/services/assets/folders', () => ({
 }));
 
 vi.mock('$lib/services/assets/info', () => ({
+  getMediaFieldSource: mockGetMediaFieldSource,
   getMediaFieldURL: mockGetMediaFieldURL,
 }));
 
@@ -60,6 +65,10 @@ vi.mock('$lib/services/contents/collection/entries', () => ({
 
 vi.mock('$lib/services/contents/collection/entries/index-file', () => ({
   isCollectionIndexFile: mockIsCollectionIndexFile,
+}));
+
+vi.mock('$lib/services/contents/entry', () => ({
+  fillEntryPathTemplate: mockFillEntryPathTemplate,
 }));
 
 vi.mock('$lib/services/contents/entry/fields', () => ({
@@ -76,7 +85,18 @@ vi.mock('@sveltia/utils/string', () => ({
 }));
 
 // Import after mocking
-const { getEntryThumbnail, getAssociatedAssets } = await import('./assets');
+const { getEntryThumbnail, getAssociatedAssets, isThumbnailPath } = await import('./assets');
+
+describe('isThumbnailPath', () => {
+  test('returns true for a path starting with a slash', () => {
+    expect(isThumbnailPath('/images/{{slug}}.webp')).toBe(true);
+  });
+
+  test('returns false for a field key path', () => {
+    expect(isThumbnailPath('image')).toBe(false);
+    expect(isThumbnailPath('images.*.src')).toBe(false);
+  });
+});
 
 describe('getEntryThumbnail', () => {
   beforeEach(() => {
@@ -365,6 +385,117 @@ describe('getAssociatedAssets', () => {
     const result = await getEntryThumbnail(mockCollection, mockEntryLocal);
 
     expect(result).toBe('https://example.com/test.jpg');
+  });
+
+  test('skips a file without a thumbnail, like a document, for the next candidate', async () => {
+    const mockCollection = /** @type {any} */ ({
+      name: 'posts',
+      _i18n: { defaultLocale: 'en' },
+      _thumbnailFieldNames: ['brochure', 'image'],
+    });
+
+    const mockEntryLocal = /** @type {any} */ ({
+      locales: {
+        en: { path: 'test.md', content: { brochure: '/files/flyer.docx', image: '/test.jpg' } },
+      },
+    });
+
+    mockGetMediaFieldSource.mockImplementation(({ value }) => ({
+      asset: value.endsWith('.docx')
+        ? { name: 'flyer.docx', kind: 'document' }
+        : { name: 'test.jpg', kind: 'image' },
+    }));
+    mockGetMediaFieldURL.mockImplementation(async ({ value }) => `https://example.com${value}`);
+
+    const result = await getEntryThumbnail(mockCollection, mockEntryLocal);
+
+    expect(result).toBe('https://example.com/test.jpg');
+    // The document isn’t shown as its own thumbnail
+    expect(mockGetMediaFieldURL).toHaveBeenCalledOnce();
+  });
+
+  test('fills in a path template and resolves it like a field value', async () => {
+    const collection = /** @type {any} */ ({
+      name: 'posts',
+      preview_path_date_field: 'date',
+      _i18n: { defaultLocale: 'en' },
+      _thumbnailFieldNames: ['/images/thumbnails/{{slug}}.webp'],
+    });
+
+    const entry = /** @type {any} */ ({
+      slug: 'hello',
+      locales: {
+        en: { slug: 'hello', path: 'content/posts/hello.md', content: { title: 'Hello' } },
+      },
+    });
+
+    mockIsCollectionIndexFile.mockReturnValue(false);
+    mockFillEntryPathTemplate.mockReturnValue('/images/thumbnails/hello.webp');
+    mockGetMediaFieldURL.mockResolvedValue('blob:hello');
+
+    const result = await getEntryThumbnail(collection, entry);
+
+    expect(result).toBe('blob:hello');
+    expect(mockFillEntryPathTemplate).toHaveBeenCalledWith({
+      pathTemplate: '/images/thumbnails/{{slug}}.webp',
+      dateFieldName: 'date',
+      fields: [],
+      collection,
+      locale: 'en',
+      slug: 'hello',
+      entryFilePath: 'content/posts/hello.md',
+      content: { title: 'Hello' },
+      isIndexFile: false,
+    });
+    expect(mockGetMediaFieldURL).toHaveBeenCalledWith({
+      value: '/images/thumbnails/hello.webp',
+      entry,
+      collectionName: 'posts',
+      typedKeyPath: undefined,
+      thumbnail: true,
+    });
+  });
+
+  test('uses the first locale when the default locale is missing', async () => {
+    const collection = /** @type {any} */ ({
+      name: 'posts',
+      fields: [{ name: 'title' }],
+      _i18n: { defaultLocale: 'en' },
+      _thumbnailFieldNames: ['/images/{{slug}}.webp'],
+    });
+
+    const entry = /** @type {any} */ ({
+      locales: { ja: { slug: 'konnichiwa', path: 'ja/konnichiwa.md', content: { title: 'x' } } },
+    });
+
+    mockFillEntryPathTemplate.mockReturnValue('/images/konnichiwa.webp');
+    mockGetMediaFieldURL.mockResolvedValue('blob:konnichiwa');
+
+    expect(await getEntryThumbnail(collection, entry)).toBe('blob:konnichiwa');
+    expect(mockFillEntryPathTemplate).toHaveBeenCalledWith(
+      expect.objectContaining({ locale: 'ja', slug: 'konnichiwa', fields: [{ name: 'title' }] }),
+    );
+  });
+
+  test('falls back to the next candidate when a path template cannot be filled', async () => {
+    const collection = /** @type {any} */ ({
+      name: 'posts',
+      _i18n: { defaultLocale: 'en' },
+      _thumbnailFieldNames: ['/images/{{fields.missing}}.webp', 'image'],
+    });
+
+    const entry = /** @type {any} */ ({
+      locales: { en: { slug: 'a', path: 'a.md', content: { image: '/images/a.jpg' } } },
+    });
+
+    mockFillEntryPathTemplate.mockReturnValue(undefined);
+    mockGetMediaFieldURL.mockResolvedValue('blob:a');
+
+    expect(await getEntryThumbnail(collection, entry)).toBe('blob:a');
+    expect(mockGetMediaFieldURL).toHaveBeenCalledTimes(1);
+    expect(mockGetMediaFieldURL).toHaveBeenCalledWith(
+      expect.objectContaining({ value: '/images/a.jpg', typedKeyPath: 'image' }),
+    );
   });
 
   test('filters duplicate assets', () => {
@@ -1041,6 +1172,22 @@ describe('getAssociatedAssets', () => {
 
       setupNestedCollection([ownAsset]);
       mockGetEntriesByCollection.mockReturnValue([parentEntry, childEntry]);
+
+      expect(
+        getAssociatedAssets({ entry: parentEntry, collectionName: 'pages', relative: true }),
+      ).toEqual([ownAsset]);
+    });
+
+    test('ignores an entry stored at the repository root', () => {
+      const ownAsset = /** @type {any} */ ({ path: 'pages/about/parent.jpg' });
+
+      const rootEntry = /** @type {any} */ ({
+        id: 'readme',
+        locales: { en: { path: 'README.md', content: { title: 'Readme' } } },
+      });
+
+      setupNestedCollection([ownAsset]);
+      mockGetEntriesByCollection.mockReturnValue([rootEntry, parentEntry, childEntry]);
 
       expect(
         getAssociatedAssets({ entry: parentEntry, collectionName: 'pages', relative: true }),

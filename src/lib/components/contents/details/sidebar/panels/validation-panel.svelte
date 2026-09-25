@@ -8,6 +8,7 @@
   import { validateEntry } from '$lib/services/contents/draft/validate';
   import { awaitCustomFieldValidations } from '$lib/services/contents/draft/validate/custom-fields';
   import { expandInvalidFields, highlightEditorField } from '$lib/services/contents/editor/fields';
+  import { showSidebarPanel } from '$lib/services/contents/editor/sidebar';
   import { getField } from '$lib/services/contents/entry/fields';
   import { getLocaleLabel } from '$lib/services/contents/i18n';
 
@@ -15,6 +16,19 @@
    * @import { EntryDraft } from '$lib/types/private';
    * @import { VisibleField } from '$lib/types/public';
    */
+
+  /**
+   * @typedef {object} Props
+   * @property {typeof highlightEditorField} [onSelectField] Called when an invalid field is
+   * selected. Defaults to highlighting the field in the editor.
+   */
+
+  /** @type {Props} */
+  let {
+    /* eslint-disable prefer-const */
+    onSelectField = highlightEditorField,
+    /* eslint-enable prefer-const */
+  } = $props();
 
   const entryDraft = getEntryDraftContext();
 
@@ -77,6 +91,22 @@
           <h4>{label}</h4>
         {/if}
         {#if Object.values(validities[locale]).some((v) => v.valid === false)}
+          {@const slugValidity = validities[locale]._slug}
+          {#if slugValidity?.valid === false}
+            <!-- The slug is edited in the Slug panel rather than in the editor -->
+            <Button
+              class="ref"
+              variant="ghost"
+              onclick={() => {
+                showSidebarPanel('slug');
+              }}
+            >
+              <span class="summary">{_('slug')}</span>
+              <ValidationError live="off">
+                {slugValidity.customErrorMessage}
+              </ValidationError>
+            </Button>
+          {/if}
           {#each Object.keys(valueMap) as keyPath (keyPath)}
             {@const field = getField({ ...getFieldArgs, valueMap, keyPath })}
             {@const messages = messagesByKey[keyPath] ?? []}
@@ -85,7 +115,7 @@
                 class="ref"
                 variant="ghost"
                 onclick={() => {
-                  highlightEditorField({ locale, keyPath });
+                  onSelectField({ locale, keyPath });
                 }}
               >
                 <span class="summary">
