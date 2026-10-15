@@ -20,8 +20,8 @@ export default [
       'playwright-report/',
       'test-results/',
       'bench-results/',
-      'admin/'
-    ]
+      'admin/',
+    ],
   },
 
   // Register @stylistic and import-x plugins for all files (including .svelte)
