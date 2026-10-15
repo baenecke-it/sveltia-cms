@@ -24,6 +24,10 @@ import {
 vi.mock('$lib/services/config');
 vi.mock('$lib/services/contents/collection', () => ({
   getCollection: vi.fn(),
+}));
+
+vi.mock('$lib/services/contents/collection/predicates', async (importOriginal) => ({
+  .../** @type {object} */ (await importOriginal()),
   isEntryCollection: vi.fn(() => true),
 }));
 vi.mock('$lib/services/contents/collection/entries', () => ({
@@ -37,6 +41,9 @@ vi.mock('$lib/services/contents/collection/entries/index-file', () => ({
 }));
 vi.mock('$lib/services/contents/entry/fields', () => ({
   getField: vi.fn(),
+}));
+
+vi.mock('$lib/services/contents/entry/values', () => ({
   getFieldDisplayValue: vi.fn(),
 }));
 vi.mock('$lib/services/contents/entry/summary', () => ({
@@ -62,7 +69,8 @@ describe('Test getOptions()', async () => {
   const { isCollectionIndexFile } =
     await import('$lib/services/contents/collection/entries/index-file');
 
-  const { getField, getFieldDisplayValue } = await import('$lib/services/contents/entry/fields');
+  const { getField } = await import('$lib/services/contents/entry/fields');
+  const { getFieldDisplayValue } = await import('$lib/services/contents/entry/values');
   const { getEntrySummaryFromContent } = await import('$lib/services/contents/entry/summary');
   const locale = '_default';
   /** @type {LocalizedEntry} */
@@ -654,6 +662,37 @@ describe('Test getOptions()', async () => {
         expect(result1.every((r) => r.value !== 'melvin-lucas')).toBe(true);
         expect(result2.every((r) => r.value !== 'maxine-field')).toBe(true);
       });
+
+      test('should cache separately when a resolved value moves to another filter', () => {
+        /** @type {RelationField} */
+        const fieldConfig = {
+          ...baseFieldConfig,
+          collection: 'members',
+          filters: [
+            { field: 'department', values: ['{{fields.include}}'] },
+            { field: 'department', values: ['{{fields.exclude}}'], exclude: true },
+          ],
+        };
+
+        // An empty list resolves to no value, so both calls resolve to `engineering` alone
+        const included = getOptions({
+          locale,
+          fieldConfig,
+          refEntries: comprehensiveMemberEntries,
+          currentLocaleValues: { include: 'engineering', exclude: [] },
+        });
+
+        const excluded = getOptions({
+          locale,
+          fieldConfig,
+          refEntries: comprehensiveMemberEntries,
+          currentLocaleValues: { include: [], exclude: 'engineering' },
+        });
+
+        expect(included.map((r) => r.value)).toEqual(['melvin-lucas']);
+        expect(excluded.some((r) => r.value === 'melvin-lucas')).toBe(false);
+        expect(excluded.length).toBeGreaterThan(0);
+      });
     });
 
     describe('Locale handling', () => {
@@ -773,6 +812,75 @@ describe('Test getOptions()', async () => {
         expect(result[0].label).toBe('Alice');
         expect(result[1].label).toBe('Bob');
         expect(result[2].label).toBe('Zoe');
+      });
+
+      test('should follow the manual order of a collection with the reorder option', () => {
+        // @ts-ignore - Using simplified mock collection for testing
+        vi.mocked(getCollection).mockReturnValue({ ...mockCollection, reorder: { key: 'weight' } });
+
+        /**
+         * Build a member entry.
+         * @param {string} name First name.
+         * @param {number} [weight] Order value.
+         * @returns {Entry} Entry.
+         */
+        const makeMember = (name, weight) => ({
+          id: name,
+          slug: name.toLowerCase(),
+          subPath: name.toLowerCase(),
+          locales: {
+            _default: {
+              ...localizedEntryProps,
+              content: { 'name.first': name, ...(weight === undefined ? {} : { weight }) },
+            },
+          },
+        });
+
+        /** @type {RelationField} */
+        const fieldConfig = {
+          ...baseFieldConfig,
+          collection: 'members',
+          display_fields: ['name.first'],
+        };
+
+        const result = getOptions({
+          locale,
+          fieldConfig,
+          // An entry without an order value, e.g. a pending one, comes last
+          refEntries: [makeMember('Alice'), makeMember('Zoe', 1), makeMember('Bob', 2)],
+        });
+
+        expect(result.map((o) => o.label)).toEqual(['Zoe', 'Bob', 'Alice']);
+      });
+
+      test('should follow the order of an entry collection stored in one file', () => {
+        vi.mocked(getCollection).mockReturnValue({
+          ...mockCollection,
+          _file: { ...mockCollection._file, arrayFile: true },
+        });
+
+        /** @type {RelationField} */
+        const fieldConfig = {
+          ...baseFieldConfig,
+          collection: 'members',
+          display_fields: ['name.first'],
+        };
+
+        const [melvin, elsie, maxine] = comprehensiveMemberEntries;
+
+        const result = getOptions({
+          locale,
+          fieldConfig,
+          refEntries: [
+            { ...elsie, arrayIndex: 2 },
+            { ...melvin, arrayIndex: 0 },
+            { ...maxine, arrayIndex: 1 },
+          ],
+        });
+
+        expect(result.map((o) => o.label)).toEqual(
+          [melvin, maxine, elsie].map(({ locales }) => locales._default.content['name.first']),
+        );
       });
     });
 
@@ -1003,27 +1111,16 @@ describe('Test getOptions()', async () => {
 
         const result = getOptions({ locale, fieldConfig, refEntries: citiesFileCollectionEntries });
 
-        // Should create separate options for each city in the list
-        expect(result).toHaveLength(5);
-
-        // Check that we get actual city names, not 'display-value'
-        const labels = result.map((r) => r.label);
-
-        // The labels should be the actual city names from our test data
-        expect(labels).toContain('New York City');
-        expect(labels).toContain('Boston');
-        expect(labels).toContain('San Francisco');
-        expect(labels).toContain('Los Angeles');
-        expect(labels).toContain('Chicago');
-
-        // Values should be the city IDs
-        const values = result.map((r) => r.value);
-
-        expect(values).toContain('nyc');
-        expect(values).toContain('bos');
-        expect(values).toContain('sf');
-        expect(values).toContain('la');
-        expect(values).toContain('chi');
+        // Should create separate options for each city in the list, in the order of the list
+        // items rather than sorted by label
+        expect(result.map((r) => r.label)).toEqual([
+          'New York City',
+          'Boston',
+          'San Francisco',
+          'Los Angeles',
+          'Chicago',
+        ]);
+        expect(result.map((r) => r.value)).toEqual(['nyc', 'bos', 'sf', 'la', 'chi']);
       });
 
       test('should handle missing file in file collection', () => {
@@ -1109,8 +1206,10 @@ describe('Test getOptions()', async () => {
           refEntries: malformedFileCollectionEntries,
         });
 
-        // Should still handle the data, but entries with missing required fields are filtered out
-        expect(result).toHaveLength(2);
+        // Should still handle the data, but list items with missing required fields are filtered
+        // out: the item without a name isn’t matched, and the one without an ID can’t be referenced
+        // (its value used to fall back to the entry slug)
+        expect(result).toHaveLength(1);
 
         // Find the complete entry
         const completeEntry = result.find((r) => r.label === 'San Francisco');
@@ -1239,22 +1338,14 @@ describe('Test getOptions()', async () => {
 
         const result = getOptions({ locale, fieldConfig, refEntries: themeFileCollectionEntries });
 
-        expect(result).toHaveLength(3);
-        expect(result[0]).toEqual({
-          label: 'Accent Red',
-          value: 'Accent Red',
-          searchValue: 'Accent Red',
-        });
-        expect(result[1]).toEqual({
-          label: 'Primary Blue',
-          value: 'Primary Blue',
-          searchValue: 'Primary Blue',
-        });
-        expect(result[2]).toEqual({
-          label: 'Secondary Green',
-          value: 'Secondary Green',
-          searchValue: 'Secondary Green',
-        });
+        // The options follow the order of the list items in the file
+        expect(result).toEqual(
+          ['Primary Blue', 'Secondary Green', 'Accent Red'].map((name) => ({
+            label: name,
+            value: name,
+            searchValue: name,
+          })),
+        );
       });
     });
   });
@@ -1412,6 +1503,141 @@ describe('Test getOptions()', async () => {
         expect(getReferencedOptionLabel(args)).toBe('jane-doe');
       });
 
+      test('should reuse the options while the pending entries stay the same', () => {
+        /** @type {RelationField} */
+        const fieldConfig = {
+          ...baseFieldConfig,
+          collection: 'members',
+          display_fields: ['name.first'],
+        };
+
+        vi.mocked(getFieldDisplayValue).mockImplementation(
+          ({ keyPath, valueMap }) => valueMap?.[keyPath] || 'display-value',
+        );
+
+        /**
+         * Create a pending member entry.
+         * @param {string} slug Entry slug.
+         * @param {string} firstName First name.
+         * @returns {PendingEntry} Pending entry.
+         */
+        const createPendingMember = (slug, firstName) => ({
+          collectionName: 'members',
+          entry: {
+            id: slug,
+            slug,
+            subPath: slug,
+            locales: { _default: { ...localizedEntryProps, content: { 'name.first': firstName } } },
+          },
+          changes: [],
+          savingAssets: [],
+          values: [slug],
+        });
+
+        /** @type {PendingEntry[]} */
+        const pendingEntries = [createPendingMember('jane-doe', 'Jane')];
+        const args = { fieldConfig, keyPath: 'author', locale, pendingEntries };
+
+        expect(getReferencedOptionLabel({ ...args, valueMap: { author: 'jane-doe' } })).toBe(
+          'Jane',
+        );
+
+        const callCount = vi.mocked(getFieldDisplayValue).mock.calls.length;
+        const cacheSize = optionCacheMap.size;
+
+        // Another label, e.g. that of the next referenced entry in a nested Relation field, is
+        // resolved with the same options instead of building them again
+        expect(getReferencedOptionLabel({ ...args, valueMap: { author: 'jane-doe' } })).toBe(
+          'Jane',
+        );
+        expect(getReferencedOptionLabel({ ...args, valueMap: { author: 'nonexistent' } })).toBe(
+          'nonexistent',
+        );
+        expect(getFieldDisplayValue).toHaveBeenCalledTimes(callCount);
+        expect(optionCacheMap.size).toBe(cacheSize);
+
+        // An entry added to the same array is picked up
+        pendingEntries.push(createPendingMember('john-doe', 'John'));
+
+        expect(getReferencedOptionLabel({ ...args, valueMap: { author: 'john-doe' } })).toBe(
+          'John',
+        );
+        expect(optionCacheMap.size).toBe(cacheSize + 1);
+
+        // Pending entries of another collection leave the saved entries as they are
+        expect(
+          getReferencedOptionLabel({
+            ...args,
+            valueMap: { author: 'jane-doe' },
+            pendingEntries: [
+              { ...createPendingMember('jane-doe', 'Jane'), collectionName: 'tags' },
+            ],
+          }),
+        ).toBe('jane-doe');
+
+        // Another draft’s pending entries are told apart from these
+        expect(
+          getReferencedOptionLabel({
+            ...args,
+            valueMap: { author: 'jim-doe' },
+            pendingEntries: [createPendingMember('jim-doe', 'Jim')],
+          }),
+        ).toBe('Jim');
+      });
+
+      test('should not recurse infinitely when the label refers to the field itself', () => {
+        // A self-referencing Relation field, e.g. `parent` in a `members` collection, whose
+        // display fields include the field itself to show a breadcrumb
+        /** @type {RelationField} */
+        const fieldConfig = {
+          ...baseFieldConfig,
+          name: 'parent',
+          collection: 'members',
+          display_fields: ['{{name.first}}', '{{parent}}'],
+        };
+
+        /** @type {Entry[]} */
+        const entries = [
+          {
+            id: 'a',
+            slug: 'a',
+            subPath: 'a',
+            locales: { _default: { ...localizedEntryProps, content: { 'name.first': 'Ann' } } },
+          },
+          {
+            id: 'b',
+            slug: 'b',
+            subPath: 'b',
+            locales: {
+              _default: { ...localizedEntryProps, content: { 'name.first': 'Bob', parent: 'a' } },
+            },
+          },
+        ];
+
+        vi.mocked(getEntriesByCollection).mockReturnValue(entries);
+        // Resolve the `parent` field the way `getFieldDisplayValue()` does for a Relation field
+        vi.mocked(getFieldDisplayValue).mockImplementation(({ keyPath, valueMap = {} }) =>
+          keyPath === 'parent'
+            ? getReferencedOptionLabel({ fieldConfig, valueMap, keyPath, locale })
+            : (valueMap[keyPath] ?? ''),
+        );
+
+        // The nested reference falls back to the stored value; an empty one is left out of the
+        // label, which used to fall back to the entry summary
+        expect(getOptions({ locale, fieldConfig, refEntries: entries })).toEqual([
+          { label: 'Ann', value: 'a', searchValue: 'Ann' },
+          { label: 'Bob a', value: 'b', searchValue: 'Bob a' },
+        ]);
+        expect(
+          getReferencedOptionLabel({
+            fieldConfig,
+            valueMap: { parent: 'b' },
+            keyPath: 'parent',
+            locale,
+          }),
+        ).toBe('Bob a');
+      });
+
       test('should handle undefined values', () => {
         /** @type {RelationField} */
         const fieldConfig = {
@@ -1437,19 +1663,16 @@ describe('Test getOptions()', async () => {
           ...baseFieldConfig,
           collection: 'members',
           display_fields: ['name.first'],
-          value_field: 'email',
+          // Maxine and Melvin are both active, so their options share the value
+          value_field: 'active',
         };
 
-        vi.mocked(getFieldDisplayValue).mockImplementation(({ keyPath, valueMap }) => {
-          if (keyPath === 'email') {
-            return 'shared@example.com';
-          }
-
-          return valueMap?.[keyPath] || 'display-value';
-        });
+        vi.mocked(getFieldDisplayValue).mockImplementation(
+          ({ keyPath, valueMap }) => valueMap?.[keyPath] || 'display-value',
+        );
 
         const valueMap = {
-          author: 'shared@example.com',
+          author: 'true',
         };
 
         const args = {
@@ -1459,8 +1682,8 @@ describe('Test getOptions()', async () => {
           locale,
         };
 
-        expect(getReferencedOptionLabel(args)).toBe('Elsie');
-        expect(getReferencedOptionLabel(args)).toBe('Elsie');
+        expect(getReferencedOptionLabel(args)).toBe('Maxine');
+        expect(getReferencedOptionLabel(args)).toBe('Maxine');
       });
     });
 

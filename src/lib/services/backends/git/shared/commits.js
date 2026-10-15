@@ -1,3 +1,5 @@
+import { mapConcurrently } from '$lib/services/backends/git/shared/concurrency';
+import { createLocalizedError } from '$lib/services/backends/git/shared/errors';
 import { cmsConfig } from '$lib/services/config';
 import { getCollectionLabel } from '$lib/services/contents/collection';
 import { user } from '$lib/services/user/account.svelte';
@@ -45,58 +47,126 @@ const SKIP_CI_REGEX =
 export const hasSkipCIMarker = (message) => SKIP_CI_REGEX.test(message);
 
 /**
- * Create a Git commit message.
+ * Replace the `{{name}}` placeholders in the given commit message template with the given values,
+ * in a single pass. The values are inserted as they are: `$&` and the like aren’t read as
+ * replacement patterns, and a placeholder that happens to appear in a value, e.g. in a slug, isn’t
+ * expanded. A placeholder without a value is left as it is.
+ * @param {string} template Template.
+ * @param {Record<string, string>} values Values keyed by placeholder name.
+ * @returns {string} Filled message.
+ */
+const fillTemplate = (template, values) =>
+  template.replace(/\{\{([\w-]+)\}\}/g, (placeholder, key) =>
+    Object.hasOwn(values, key) ? values[key] : placeholder,
+  );
+
+/**
+ * Get the values of the author placeholders in a commit message template.
+ * @returns {Record<string, string>} Values keyed by placeholder name.
+ */
+const getAuthorValues = () => {
+  const { email = '', login = '', name = '' } = /** @type {User} */ (user.account);
+
+  return { 'author-email': email, 'author-login': login, 'author-name': name };
+};
+
+/**
+ * Create the part of a Git commit message that comes from the `commit_messages` template: the
+ * template filled in, followed by the number of the other files changed, if any. It’s what the
+ * user is shown when asked for a commit message.
  * @param {FileChange[]} changes File changes to be saved.
  * @param {CommitOptions} options Commit options.
  * @returns {string} Formatted message.
  */
-export const createCommitMessage = (
-  changes,
-  { commitType = 'update', collection, skipCI = undefined },
-) => {
-  const {
-    commit_messages: customCommitMessages = {},
-    skip_ci: skipCIEnabled,
-    automatic_deployments: autoDeploy,
-  } = /** @type {GitBackend} */ (cmsConfig.current?.backend ?? {});
+export const createBaseCommitMessage = (changes, { commitType = 'update', collection }) => {
+  const { commit_messages: customCommitMessages = {} } = /** @type {GitBackend} */ (
+    cmsConfig.current?.backend ?? {}
+  );
 
-  const { email = '', login = '', name = '' } = /** @type {User} */ (user.account);
   const [firstSlug = ''] = changes.map((item) => item.slug).filter(Boolean);
   const [firstPath, ...remainingPaths] = changes.map(({ path }) => path);
   const collectionLabel = collection ? getCollectionLabel(collection, { useSingular: true }) : '';
   // @ts-ignore
   let message = customCommitMessages[commitType] || DEFAULT_COMMIT_MESSAGES[commitType] || '';
+  const authorValues = getAuthorValues();
 
   if (['create', 'update', 'delete'].includes(commitType)) {
-    message = message
-      .replaceAll('{{slug}}', firstSlug)
-      .replaceAll('{{collection}}', collectionLabel)
-      .replaceAll('{{path}}', firstPath)
-      .replaceAll('{{author-email}}', email)
-      .replaceAll('{{author-login}}', login)
-      .replaceAll('{{author-name}}', name);
+    message = fillTemplate(message, {
+      slug: firstSlug,
+      collection: collectionLabel,
+      path: firstPath,
+      ...authorValues,
+    });
   }
 
   if (['uploadMedia', 'deleteMedia'].includes(commitType)) {
-    message = message
-      .replaceAll('{{path}}', firstPath)
-      .replaceAll('{{author-email}}', email)
-      .replaceAll('{{author-login}}', login)
-      .replaceAll('{{author-name}}', name);
+    message = fillTemplate(message, { path: firstPath, ...authorValues });
   }
 
   if (remainingPaths.length) {
     message += ` +${remainingPaths.length}`;
   }
 
+  return message;
+};
+
+/**
+ * Combine the message made from the template with the text the user has entered when asked for a
+ * commit message, as the `prompt_commit_messages` backend option says.
+ * @param {string} message Message made from the template.
+ * @param {string} [userMessage] Text the user has entered.
+ * @returns {string} Combined message.
+ */
+const applyUserMessage = (message, userMessage) => {
+  const { prompt_commit_messages: mode } = /** @type {GitBackend} */ (
+    cmsConfig.current?.backend ?? {}
+  );
+
+  const text = userMessage?.trim();
+
+  if (!text) {
+    return message;
+  }
+
+  if (mode === true) {
+    return text;
+  }
+
+  if (mode === 'prefix') {
+    return `${text} ${message}`;
+  }
+
+  if (mode === 'suffix') {
+    return `${message} ${text}`;
+  }
+
+  return message;
+};
+
+/**
+ * Create a Git commit message.
+ * @param {FileChange[]} changes File changes to be saved.
+ * @param {CommitOptions} options Commit options.
+ * @returns {string} Formatted message.
+ */
+export const createCommitMessage = (changes, options) => {
+  const { commitType = 'update', skipCI = undefined, userMessage } = options;
+
+  const {
+    commit_messages: customCommitMessages = {},
+    skip_ci: skipCIEnabled,
+    automatic_deployments: autoDeploy,
+  } = /** @type {GitBackend} */ (cmsConfig.current?.backend ?? {});
+
+  let message = applyUserMessage(createBaseCommitMessage(changes, options), userMessage);
+
   // With Open Authoring the commit is made by an outside contributor, so the message can be wrapped
   // to record who wrote it. The default template is the message on its own, which changes nothing
   if (openAuthoring.current) {
-    message = (customCommitMessages.openAuthoring || DEFAULT_COMMIT_MESSAGES.openAuthoring)
-      .replaceAll('{{message}}', message)
-      .replaceAll('{{author-email}}', email)
-      .replaceAll('{{author-login}}', login)
-      .replaceAll('{{author-name}}', name);
+    message = fillTemplate(
+      customCommitMessages.openAuthoring || DEFAULT_COMMIT_MESSAGES.openAuthoring,
+      { message, ...getAuthorValues() },
+    );
   }
 
   // If requested, disable automatic deployments by using the standard `[skip ci]` prefix supported
@@ -133,4 +203,53 @@ export const dedupeFileCommits = (commits) => {
   });
 
   return [...commitMap.values()].sort((a, b) => b.date.getTime() - a.date.getTime());
+};
+
+/**
+ * Create the error to throw when the last commit on the configured branch can’t be retrieved,
+ * because the repository or the branch can’t be found.
+ * @param {'repository_not_found' | 'branch_not_found'} key I18n key of the message to show.
+ * @param {{ repo: string, branch?: string }} values Repository name, and the branch name for a
+ * missing branch, to show in the message.
+ * @returns {Error} Error.
+ */
+export const createLastCommitError = (key, values) =>
+  createLocalizedError('Failed to retrieve the last commit hash.', key, values);
+
+/**
+ * Throw an error telling the user that the branch has moved, if its head is no longer the one a
+ * refused commit was based on. This tells a commit refused over a moved head from any other
+ * failure, so the user is told what happened and to try again, which picks up the other change
+ * first. The head is looked up rather than the wording of the error relied upon. A failed lookup
+ * returns quietly, leaving the original error to be reported.
+ * @param {string} expectedHead SHA of the head commit the refused commit was based on.
+ * @param {() => Promise<{ hash: string }>} fetchLastCommit Function to fetch the branch’s head.
+ * @throws {Error} When the branch has moved.
+ */
+export const assertBranchNotMoved = async (expectedHead, fetchLastCommit) => {
+  const head = await fetchLastCommit().catch(() => undefined);
+
+  if (head && head.hash !== expectedHead) {
+    throw createLocalizedError(
+      'The branch has moved since the site data was loaded.',
+      'save_conflict.branch_moved',
+    );
+  }
+};
+
+/**
+ * Fetch the commit history of each of the given files with a separate request, keeping only a few
+ * requests in flight at a time so a long list doesn’t trigger a Too Many Requests error, then merge
+ * the histories into one list.
+ * @param {string[]} paths File paths to fetch commit history for.
+ * @param {(path: string) => Promise<any[]>} fetchHistory Function to fetch the raw commit list of a
+ * file from the backend’s API.
+ * @param {(commit: any) => FileCommit} parseCommit Function to convert a raw commit to a
+ * {@link FileCommit}.
+ * @returns {Promise<FileCommit[]>} Unique commits, newest first.
+ */
+export const fetchPerPathCommits = async (paths, fetchHistory, parseCommit) => {
+  const results = await mapConcurrently(paths, fetchHistory);
+
+  return dedupeFileCommits(results.flat().map(parseCommit));
 };

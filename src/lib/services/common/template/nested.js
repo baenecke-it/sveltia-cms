@@ -1,33 +1,27 @@
-import { INNER_TAG_REGEX } from '$lib/services/common/template/constants';
+import {
+  TEMPLATE_TAG_REGEX,
+  TEMPLATE_TAG_REPLACE_REGEX,
+} from '$lib/services/common/template/constants';
 
 /**
  * @import { StringTransformation } from '$lib/types/private';
  */
 
 /**
- * Resolve a single nested template value in transformation arguments.
+ * Resolve the nested template tags in a transformation argument, e.g. `{{fields.title}}` or
+ * `{{fields.first_name}} {{fields.last_name}}`, keeping the text around them.
  * @param {string} value The transformation argument value.
  * @param {(tag: string) => string} resolveTag Function to resolve a nested tag.
  * @returns {string} Resolved value.
  */
-const resolveNestedTemplateValues = (value, resolveTag) => {
-  if (!value.includes('{{')) {
-    return value;
-  }
-
-  const { innerTag } = value.match(INNER_TAG_REGEX)?.groups ?? {};
-
-  if (innerTag === undefined) {
-    return value;
-  }
-
-  /* v8 ignore next */
-  return String(resolveTag(innerTag) ?? '');
-};
+const resolveNestedTemplateValues = (value, resolveTag) =>
+  value.replaceAll(TEMPLATE_TAG_REPLACE_REGEX, (_match, /** @type {string} */ innerTag) =>
+    String(resolveTag(innerTag) ?? ''),
+  );
 
 /**
  * Process nested template tags in transformation arguments (e.g., `default('{{fields.title}}')`).
- * This handles nested templates in `default`, `ternary`, and other transformations that accept
+ * This handles nested templates in `default`, `ternary`, and custom transformations that accept
  * string arguments which may contain template tags.
  * @param {StringTransformation[]} transformations Transformation entries.
  * @param {(tag: string) => string} resolveTag Function to resolve a tag to its value.
@@ -68,5 +62,20 @@ export const processNestedTemplates = (transformations, resolveTag) =>
       }
     }
 
-    return hasChanges ? { ...tf, args: newArgs } : tf;
+    // Handle nested templates in the string arguments of a custom transformation
+    const { customArgs } = tf;
+    /** @type {(string | number)[] | undefined} */
+    let newCustomArgs;
+
+    if (customArgs?.some((arg) => typeof arg === 'string' && TEMPLATE_TAG_REGEX.test(arg))) {
+      newCustomArgs = customArgs.map((arg) =>
+        typeof arg === 'string' ? resolveNestedTemplateValues(arg, resolveTag) : arg,
+      );
+    }
+
+    if (!hasChanges && !newCustomArgs) {
+      return tf;
+    }
+
+    return { ...tf, args: newArgs, ...(newCustomArgs ? { customArgs: newCustomArgs } : {}) };
   });

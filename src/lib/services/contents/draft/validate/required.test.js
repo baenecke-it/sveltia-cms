@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
+import { cmsConfig } from '$lib/services/config';
 import { isRequiredEnforced } from '$lib/services/contents/draft/validate/required';
 import { isWorkflowDraft, unpublishedEntries } from '$lib/services/workflow';
 
@@ -9,6 +10,7 @@ vi.mock('$lib/services/workflow', async (importOriginal) => ({
 }));
 
 const entries = /** @type {any} */ (unpublishedEntries);
+/** @type {any} */
 const collection = { name: 'posts' };
 
 /**
@@ -23,6 +25,7 @@ const draftFor = (status) => ({
   originalEntry: {
     id: 'entry-1',
     slug: 'my-post',
+    locales: { _default: { path: 'content/posts/my-post.md' } },
     ...(status ? { workflow: { status, pullRequest: { branch: 'cms/posts/my-post' } } } : {}),
   },
 });
@@ -61,6 +64,31 @@ describe('contents/draft/validate/required', () => {
     expect(isRequiredEnforced(draftFor('draft'))).toBe(false);
   });
 
+  test('enforces them in the drafting stage when incomplete drafts aren’t allowed', () => {
+    cmsConfig.current = /** @type {any} */ ({
+      publish_mode: { type: 'editorial_workflow', allow_incomplete_drafts: false },
+    });
+
+    try {
+      expect(isRequiredEnforced(draftFor('draft'))).toBe(true);
+      expect(isRequiredEnforced(draftFor())).toBe(true);
+    } finally {
+      cmsConfig.current = undefined;
+    }
+  });
+
+  test('relaxes them for an entry labelled with a stage that isn’t configured', () => {
+    // Without the In Review stage, an entry labelled with it is still a draft
+    const draft = draftFor('pending_review');
+
+    draft.collection = {
+      ...collection,
+      publish_mode: { type: 'editorial_workflow', stages: ['draft', 'pending_publish'] },
+    };
+
+    expect(isRequiredEnforced(draft)).toBe(false);
+  });
+
   test('enforces them once the entry has left the drafting stage', () => {
     expect(isRequiredEnforced(draftFor('pending_review'))).toBe(true);
     expect(isRequiredEnforced(draftFor('pending_publish'))).toBe(true);
@@ -87,6 +115,7 @@ describe('contents/draft/validate/required', () => {
     entries.current = [
       {
         id: 'entry-1',
+        locales: { _default: { path: 'content/posts/my-post.md' } },
         workflow: { status: 'pending_publish', pullRequest: { branch: 'cms/posts/my-post' } },
       },
     ];

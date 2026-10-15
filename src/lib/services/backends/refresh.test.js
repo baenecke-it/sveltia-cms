@@ -1,18 +1,47 @@
-import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { allAssets } from '$lib/services/assets';
+import { allAssets } from '$lib/services/assets/state';
 import { backend } from '$lib/services/backends';
-import { repositoryHead } from '$lib/services/backends/git/shared/fetch';
+import { advanceRepositoryHead } from '$lib/services/backends/git/shared/file-cache';
+import { repositoryHead } from '$lib/services/backends/git/shared/head';
 import { allEntries } from '$lib/services/contents';
 import { productionSHA } from '$lib/services/deployments';
 
-import { checkForRemoteChanges, diffStores, MIN_CHECK_GAP, suspendChecksWhile } from './refresh';
+import {
+  _resetRootDirTree,
+  checkForRemoteChanges,
+  diffStores,
+  MIN_CHECK_GAP,
+  suspendChecksWhile,
+} from './refresh';
+
+const mockGetRootDir = vi.hoisted(() => vi.fn(() => ''));
+const mockRepositoryHead = vi.hoisted(() => ({ current: '' }));
+const mockDataGeneration = vi.hoisted(() => ({ current: 0 }));
 
 vi.mock('$lib/services/assets', () => ({ allAssets: { current: [] } }));
 vi.mock('$lib/services/backends', () => ({ backend: { current: undefined } }));
-vi.mock('$lib/services/backends/git/shared/fetch', () => ({ repositoryHead: { current: '' } }));
+vi.mock('$lib/services/backends/git/shared/head', () => ({
+  dataGeneration: mockDataGeneration,
+  repositoryHead: mockRepositoryHead,
+}));
+vi.mock('$lib/services/backends/git/shared/file-cache', () => ({
+  // Like the real one, record the new head
+  advanceRepositoryHead: vi.fn(async (_repository, _from, to) => {
+    mockRepositoryHead.current = to;
+  }),
+}));
 vi.mock('$lib/services/contents', () => ({ allEntries: { current: [] } }));
 vi.mock('$lib/services/deployments', () => ({ productionSHA: { current: '' } }));
+vi.mock('$lib/services/backends/root-dir', () => ({ getRootDir: mockGetRootDir }));
+
+/**
+ * Discard the site data like a sign-out does.
+ */
+const discardData = () => {
+  mockDataGeneration.current += 1;
+  mockRepositoryHead.current = '';
+};
 
 /**
  * Make a minimal entry.
@@ -145,6 +174,8 @@ describe('checkForRemoteChanges', () => {
       modifiedAssets: [],
       deletedAssets: [],
     });
+    // The head just fetched is handed over, so the fetch doesn’t ask for it again
+    expect(fetchFiles).toHaveBeenCalledWith({ lastCommit: { hash: 'head-2', message: '' } });
   });
 
   test('reports nothing when the new commit changed nothing the CMS manages', async () => {
@@ -160,9 +191,163 @@ describe('checkForRemoteChanges', () => {
   test('tracks the new head as the one the site is built from', async () => {
     productionSHA.current = 'head-1';
     fetchLastCommit.mockResolvedValue({ hash: 'head-2', message: '' });
+    // The fetch records the head it has loaded, like the real one
+    fetchFiles.mockImplementation(async () => {
+      repositoryHead.current = 'head-2';
+    });
 
     await checkForRemoteChanges();
     expect(productionSHA.current).toBe('head-2');
+  });
+
+  test('tracks the head the fetch has loaded, when another commit has landed meanwhile', async () => {
+    productionSHA.current = 'head-1';
+    fetchLastCommit.mockResolvedValue({ hash: 'head-2', message: '' });
+    // The fetch resolves the head again, and finds yet another commit
+    fetchFiles.mockImplementation(async () => {
+      repositoryHead.current = 'head-3';
+    });
+
+    await checkForRemoteChanges();
+    expect(productionSHA.current).toBe('head-3');
+  });
+
+  describe('after the site data has been discarded during the check', () => {
+    test('ignores the head when signed out while asking for it', async () => {
+      fetchLastCommit.mockImplementation(async () => {
+        discardData();
+
+        return { hash: 'head-2', message: '' };
+      });
+
+      expect(await checkForRemoteChanges()).toBeUndefined();
+      expect(fetchFiles).not.toHaveBeenCalled();
+      expect(repositoryHead.current).toBe('');
+    });
+
+    test('drops the result of a fetch that was on its way at sign-out', async () => {
+      productionSHA.current = '';
+      allEntries.current = [makeEntry('old')];
+      fetchLastCommit.mockResolvedValue({ hash: 'head-2', message: '' });
+      fetchFiles.mockImplementation(async () => {
+        discardData();
+        // The next user has signed in and loaded their data in the meantime
+        allEntries.current = [makeEntry('new')];
+        repositoryHead.current = 'next-head';
+      });
+
+      // The difference from the previous user’s entries isn’t reported to the next user, nor is a
+      // deployment to watch picked for them
+      expect(await checkForRemoteChanges()).toBeUndefined();
+      expect(productionSHA.current).toBe('');
+    });
+  });
+
+  describe('with a root directory', () => {
+    const fetchDirSHA = vi.fn();
+
+    beforeEach(() => {
+      _resetRootDirTree();
+      mockGetRootDir.mockReturnValue('apps/site');
+      /** @type {any} */ (backend).current = {
+        fetchLastCommit,
+        fetchFiles,
+        fetchDirSHA,
+        repository: { databaseName: 'github:owner/repo:apps/site' },
+      };
+      productionSHA.current = 'head-1';
+      fetchLastCommit.mockResolvedValue({ hash: 'head-2', message: '' });
+    });
+
+    afterEach(() => {
+      mockGetRootDir.mockReturnValue('');
+    });
+
+    test('skips a commit that leaves the root directory as it is', async () => {
+      fetchDirSHA.mockResolvedValue('tree-1');
+
+      expect(await checkForRemoteChanges()).toBeUndefined();
+      expect(fetchDirSHA).toHaveBeenCalledWith('head-1', 'apps/site');
+      expect(fetchDirSHA).toHaveBeenCalledWith('head-2', 'apps/site');
+      expect(fetchFiles).not.toHaveBeenCalled();
+      // The new head is the one the data reflects now, but the site isn’t rebuilt for it
+      expect(advanceRepositoryHead).toHaveBeenCalledWith(
+        { databaseName: 'github:owner/repo:apps/site' },
+        'head-1',
+        'head-2',
+      );
+      expect(repositoryHead.current).toBe('head-2');
+      expect(productionSHA.current).toBe('head-1');
+    });
+
+    test('doesn’t advance the head when signed out during the lookup', async () => {
+      fetchDirSHA.mockImplementation(async () => {
+        discardData();
+
+        return 'tree-1';
+      });
+
+      expect(await checkForRemoteChanges()).toBeUndefined();
+      expect(advanceRepositoryHead).not.toHaveBeenCalled();
+      expect(repositoryHead.current).toBe('');
+    });
+
+    test('only looks up the new head on the next check', async () => {
+      fetchDirSHA.mockResolvedValue('tree-1');
+      await checkForRemoteChanges();
+      fetchDirSHA.mockClear();
+      fetchLastCommit.mockResolvedValue({ hash: 'head-3', message: '' });
+
+      await checkForRemoteChanges();
+      expect(fetchDirSHA).toHaveBeenCalledTimes(1);
+      expect(fetchDirSHA).toHaveBeenCalledWith('head-3', 'apps/site');
+    });
+
+    test('looks the head up again when the root directory has changed since', async () => {
+      fetchDirSHA.mockResolvedValue('tree-1');
+      await checkForRemoteChanges();
+      fetchDirSHA.mockClear();
+      mockGetRootDir.mockReturnValue('apps/other');
+      fetchLastCommit.mockResolvedValue({ hash: 'head-3', message: '' });
+
+      await checkForRemoteChanges();
+      expect(fetchDirSHA).toHaveBeenCalledWith('head-2', 'apps/other');
+    });
+
+    test('fetches the files when the root directory has changed', async () => {
+      fetchDirSHA.mockImplementation(async (commit) => `tree-of-${commit}`);
+
+      await checkForRemoteChanges();
+      expect(fetchFiles).toHaveBeenCalledTimes(1);
+    });
+
+    test('fetches the files when the root directory can’t be found', async () => {
+      fetchDirSHA.mockResolvedValue(undefined);
+
+      await checkForRemoteChanges();
+      expect(fetchFiles).toHaveBeenCalledTimes(1);
+    });
+
+    test('fetches the files when the lookup fails', async () => {
+      const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      fetchDirSHA.mockRejectedValue(new Error('Network error'));
+
+      await checkForRemoteChanges();
+      expect(fetchFiles).toHaveBeenCalledTimes(1);
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        'Failed to look up the root directory.',
+        expect.any(Error),
+      );
+      consoleErrorSpy.mockRestore();
+    });
+
+    test('fetches the files for a backend that can’t look the directory up', async () => {
+      /** @type {any} */ (backend).current = { fetchLastCommit, fetchFiles };
+
+      await checkForRemoteChanges();
+      expect(fetchFiles).toHaveBeenCalledTimes(1);
+    });
   });
 
   test('shares one check between callers that overlap', async () => {
@@ -265,5 +450,48 @@ describe('suspendChecksWhile', () => {
 
     expect(await suspendChecksWhile(async () => 'committed')).toBe('committed');
     expect(await checkPromise).toBe('failed');
+  });
+
+  test('makes one commit at a time, each on top of the head the previous one left', async () => {
+    /** @type {string[]} */
+    const order = [];
+    const { promise: firstCommitDone, resolve: finishFirstCommit } = Promise.withResolvers();
+
+    const firstPromise = suspendChecksWhile(async () => {
+      order.push(`first on ${repositoryHead.current}`);
+      await firstCommitDone;
+      repositoryHead.current = 'head-2';
+      order.push('first done');
+    });
+
+    const secondPromise = suspendChecksWhile(async () => {
+      order.push(`second on ${repositoryHead.current}`);
+    });
+
+    // The second commit waits for the first one, and no check is made in the meantime
+    await vi.waitFor(() => expect(order).toEqual(['first on head-1']));
+    expect(await checkForRemoteChanges()).toBeUndefined();
+    expect(fetchLastCommit).not.toHaveBeenCalled();
+
+    finishFirstCommit(undefined);
+    await Promise.all([firstPromise, secondPromise]);
+    expect(order).toEqual(['first on head-1', 'first done', 'second on head-2']);
+  });
+
+  test('makes the next commit even if the previous one fails', async () => {
+    const { promise: firstCommitDone, reject: failFirstCommit } = Promise.withResolvers();
+    const firstPromise = suspendChecksWhile(() => firstCommitDone);
+    const secondCommit = vi.fn(async () => 'committed');
+    const secondPromise = suspendChecksWhile(secondCommit);
+
+    await Promise.resolve();
+    expect(secondCommit).not.toHaveBeenCalled();
+    failFirstCommit(new Error('commit failed'));
+    await expect(firstPromise).rejects.toThrow('commit failed');
+    expect(await secondPromise).toBe('committed');
+
+    // Checks are allowed again once both are done
+    await checkForRemoteChanges();
+    expect(fetchLastCommit).toHaveBeenCalledTimes(1);
   });
 });

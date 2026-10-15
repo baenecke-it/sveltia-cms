@@ -2,11 +2,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   addFolderIfNeeded,
+  collectCollectionAssetFolders,
   getAllAssetFolders,
+  getCollectionBaseFolder,
+  getLocaleFolderNameMap,
   hasTags,
   iterateFiles,
   normalizeAssetFolder,
   replaceTags,
+  resolveGlobalFolders,
 } from './assets.js';
 
 // Mock external dependencies
@@ -14,12 +18,12 @@ vi.mock('$lib/services/contents/collection', () => ({
   getValidCollections: vi.fn(),
 }));
 
-vi.mock('$lib/services/contents/collection/files', () => ({
+vi.mock('$lib/services/contents/collection/predicates', () => ({
   getValidCollectionFiles: vi.fn(),
 }));
 
 const { getValidCollections } = await import('$lib/services/contents/collection');
-const { getValidCollectionFiles } = await import('$lib/services/contents/collection/files');
+const { getValidCollectionFiles } = await import('$lib/services/contents/collection/predicates');
 
 describe('config/folders/assets', () => {
   beforeEach(() => {
@@ -29,6 +33,35 @@ describe('config/folders/assets', () => {
   });
 
   describe('getAllAssetFolders', () => {
+    it('resolves a relative media folder against the file storing all the entries', () => {
+      const collections = [
+        {
+          name: 'members',
+          file: 'data/team/members.json',
+          media_folder: 'photos',
+          public_folder: '/photos',
+        },
+      ];
+
+      vi.mocked(getValidCollections).mockReturnValue(/** @type {any} */ (collections));
+
+      const config = {
+        backend: { name: 'git-gateway' },
+        media_folder: 'static/images',
+        public_folder: '/images',
+        collections,
+      };
+
+      // @ts-ignore - simplified config for testing
+      const result = getAllAssetFolders(config);
+
+      expect(result.find(({ collectionName }) => collectionName === 'members')).toMatchObject({
+        internalPath: 'data/team',
+        internalSubPath: 'photos',
+        entryRelative: true,
+      });
+    });
+
     it('records the locale folder names on entry-relative folders only', () => {
       const collections = [
         // Entry-relative: the assets sit beside the entry, so they can be below a locale folder
@@ -492,6 +525,59 @@ describe('config/folders/assets', () => {
       });
     });
 
+    it('should resolve a relative media folder of a file collection against each file', () => {
+      const files = [
+        { name: 'about', file: 'content/pages/about.md', fields: [] },
+        { name: 'home', file: 'home.md', fields: [] },
+        {
+          name: 'contact',
+          file: 'content/contact/index.md',
+          media_folder: 'assets',
+          fields: [],
+        },
+      ];
+
+      const collections = [
+        { name: 'pages', media_folder: 'images', public_folder: '/img', files },
+        { name: 'settings', media_folder: '/static/settings', files: [] },
+      ];
+
+      vi.mocked(getValidCollections).mockReturnValue(/** @type {any} */ (collections));
+      vi.mocked(getValidCollectionFiles).mockImplementation(
+        (_files) => /** @type {any} */ (_files),
+      );
+
+      const config = {
+        backend: { name: 'git-gateway' },
+        media_folder: 'static',
+        public_folder: '/assets',
+        collections,
+      };
+
+      // @ts-ignore - simplified config for testing
+      const result = getAllAssetFolders(config);
+
+      expect(
+        result.map(({ collectionName, fileName, internalPath, internalSubPath, publicPath }) => [
+          collectionName,
+          fileName,
+          internalPath,
+          internalSubPath,
+          publicPath,
+        ]),
+      ).toEqual([
+        [undefined, undefined, undefined, undefined, undefined],
+        [undefined, undefined, 'static', undefined, '/assets'],
+        // The file at the repository root
+        ['pages', 'home', '', 'images', '/img'],
+        // The file’s own `media_folder` comes with its own `public_folder`
+        ['pages', 'contact', 'content/contact', 'assets', '/assets'],
+        ['pages', 'about', 'content/pages', 'images', '/img'],
+        // An absolute folder still belongs to the collection
+        ['settings', undefined, 'static/settings', undefined, '/static/settings'],
+      ]);
+    });
+
     it('should handle singletons', () => {
       vi.mocked(getValidCollections).mockReturnValue([]);
       vi.mocked(getValidCollectionFiles).mockReturnValue([
@@ -739,6 +825,83 @@ describe('config/folders/assets', () => {
       });
     });
 
+    it('marks the folders of read-only collections, files and asset collections', () => {
+      const collections = [
+        { name: 'posts', folder: 'content/posts', media_folder: '/static/posts', readonly: true },
+        { name: 'pages', folder: 'content/pages', media_folder: '/static/pages' },
+        {
+          name: 'settings',
+          files: [
+            { name: 'site', file: 'data/site.yml', media_folder: '/static/site', readonly: true },
+            { name: 'menu', file: 'data/menu.yml', media_folder: '/static/menu' },
+          ],
+        },
+      ];
+
+      const singletons = [
+        { name: 'home', file: 'data/home.yml', media_folder: '/static/home', readonly: true },
+      ];
+
+      vi.mocked(getValidCollections).mockReturnValue(/** @type {any} */ (collections));
+      vi.mocked(getValidCollectionFiles).mockImplementation((files) => /** @type {any} */ (files));
+
+      const config = {
+        backend: { name: 'git-gateway' },
+        media_folder: 'static/images',
+        public_folder: '/images',
+        collections,
+        singletons,
+        asset_collections: [
+          { name: 'logos', media_folder: 'static/logos', readonly: true },
+          { name: 'icons', media_folder: 'static/icons' },
+        ],
+      };
+
+      // @ts-ignore - simplified config for testing
+      const result = getAllAssetFolders(config);
+
+      expect(
+        Object.fromEntries(
+          result.map(({ collectionName, fileName, readonly }) => [
+            [collectionName ?? '-', fileName ?? '-'].join(':'),
+            !!readonly,
+          ]),
+        ),
+      ).toEqual({
+        '-:-': false,
+        'posts:-': true,
+        'pages:-': false,
+        'settings:site': true,
+        'settings:menu': false,
+        '_singletons:home': true,
+        'assets:logos:-': true,
+        'assets:icons:-': false,
+      });
+    });
+
+    it('marks every folder when the whole CMS is read-only', () => {
+      const collections = [
+        { name: 'pages', folder: 'content/pages', media_folder: '/static/pages' },
+      ];
+
+      vi.mocked(getValidCollections).mockReturnValue(/** @type {any} */ (collections));
+
+      const config = {
+        backend: { name: 'git-gateway' },
+        media_folder: 'static/images',
+        public_folder: '/images',
+        collections,
+        readonly: true,
+      };
+
+      // @ts-ignore - simplified config for testing
+      const result = getAllAssetFolders(config);
+
+      // All Assets, the global folder and the collection folder
+      expect(result).toHaveLength(3);
+      expect(result.every(({ readonly }) => readonly === true)).toBe(true);
+    });
+
     it('should handle field-level media folders', () => {
       vi.mocked(getValidCollections).mockReturnValue([
         // @ts-ignore - simplified collection for testing
@@ -886,7 +1049,7 @@ describe('config/folders/assets', () => {
           },
           context: {
             collection: { name: 'settings', files: [] },
-            collectionFile: { name: 'general' },
+            collectionFile: { name: 'general', file: 'config/general.yml' },
             typedKeyPath: 'fields.logo',
             isIndexFile: false,
           },
@@ -1242,7 +1405,7 @@ describe('config/folders/assets', () => {
           },
           context: {
             collection: { name: '_singletons', folder: 'pages' },
-            collectionFile: { name: 'about' },
+            collectionFile: { name: 'about', file: 'pages/about.md' },
             typedKeyPath: 'fields.gallery',
             isIndexFile: false,
           },
@@ -1464,6 +1627,31 @@ describe('config/folders/assets', () => {
         icon: undefined,
         isAssetCollection: true,
       });
+    });
+  });
+
+  describe('getCollectionBaseFolder', () => {
+    it('should return the folder of an entry collection', () => {
+      // @ts-ignore - simplified collection for testing
+      expect(getCollectionBaseFolder({ name: 'posts', folder: 'content/posts' })).toBe(
+        'content/posts',
+      );
+    });
+
+    it('should return the folder of the file storing all the entries', () => {
+      // @ts-ignore - simplified collection for testing
+      expect(getCollectionBaseFolder({ name: 'members', file: 'data/team/members.json' })).toBe(
+        'data/team',
+      );
+    });
+
+    it('should return undefined for a file collection or a singleton collection', () => {
+      // @ts-ignore - simplified collection for testing
+      expect(getCollectionBaseFolder({ name: 'settings', files: [] })).toBeUndefined();
+      // @ts-ignore - simplified collection for testing
+      expect(getCollectionBaseFolder({ name: 'posts', folder: undefined })).toBeUndefined();
+      // @ts-ignore - simplified collection for testing
+      expect(getCollectionBaseFolder({ name: 'members', file: 123 })).toBeUndefined();
     });
   });
 
@@ -1781,6 +1969,61 @@ describe('config/folders/assets', () => {
       });
     });
 
+    it('should keep the `@` prefix of a global public folder substituted for a template tag', () => {
+      const result = normalizeAssetFolder({
+        collectionName: 'posts',
+        mediaFolder: '{{media_folder}}/posts',
+        publicFolder: '{{public_folder}}/posts',
+        baseFolder: 'content/posts',
+        globalFolders: {
+          globalMediaFolder: 'src/assets/images',
+          globalPublicFolder: '@assets/images',
+        },
+      });
+
+      expect(result?.internalPath).toBe('src/assets/images/posts');
+      expect(result?.publicPath).toBe('@assets/images/posts');
+    });
+
+    it.each(['.', './', '/'])(
+      'should treat the `%s` base folder as the root for an entry-relative media folder',
+      (baseFolder) => {
+        const result = normalizeAssetFolder({
+          collectionName: 'docs',
+          mediaFolder: 'images',
+          publicFolder: undefined,
+          baseFolder,
+          globalFolders,
+        });
+
+        expect(result?.internalPath).toBe('');
+        expect(result?.internalSubPath).toBe('images');
+      },
+    );
+
+    it.each([
+      ['@assets/images/', '@assets/images'],
+      ['../../assets/images/', '../../assets/images'],
+      ['./images//', './images'],
+      ['./', '.'],
+      ['.', '.'],
+      ['../', '..'],
+      ['', ''],
+    ])(
+      'should remove a trailing slash from the `%s` public folder kept without a leading slash',
+      (publicFolder, publicPath) => {
+        const result = normalizeAssetFolder({
+          collectionName: 'posts',
+          mediaFolder: '/src/assets/images',
+          publicFolder,
+          baseFolder: 'content/posts',
+          globalFolders,
+        });
+
+        expect(result?.publicPath).toBe(publicPath);
+      },
+    );
+
     it('should return undefined when media folder has template tags without global folders', () => {
       const result = normalizeAssetFolder({
         collectionName: 'posts',
@@ -1834,19 +2077,16 @@ describe('config/folders/assets', () => {
   });
 
   describe('addFolderIfNeeded', () => {
-    beforeEach(() => {
-      // Reset any internal state
-      vi.resetModules();
-    });
-
     it('should skip undefined media folder', () => {
       const globalFolders = {
         globalMediaFolder: 'static',
         globalPublicFolder: '/assets',
       };
 
-      // This should not throw and should not add any folder
-      addFolderIfNeeded({
+      /** @type {any[]} */
+      const folders = [];
+
+      addFolderIfNeeded(folders, {
         // @ts-ignore - testing with undefined media folder
         collectionName: 'posts',
         // @ts-ignore - testing undefined for edge case
@@ -1856,8 +2096,7 @@ describe('config/folders/assets', () => {
         globalFolders,
       });
 
-      // We can't easily test the internal state, but the function should not throw
-      expect(true).toBe(true);
+      expect(folders).toEqual([]);
     });
 
     it('should add folder that differs from global settings', () => {
@@ -1866,8 +2105,10 @@ describe('config/folders/assets', () => {
         globalPublicFolder: '/assets',
       };
 
-      // This should add a folder since it's different from global
-      addFolderIfNeeded({
+      /** @type {any[]} */
+      const folders = [];
+
+      addFolderIfNeeded(folders, {
         collectionName: 'posts',
         mediaFolder: '/uploads/posts',
         publicFolder: '/static/posts',
@@ -1875,8 +2116,12 @@ describe('config/folders/assets', () => {
         globalFolders,
       });
 
-      // We can't easily test the internal state, but the function should not throw
-      expect(true).toBe(true);
+      expect(folders).toHaveLength(1);
+      expect(folders[0]).toMatchObject({
+        collectionName: 'posts',
+        internalPath: 'uploads/posts',
+        publicPath: '/static/posts',
+      });
     });
   });
 
@@ -1908,14 +2153,20 @@ describe('config/folders/assets', () => {
         globalPublicFolder: '/assets',
       };
 
-      // This should process the files without throwing
-      iterateFiles({
+      /** @type {any[]} */
+      const folders = [];
+
+      iterateFiles(folders, {
         collectionName: 'settings',
         files: [],
         globalFolders,
       });
 
       expect(getValidCollectionFiles).toHaveBeenCalledWith([]);
+      expect(folders.map((f) => [f.fileName, f.internalPath])).toEqual([
+        ['general', 'uploads/general'],
+        ['advanced', 'uploads/advanced'],
+      ]);
     });
 
     it('should handle empty files array', () => {
@@ -1926,13 +2177,17 @@ describe('config/folders/assets', () => {
         globalPublicFolder: '/assets',
       };
 
-      iterateFiles({
+      /** @type {any[]} */
+      const folders = [];
+
+      iterateFiles(folders, {
         collectionName: 'empty',
         files: [],
         globalFolders,
       });
 
       expect(getValidCollectionFiles).toHaveBeenCalledWith([]);
+      expect(folders).toEqual([]);
     });
   });
 
@@ -1983,6 +2238,98 @@ describe('config/folders/assets', () => {
       expect(fieldFolder?.collectionName).toBe('posts');
       expect(fieldFolder?.internalPath).toBe('uploads/featured');
       expect(fieldFolder?.publicPath).toBe('/static/featured');
+    });
+
+    it('should resolve a relative field-level media folder against the collection file', () => {
+      vi.mocked(getValidCollections).mockReturnValue([
+        // @ts-ignore - simplified collection for testing
+        { name: 'settings', files: [] },
+      ]);
+      vi.mocked(getValidCollectionFiles).mockReturnValue([]);
+
+      const config = {
+        backend: { name: 'git-gateway' },
+        media_folder: 'static',
+        public_folder: '/assets',
+        collections: [],
+      };
+
+      const fieldMediaFolders = [
+        {
+          fieldConfig: { media_folder: 'images' },
+          context: {
+            collection: { name: 'settings', files: [] },
+            collectionFile: { name: 'general', file: 'content/settings/general.yml' },
+            typedKeyPath: 'logo',
+            isIndexFile: false,
+          },
+        },
+        {
+          fieldConfig: { media_folder: 'images' },
+          context: {
+            collection: { name: '_singletons', files: [] },
+            collectionFile: { name: 'about', file: '/content/pages/about.md' },
+            typedKeyPath: 'photo',
+            isIndexFile: false,
+          },
+        },
+      ];
+
+      // @ts-ignore - simplified config for testing
+      const result = getAllAssetFolders(config, fieldMediaFolders);
+
+      expect(result.find((f) => f.typedKeyPath === 'logo')).toMatchObject({
+        collectionName: 'settings',
+        fileName: 'general',
+        internalPath: 'content/settings',
+        internalSubPath: 'images',
+        entryRelative: true,
+      });
+
+      expect(result.find((f) => f.typedKeyPath === 'photo')).toMatchObject({
+        collectionName: '_singletons',
+        fileName: 'about',
+        internalPath: 'content/pages',
+        internalSubPath: 'images',
+        entryRelative: true,
+      });
+    });
+
+    it('should treat a `.` collection folder as the root for a relative field-level folder', () => {
+      vi.mocked(getValidCollections).mockReturnValue([
+        // @ts-ignore - simplified collection for testing
+        { name: 'docs', folder: '' },
+      ]);
+      vi.mocked(getValidCollectionFiles).mockReturnValue([]);
+
+      const config = {
+        backend: { name: 'git-gateway' },
+        media_folder: 'static',
+        public_folder: '/assets',
+        collections: [],
+      };
+
+      // The parser context holds the raw collection, whose `folder` hasn’t been normalized
+      const fieldMediaFolders = [
+        {
+          fieldConfig: { media_folder: 'images' },
+          context: {
+            collection: { name: 'docs', folder: '.' },
+            collectionFile: undefined,
+            typedKeyPath: 'cover',
+            isIndexFile: false,
+          },
+        },
+      ];
+
+      // @ts-ignore - simplified config for testing
+      const result = getAllAssetFolders(config, fieldMediaFolders);
+
+      expect(result.find((f) => f.typedKeyPath === 'cover')).toMatchObject({
+        internalPath: '',
+        internalSubPath: 'images',
+        entryRelative: true,
+      });
     });
 
     it('should skip field-level media folders for invalid collections', () => {
@@ -2058,7 +2405,7 @@ describe('config/folders/assets', () => {
           },
           context: {
             collection: { name: '_singletons', folder: 'pages' },
-            collectionFile: { name: 'about' },
+            collectionFile: { name: 'about', file: 'pages/about.md' },
             typedKeyPath: 'hero_image',
             isIndexFile: true,
           },
@@ -2182,7 +2529,7 @@ describe('config/folders/assets', () => {
           },
           context: {
             collection: { name: 'settings', files: [] },
-            collectionFile: { name: 'general' },
+            collectionFile: { name: 'general', file: 'config/general.yml' },
             typedKeyPath: 'logo',
             isIndexFile: false,
           },
@@ -2335,6 +2682,100 @@ describe('config/folders/assets', () => {
 
       expect(fieldFolder).toBeDefined();
       expect(fieldFolder?.internalPath).toBe('uploads/featured');
+    });
+  });
+
+  describe('resolveGlobalFolders', () => {
+    it('returns `undefined` without a global media folder', () => {
+      expect(resolveGlobalFolders(/** @type {any} */ ({ public_folder: '/images' }))).toBe(
+        undefined,
+      );
+    });
+
+    it('normalizes the global media and public folders', () => {
+      expect(
+        resolveGlobalFolders(/** @type {any} */ ({ media_folder: '/static/images/' })),
+      ).toEqual({ globalMediaFolder: 'static/images', globalPublicFolder: '/static/images' });
+      expect(resolveGlobalFolders(/** @type {any} */ ({ media_folder: '.' }))).toEqual({
+        globalMediaFolder: '',
+        globalPublicFolder: '/',
+      });
+      expect(
+        resolveGlobalFolders(
+          /** @type {any} */ ({ media_folder: 'src/assets', public_folder: '@assets/' }),
+        ),
+      ).toEqual({ globalMediaFolder: 'src/assets', globalPublicFolder: '@assets' });
+    });
+  });
+
+  describe('collectCollectionAssetFolders', () => {
+    it('adds the collection, file and singleton folders', () => {
+      vi.mocked(getValidCollectionFiles).mockImplementation((files) => /** @type {any} */ (files));
+
+      /** @type {any[]} */
+      const folders = [];
+
+      collectCollectionAssetFolders(folders, {
+        validCollections: /** @type {any} */ ([
+          { name: 'posts', folder: 'content/posts', path: '{{slug}}/index' },
+          {
+            name: 'pages',
+            media_folder: 'images',
+            files: [{ name: 'about', file: 'content/about.md' }],
+          },
+        ]),
+        singletons: /** @type {any} */ ([
+          { name: 'home', file: 'content/home.md', media_folder: '/static/home' },
+        ]),
+        globalFolders: { globalMediaFolder: 'static/images', globalPublicFolder: '/images' },
+      });
+
+      expect(
+        folders.map(({ collectionName, fileName, internalPath, internalSubPath }) => ({
+          collectionName,
+          fileName,
+          internalPath,
+          internalSubPath,
+        })),
+      ).toEqual([
+        {
+          collectionName: 'posts',
+          fileName: undefined,
+          internalPath: 'content/posts',
+          internalSubPath: '',
+        },
+        {
+          collectionName: 'pages',
+          fileName: 'about',
+          internalPath: 'content',
+          internalSubPath: 'images',
+        },
+        {
+          collectionName: '_singletons',
+          fileName: 'home',
+          internalPath: 'static/home',
+          internalSubPath: undefined,
+        },
+      ]);
+    });
+  });
+
+  describe('getLocaleFolderNameMap', () => {
+    it('maps each collection to the locales of its locale folders', () => {
+      const map = getLocaleFolderNameMap(
+        /** @type {any} */ ({ i18n: { structure: 'multiple_files', locales: ['en', 'de'] } }),
+        /** @type {any} */ ([
+          { name: 'posts', folder: 'content/{{locale}}/posts', i18n: true },
+          { name: 'pages', folder: 'content/pages', i18n: true },
+          { name: 'docs', folder: 'content/docs', i18n: { structure: 'multiple_root_folders' } },
+        ]),
+      );
+
+      expect([...map]).toEqual([
+        ['posts', ['en', 'de']],
+        ['pages', []],
+        ['docs', ['en', 'de']],
+      ]);
     });
   });
 });

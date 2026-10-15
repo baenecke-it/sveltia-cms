@@ -477,13 +477,20 @@ entry_not_found: Eintrag nicht gefunden.
 # Entry creation restrictions: tooltip and advisory messages
 creating_entries_disabled_by_admin: Das Anlegen neuer Einträge in dieser Sammlung wurde von der Administration deaktiviert.
 # {$quota} is the collection’s maximum entry count
-creating_entries_disabled_by_quota: In dieser Sammlung können keine neuen Einträge angelegt werden, da die Obergrenze von {$quota} Einträgen erreicht ist.
+creating_entries_disabled_by_quota: |
+  .input {$quota :integer}
+  .match $quota
+    one {{ In dieser Sammlung können keine neuen Einträge angelegt werden, da die Obergrenze von {$quota} Eintrag erreicht ist. }}
+    *   {{ In dieser Sammlung können keine neuen Einträge angelegt werden, da die Obergrenze von {$quota} Einträgen erreicht ist. }}
 # {$quota} is the collection limit and {$remaining} is the number of entries that can still be created
 creating_entries_nearing_quota: |
+  .input {$quota :integer}
   .input {$remaining :integer}
-  .match $remaining
-    one {{ Diese Sammlung nähert sich ihrer Obergrenze von {$quota} Einträgen. Es kann nur noch {$remaining} weiterer Eintrag angelegt werden. }}
-    *   {{ Diese Sammlung nähert sich ihrer Obergrenze von {$quota} Einträgen. Es können nur noch {$remaining} weitere Einträge angelegt werden. }}
+  .match $quota $remaining
+    one one {{ Diese Sammlung nähert sich ihrer Obergrenze von {$quota} Eintrag. Es kann nur noch {$remaining} weiterer Eintrag angelegt werden. }}
+    one *   {{ Diese Sammlung nähert sich ihrer Obergrenze von {$quota} Eintrag. Es können nur noch {$remaining} weitere Einträge angelegt werden. }}
+    *   one {{ Diese Sammlung nähert sich ihrer Obergrenze von {$quota} Einträgen. Es kann nur noch {$remaining} weiterer Eintrag angelegt werden. }}
+    *   *   {{ Diese Sammlung nähert sich ihrer Obergrenze von {$quota} Einträgen. Es können nur noch {$remaining} weitere Einträge angelegt werden. }}
 
 # Navigation: back links and list labels
 back_to_collection: Zurück zur Sammlung
@@ -1558,7 +1565,7 @@ config:
     oauth_implicit_flow: Die konfigurierte Authentifizierungsmethode (Implicit Flow) wird in Sveltia CMS nicht unterstützt. Verwenden Sie stattdessen eine andere <a>Authentifizierungsmethode</a>.
     github_pkce_unsupported: PKCE-Autorisierung wird aufgrund von Einschränkungen bei GitHub noch nicht unterstützt. Verwenden Sie stattdessen eine andere <a>Authentifizierungsmethode</a>.
     oauth_no_app_id: Die ID der OAuth-Anwendung ist nicht definiert.
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: Die Option `open_authoring` erfordert den Veröffentlichungsmodus `editorial_workflow`. Details stehen in der <a>Dokumentation</a>.
     # Don’t localize `auth_methods`
     no_auth_methods: Die Option `auth_methods` muss mindestens eine Methode enthalten.
@@ -1681,8 +1688,6 @@ config:
   # Warning messages (logged to console)
   warning:
     oauth_no_app_id: Die ID der OAuth-Anwendung ist nicht definiert. Zum Anmelden muss ein Zugriffstoken angegeben werden.
-    editorial_workflow_unsupported: Der Redaktions-Workflow wird derzeit nur mit den GitHub- und GitLab-Backends unterstützt.
-    open_authoring_unsupported_backend: Open Authoring wird derzeit nur mit dem GitHub-Backend unterstützt.
     # {$prop} is the unsupported option name that will be ignored
     unsupported_ignored_option: Die Option `{$prop}` wird in Sveltia CMS nicht unterstützt. Sie wird ignoriert.
     # Don’t localize `picker_utc`, `input_timezone`, and `output_utc`
@@ -1822,8 +1827,6 @@ workflow:
     .match $count
       one {{ Einer davon wurde noch nicht veröffentlicht, daher werden die unveröffentlichten Änderungen verworfen. Eine bereits veröffentlichte Version bleibt veröffentlicht. }}
       *   {{ {$count} davon wurden noch nicht veröffentlicht, daher werden die unveröffentlichten Änderungen verworfen. Bereits veröffentlichte Versionen bleiben veröffentlicht. }}
-  # Confirmation dialog shown before merging the pull request. Keep the wording free of Git jargon.
-  confirm_publishing_entry: Soll dieser Eintrag wirklich veröffentlicht werden? Die Änderungen werden sofort wirksam.
   # Workflow page: toast notifications shown while an entry is being published from a card, and
   # once publishing has completed
   publishing_entry: Eintrag wird veröffentlicht…
@@ -1977,13 +1980,23 @@ prefs:
       description: Links in der Eintragsvorschau und in Beschriftungen der Benutzeroberfläche unterstrichen darstellen.
       switch_label: Links immer unterstreichen
 
-  # Advanced panel
-  advanced:
-    title: Erweitert
-    beta:
-      title: Beta-Funktionen
-      description: Einige Beta-Funktionen aktivieren, die instabil oder noch nicht übersetzt sein können.
-      switch_label: Am Beta-Programm teilnehmen
+  # Data Management panel
+  data:
+    clear_data:
+      title: Daten löschen
+      # Clear File Cache button
+      file_cache:
+        description: Lokal zwischengespeicherte Dateiinhalte und Bildvorschauen löschen, um Speicherplatz freizugeben oder Probleme durch veraltete Daten zu beheben.
+        button_label: Dateicache leeren
+        confirmation: Die lokal zwischengespeicherten Dateiinhalte und Bildvorschauen werden gelöscht. Ungespeicherte Entwürfe und Einstellungen bleiben erhalten, gelöschte Daten werden bei Bedarf erneut heruntergeladen oder erzeugt. Das CMS wird danach neu geladen.
+      # Erase All Data button
+      all_data:
+        description: Alles löschen, was das CMS in diesem Browser speichert, einschließlich zwischengespeicherter Dateien, ungespeicherter Entwürfe und Einstellungen. Bereits im Repository Gespeichertes ist nicht betroffen.
+        button_label: Alle Daten löschen
+        confirmation: Alle in diesem Browser gespeicherten Daten werden gelöscht, einschließlich zwischengespeicherter Dateiinhalte, Bildvorschauen, ungespeicherter Entwürfe, Einstellungen und Anmeldestatus. Das Repository ist nicht betroffen, aber alle nicht gespeicherten Änderungen gehen verloren, und Sie müssen sich erneut anmelden. Das CMS wird danach neu geladen.
+
+  # Developer panel
+  developer:
     developer_mode:
       title: Entwicklermodus
       description: Einige Funktionen für die Entwicklung aktivieren, darunter ausführliche Konsolenausgaben und native Kontextmenüs.
@@ -2001,18 +2014,6 @@ prefs:
         field_label: Authorization-Header (z. B. Bearer <token>) (optional)
         saved: Authorization-Header gespeichert.
         removed: Authorization-Header entfernt.
-    clear_data:
-      title: Daten löschen
-      # Clear File Cache button
-      file_cache:
-        description: Lokal zwischengespeicherte Dateiinhalte und Bildvorschauen löschen, um Speicherplatz freizugeben oder Probleme durch veraltete Daten zu beheben.
-        button_label: Dateicache leeren
-        confirmation: Die lokal zwischengespeicherten Dateiinhalte und Bildvorschauen werden gelöscht. Ungespeicherte Entwürfe und Einstellungen bleiben erhalten, gelöschte Daten werden bei Bedarf erneut heruntergeladen oder erzeugt. Das CMS wird danach neu geladen.
-      # Erase All Data button
-      all_data:
-        description: Alles löschen, was das CMS in diesem Browser speichert, einschließlich zwischengespeicherter Dateien, ungespeicherter Entwürfe und Einstellungen. Bereits im Repository Gespeichertes ist nicht betroffen.
-        button_label: Alle Daten löschen
-        confirmation: Alle in diesem Browser gespeicherten Daten werden gelöscht, einschließlich zwischengespeicherter Dateiinhalte, Bildvorschauen, ungespeicherter Entwürfe, Einstellungen und Anmeldestatus. Das Repository ist nicht betroffen, aber alle nicht gespeicherten Änderungen gehen verloren, und Sie müssen sich erneut anmelden. Das CMS wird danach neu geladen.
 
 # ==============================================================================
 # Keyboard Shortcuts

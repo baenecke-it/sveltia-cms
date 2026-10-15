@@ -24,9 +24,7 @@ vi.mock('$lib/services/config', () => ({
 vi.mock('$lib/services/user/prefs.svelte', () => ({
   prefs: mockPrefs,
 }));
-vi.mock('@sveltia/i18n', () => ({
-  _: vi.fn((key) => key),
-}));
+vi.mock('@sveltia/i18n', async () => (await import('$lib/test/i18n')).createI18nMock());
 vi.mock('$lib/services/backends/git/github/auth', () => ({
   getTokenPageURL: vi.fn(),
   signIn: vi.fn(),
@@ -45,6 +43,7 @@ vi.mock('$lib/services/backends/git/github/deployment', () => ({
 vi.mock('$lib/services/backends/git/github/files', () => ({
   fetchFiles: vi.fn(),
   fetchBlob: vi.fn(),
+  fetchDirSHA: vi.fn(),
 }));
 vi.mock('$lib/services/backends/git/github/repository', () => ({
   repository: {},
@@ -86,6 +85,7 @@ describe('GitHub backend service', () => {
       fetchFiles: expect.any(Function),
       fetchLastCommit: expect.any(Function),
       fetchBlob: expect.any(Function),
+      fetchDirSHA: expect.any(Function),
       commitChanges: expect.any(Function),
       fetchFileCommits: expect.any(Function),
       triggerDeployment: expect.any(Function),

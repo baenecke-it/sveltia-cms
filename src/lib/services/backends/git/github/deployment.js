@@ -1,8 +1,13 @@
-import { fetchAliasedBatch, splitIntoChunks } from '$lib/services/backends/git/github/graphql';
+import { fetchAliasedBatch } from '$lib/services/backends/git/github/graphql';
 import { repository } from '$lib/services/backends/git/github/repository';
 import { fetchAPI, fetchGraphQL } from '$lib/services/backends/git/shared/api';
 import { runConcurrently } from '$lib/services/backends/git/shared/concurrency';
-import { findURLInSummary, pickDeployment } from '$lib/services/backends/git/shared/deployment';
+import {
+  collectSafely,
+  findURLInSummary,
+  resolveDeployments,
+} from '$lib/services/backends/git/shared/deployment';
+import { splitIntoChunks } from '$lib/services/utils/array';
 
 /**
  * @import { DeployState, DeployStatus, DeployTarget } from '$lib/types/private';
@@ -305,42 +310,24 @@ const collectTogether = async (shas, candidateMap) => {
  */
 const collectOneByOne = async (shas, candidateMap) => {
   await Promise.all(
-    Object.values(SOURCES).map(async ({ selection, parse }) => {
-      try {
+    // A missing or restricted field shouldn’t take the other sources down with it
+    Object.values(SOURCES).map(({ selection, parse }) =>
+      collectSafely(async () => {
         const commits = await fetchCommits(shas, selection);
 
         shas.forEach((sha, index) => parse(commits[index], sha, candidateMap));
-      } catch (ex) {
-        // A missing or restricted field shouldn’t take the other sources down with it
-        // eslint-disable-next-line no-console
-        console.warn('Failed to fetch the deployment info.', ex);
-      }
-    }),
+      }),
+    ),
   );
 };
 
 /**
- * Fetch the deployment status and URL for the given commits. All three sources are asked for in one
- * request, dropping to one request each only if that fails — which happens when a field is
- * unavailable, on GitHub Enterprise Server or with a token lacking deployment scope, because the
- * API answers with partial data and an error together and the shared request helper rejects the
- * whole response. A repository that needs the split pays for discovering it once.
- * @param {DeployTarget[]} targets Commits to look up.
- * @returns {Promise<Record<string, DeployStatus>>} Deployments keyed by commit SHA.
+ * Collect deploy candidates for the given commits from all three sources. They’re asked for in one
+ * request per chunk, dropping to one request each only if that fails.
+ * @param {string[]} shas Commit SHAs.
+ * @param {Record<string, DeployCandidate[]>} candidateMap Candidates keyed by commit SHA.
  */
-export const fetchDeployments = async (targets) => {
-  // A pull request created in an older session may have no head commit recorded yet
-  const validTargets = targets.filter(({ sha }) => !!sha);
-  // Two pull requests can share a head commit, so look each one up only once
-  const shas = [...new Set(validTargets.map(({ sha }) => sha))];
-
-  if (!shas.length) {
-    return {};
-  }
-
-  /** @type {Record<string, DeployCandidate[]>} */
-  const candidateMap = Object.fromEntries(shas.map((sha) => [sha, []]));
-
+const collectCandidates = async (shas, candidateMap) => {
   // Chunked here rather than in `fetchAliasedBatch`, so a failure only sends its own chunk down the
   // one-request-per-source path
   await runConcurrently(splitIntoChunks(shas, MAX_ITEMS.commits), async (chunk) => {
@@ -358,11 +345,16 @@ export const fetchDeployments = async (targets) => {
 
     await collectOneByOne(chunk, candidateMap);
   });
-
-  return Object.fromEntries(
-    validTargets.map(({ sha, kind }) => [
-      sha,
-      pickDeployment(candidateMap[sha], { kind, selfURL: repository.repoURL }),
-    ]),
-  );
 };
+
+/**
+ * Fetch the deployment status and URL for the given commits. All three sources are asked for in one
+ * request, dropping to one request each only if that fails — which happens when a field is
+ * unavailable, on GitHub Enterprise Server or with a token lacking deployment scope, because the
+ * API answers with partial data and an error together and the shared request helper rejects the
+ * whole response. A repository that needs the split pays for discovering it once.
+ * @param {DeployTarget[]} targets Commits to look up.
+ * @returns {Promise<Record<string, DeployStatus>>} Deployments keyed by commit SHA.
+ */
+export const fetchDeployments = async (targets) =>
+  resolveDeployments(targets, { collect: collectCandidates, selfURL: repository.repoURL });

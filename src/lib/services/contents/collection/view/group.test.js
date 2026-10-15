@@ -24,6 +24,9 @@ vi.mock('@sveltia/i18n', () => ({
 
 vi.mock('$lib/services/contents/entry/fields', () => ({
   getField: vi.fn(),
+}));
+
+vi.mock('$lib/services/contents/entry/values', () => ({
   getPropertyValue: vi.fn(),
 }));
 
@@ -35,7 +38,7 @@ vi.mock('$lib/services/contents/collection/entries/reorder/config', () => ({
   getReorderGroupName: vi.fn(),
 }));
 
-const { getPropertyValue } = await import('$lib/services/contents/entry/fields');
+const { getPropertyValue } = await import('$lib/services/contents/entry/values');
 
 const { getReorderGroupName } =
   await import('$lib/services/contents/collection/entries/reorder/config');
@@ -114,6 +117,7 @@ describe('getReorderGroupingConditions', () => {
       getReorderGroupingConditions({
         name: 'articles',
         folder: 'content/articles',
+        _type: 'entry',
         view_groups: [{ name: 'categories', label: 'Categories', field: 'category' }],
       }),
     ).toEqual({ field: 'category' });
@@ -126,6 +130,7 @@ describe('getReorderGroupingConditions', () => {
       getReorderGroupingConditions({
         name: 'events',
         folder: 'content/events',
+        _type: 'entry',
         view_groups: [{ name: 'upcoming', label: 'Upcoming', field: 'date', gte: '{{today}}' }],
       }),
     ).toEqual({ field: 'date', gte: '{{today}}' });

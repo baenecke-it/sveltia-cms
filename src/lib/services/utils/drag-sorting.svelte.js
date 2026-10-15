@@ -1,4 +1,7 @@
+import { tick } from 'svelte';
+
 import {
+  focusReorderControl,
   getDropIndex,
   getListItemAt,
   getMoveTarget,
@@ -15,11 +18,32 @@ import {
  * @property {number[]} displayOrder The order the items are rendered in.
  * @property {(index: number) => void} grab Make the item at the given index draggable.
  * @property {() => void} release Make no item draggable.
+ * @property {(from: number, to: number, action?: string) => Promise<void>} move Move an item to
+ * another position, and move the focus to the matching reorder control on it.
  * @property {(index: number, event?: DragEvent, data?: string) => void} onDragStart Start
  * dragging the item at the given index.
  * @property {(event: DragEvent) => void} onDragOver Handle a `dragover` event on the list.
  * @property {(event: DragEvent) => void} onDrop Handle a `drop` event on the list.
  * @property {() => void} onDragEnd End the drag.
+ * @property {(index: number, options?: DragItemOptions) => DragItemProps} itemProps Get the
+ * attributes and event handlers to spread on the element of the item at the given index.
+ */
+
+/**
+ * Options for {@link DragSorter.itemProps}.
+ * @typedef {object} DragItemOptions
+ * @property {boolean} [ownEventsOnly] Whether to ignore the drag events bubbling up from a nested
+ * sortable list, which starts its own drag.
+ */
+
+/**
+ * Attributes and event handlers of a sortable item element, returned by
+ * {@link DragSorter.itemProps}.
+ * @typedef {object} DragItemProps
+ * @property {boolean} draggable Whether the item can be dragged, which is only while its drag
+ * handle is pressed.
+ * @property {(event: DragEvent) => void} ondragstart `dragstart` event handler.
+ * @property {(event: DragEvent) => void} ondragend `dragend` event handler.
  */
 
 /**
@@ -33,11 +57,22 @@ import {
  * @param {object} args Arguments.
  * @param {() => number} args.getItemCount Function returning the number of items in the list.
  * @param {() => HTMLElement | undefined} args.getListElement Function returning the list element.
- * @param {(from: number, to: number) => void} args.onMove Function called with the source and
- * destination indexes once an item has been dropped somewhere else.
+ * @param {(from: number, to: number) => void} args.onMove Function moving the item at the source
+ * index to the destination index, called once an item has been dropped somewhere else or moved
+ * with {@link DragSorter.move}.
+ * @param {(index: number) => string} [args.getItemData] Function returning plain text describing
+ * the item at the given index, to be attached to a drag started with {@link DragSorter.itemProps}.
+ * @param {() => Promise<void>} [args.settle] Function waiting for the moved item to be rendered in
+ * its new position, before its reorder control gets the focus. Defaults to Svelte’s `tick`.
  * @returns {DragSorter} Reactive state and event handlers.
  */
-export const createDragSorter = ({ getItemCount, getListElement, onMove }) => {
+export const createDragSorter = ({
+  getItemCount,
+  getListElement,
+  onMove,
+  getItemData,
+  settle = tick,
+}) => {
   /** @type {number | undefined} */
   let grabbedIndex = $state();
   /**
@@ -46,13 +81,27 @@ export const createDragSorter = ({ getItemCount, getListElement, onMove }) => {
    * @type {{ index: number, previewOrder: number[] } | undefined}
    */
   let drag = $state.raw();
+  /**
+   * The order returned last by {@link displayOrder}. A plain variable, as it’s only a memo.
+   * @type {number[]}
+   */
+  let lastOrder = [];
 
   const displayOrder = $derived.by(() => {
     const itemCount = getItemCount();
 
-    return drag?.previewOrder.length === itemCount
-      ? drag.previewOrder
-      : [...Array(itemCount).keys()];
+    const order =
+      drag?.previewOrder.length === itemCount ? drag.previewOrder : [...Array(itemCount).keys()];
+
+    // Hand back the same array while the order is the same. The item count is read from the list,
+    // which is rebuilt whenever any of its values changes, e.g. on every keystroke in an item, and
+    // a new array would make the keyed `each` block over it run again. With an `animate:`
+    // directive, that measures the position of every item, which forces a layout on each keystroke
+    if (order.length !== lastOrder.length || order.some((index, i) => index !== lastOrder[i])) {
+      lastOrder = order;
+    }
+
+    return lastOrder;
   });
 
   /**
@@ -62,6 +111,41 @@ export const createDragSorter = ({ getItemCount, getListElement, onMove }) => {
     stopAutoScroll();
     grabbedIndex = undefined;
     drag = undefined;
+  };
+
+  /**
+   * Move an item to another position, and move the focus to a reorder control on it once it has
+   * moved, so the control can be used repeatedly without having to find it again.
+   * @param {number} from Source index.
+   * @param {number} to Destination index.
+   * @param {string} [action] `data-action` of the reorder control that triggered the move, so the
+   * focus can be restored to the matching control on the item.
+   */
+  const move = async (from, to, action = 'reorder') => {
+    onMove(from, to);
+    await settle();
+    focusReorderControl({ listElement: getListElement(), index: to, action });
+  };
+
+  /**
+   * Start dragging the item at the given index.
+   * @param {number} index Item index.
+   * @param {DragEvent} [event] `dragstart` event. When given, the drag is marked as a move, and
+   * the given data is attached to it, because Firefox doesn’t start a drag unless some data is
+   * attached.
+   * @param {string} [data] Plain text describing the item, to be attached to the drag.
+   */
+  const onDragStart = (index, event, data) => {
+    drag = { index, previewOrder: [...displayOrder] };
+    // Let the editor pane scroll while the pointer is dragged near its top or bottom edge, so a
+    // long list can be reordered without letting go
+    startAutoScroll(getListElement());
+
+    if (event?.dataTransfer) {
+      event.dataTransfer.effectAllowed = 'move';
+      // Firefox doesn’t start a drag unless some data is attached to it
+      event.dataTransfer.setData('text/plain', data ?? '');
+    }
   };
 
   return {
@@ -103,26 +187,11 @@ export const createDragSorter = ({ getItemCount, getListElement, onMove }) => {
     release: () => {
       grabbedIndex = undefined;
     },
+    move,
     /**
      * Start dragging the item at the given index. Call it from the item’s `dragstart` event.
-     * @param {number} index Item index.
-     * @param {DragEvent} [event] `dragstart` event. When given, the drag is marked as a move, and
-     * the given data is attached to it, because Firefox doesn’t start a drag unless some data is
-     * attached.
-     * @param {string} [data] Plain text describing the item, to be attached to the drag.
      */
-    onDragStart: (index, event, data) => {
-      drag = { index, previewOrder: [...displayOrder] };
-      // Let the editor pane scroll while the pointer is dragged near its top or bottom edge, so a
-      // long list can be reordered without letting go
-      startAutoScroll(getListElement());
-
-      if (event?.dataTransfer) {
-        event.dataTransfer.effectAllowed = 'move';
-        // Firefox doesn’t start a drag unless some data is attached to it
-        event.dataTransfer.setData('text/plain', data ?? '');
-      }
-    },
+    onDragStart,
     /**
      * Handle a `dragover` event on the list, moving the dragged item’s gap under the pointer.
      * @param {DragEvent} event `dragover` event.
@@ -184,7 +253,7 @@ export const createDragSorter = ({ getItemCount, getListElement, onMove }) => {
       reset();
 
       if (to !== from) {
-        onMove(from, to);
+        move(from, to);
       }
     },
     /**
@@ -192,5 +261,35 @@ export const createDragSorter = ({ getItemCount, getListElement, onMove }) => {
      * dropped or the drag was cancelled; a cancelled drag puts every item back where it started.
      */
     onDragEnd: reset,
+    /**
+     * Get the attributes and event handlers to spread on the element of the item at the given
+     * index: it’s draggable while its handle is pressed, and its `dragstart` and `dragend` events
+     * start and end the drag. The `dragging` class marking the item being dragged is left to the
+     * element’s own `class:` directive, which can’t be spread.
+     * @param {number} index Item index.
+     * @param {DragItemOptions} [options] Options.
+     * @returns {DragItemProps} Attributes and event handlers.
+     */
+    itemProps: (index, { ownEventsOnly = false } = {}) => ({
+      draggable: grabbedIndex === index,
+      /**
+       * Start dragging the item.
+       * @param {DragEvent} event `dragstart` event.
+       */
+      ondragstart: (event) => {
+        if (!ownEventsOnly || event.target === event.currentTarget) {
+          onDragStart(index, event, getItemData?.(index));
+        }
+      },
+      /**
+       * End the drag.
+       * @param {DragEvent} event `dragend` event.
+       */
+      ondragend: (event) => {
+        if (!ownEventsOnly || event.target === event.currentTarget) {
+          reset();
+        }
+      },
+    }),
   };
 };

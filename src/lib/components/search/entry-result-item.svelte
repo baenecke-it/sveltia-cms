@@ -3,7 +3,7 @@
   import { GridCell, GridRow, TruncatedText } from '@sveltia/ui';
   import { sleep } from '@sveltia/utils/misc';
 
-  import Image from '$lib/components/assets/shared/image.svelte';
+  import EntryThumbnail from '$lib/components/contents/shared/entry-thumbnail.svelte';
   import { goto } from '$lib/services/app/navigation';
   import { getCollectionLabel } from '$lib/services/contents/collection';
   import { getListedCollections } from '$lib/services/contents/collection/entries';
@@ -11,8 +11,8 @@
     getCollectionFileLabel,
     getCollectionFilesByEntry,
   } from '$lib/services/contents/collection/files';
-  import { getEntryThumbnail } from '$lib/services/contents/entry/assets';
   import { getEntrySummary } from '$lib/services/contents/entry/summary';
+  import { encodePathSegments } from '$lib/services/utils/url';
 
   /**
    * @import {
@@ -48,19 +48,20 @@
 {#snippet resultRow(/** @type {RowArgs} */ { collection, collectionFile })}
   <GridRow
     onclick={() => {
-      goto(`/collections/${collection.name}/entries/${collectionFile?.name || subPath}`, {
-        state: { highlight: { locale, keyPath } },
-        transitionType: 'forwards',
-      });
+      goto(
+        encodePathSegments(
+          `/collections/${collection.name}/entries/${collectionFile?.name || subPath}`,
+        ),
+        {
+          state: { highlight: { locale, keyPath } },
+          transitionType: 'forwards',
+        },
+      );
     }}
   >
     <GridCell class="image">
       {#if collection._type === 'entry'}
-        {#await getEntryThumbnail(collection, entry) then src}
-          {#if src}
-            <Image {src} variant="icon" cover />
-          {/if}
-        {/await}
+        <EntryThumbnail {collection} {entry} variant="icon" />
       {/if}
     </GridCell>
     <GridCell class="collection">

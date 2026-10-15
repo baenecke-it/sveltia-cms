@@ -1,8 +1,8 @@
 <script>
   import AssetListItem from '$lib/components/assets/list/asset-list-item.svelte';
-  import { goto } from '$lib/services/app/navigation';
-  import { focusedAsset, selectedAssetPathSet, selectedAssets } from '$lib/services/assets';
   import { canPreviewAsset } from '$lib/services/assets/kinds';
+  import { showAssetDetails } from '$lib/services/assets/navigation';
+  import { focusedAsset, selectedAssetPathSet, selectedAssets } from '$lib/services/assets/state';
   import { focusedSubfolder } from '$lib/services/assets/subfolders';
   import { listedAssetIndexMap } from '$lib/services/assets/view';
   import { toggleListItem } from '$lib/services/utils/array';
@@ -49,6 +49,7 @@
     focusedSubfolder.current = undefined;
   }}
   onPreview={() => {
-    goto(`/assets/${asset.path}`, { transitionType: 'forwards' });
+    // Stay in the selected folder, e.g. All Assets, rather than moving to the asset’s own folder
+    showAssetDetails(asset);
   }}
 />

@@ -6,20 +6,20 @@ import dayjsUTC from 'dayjs/plugin/utc';
 
 import { backend } from '$lib/services/backends';
 import { fillTemplate } from '$lib/services/common/template';
+import { DATE_TIME_TEMPLATE_REGEX } from '$lib/services/common/template/constants';
 import { cmsConfig } from '$lib/services/config';
-import { allEntryFolders, getEntryFoldersByPath } from '$lib/services/contents';
-import { getCollection } from '$lib/services/contents/collection';
 import {
   getIndexFile,
   isCollectionIndexFile,
 } from '$lib/services/contents/collection/entries/index-file';
 import { parseDateTimeConfig } from '$lib/services/contents/fields/date-time/config';
-import { getDate, isValidDate } from '$lib/services/contents/fields/date-time/helpers';
+import { getDate, isValidDate } from '$lib/services/contents/fields/date-time/parse';
+import { omitLocalePlaceholder } from '$lib/services/contents/i18n/placeholder';
+import { encodePathSegments } from '$lib/services/utils/url';
 
 /**
  * @import {
  * Entry,
- * EntryFolderInfo,
  * FlattenedEntryContent,
  * InternalCollection,
  * InternalCollectionFile,
@@ -32,57 +32,6 @@ import { getDate, isValidDate } from '$lib/services/contents/fields/date-time/he
 dayjs.extend(dayjsCustomParseFormat);
 dayjs.extend(dayjsLocalizedFormat);
 dayjs.extend(dayjsUTC);
-
-/**
- * Regular expression to match date and time template placeholders in entry file path templates.
- */
-const DATE_TIME_TEMPLATE_REGEX = /{{(?:year|month|day|hour|minute|second)}}/;
-
-/**
- * Cache of {@link getEntryFolders} results, dropped whenever `allEntryFolders` changes. The lookup
- * tests the entry’s path against every entry collection’s folder and sorts the matches, and it’s
- * repeated for every entry on each search keystroke, asset reference scan and so on. An entry is
- * replaced rather than modified when its files change, so its object is a safe key.
- */
-const entryFoldersCache = {
-  source: /** @type {EntryFolderInfo[] | undefined} */ (undefined),
-  /** @type {WeakMap<Entry, EntryFolderInfo[]>} */
-  map: new WeakMap(),
-};
-
-/**
- * Get the collection entry folders matching the given entry’s path.
- * @param {Entry} entry Entry.
- * @returns {EntryFolderInfo[]} Entry folders.
- */
-const getEntryFolders = (entry) => {
-  const source = allEntryFolders.current;
-
-  if (source !== entryFoldersCache.source) {
-    entryFoldersCache.source = source;
-    entryFoldersCache.map = new WeakMap();
-  }
-
-  let folders = entryFoldersCache.map.get(entry);
-
-  if (!folders) {
-    folders = getEntryFoldersByPath(Object.values(entry.locales)[0].path);
-    entryFoldersCache.map.set(entry, folders);
-  }
-
-  return folders;
-};
-
-/**
- * Get a list of collections the given entry belongs to. One entry can theoretically appear in
- * multiple collections depending on the configuration, so that the result is an array.
- * @param {Entry} entry Entry.
- * @returns {InternalCollection[]} Collections.
- */
-export const getAssociatedCollections = (entry) =>
-  getEntryFolders(entry)
-    .map(({ collectionName }) => getCollection(collectionName))
-    .filter((collection) => !!collection);
 
 /**
  * Determine date and time parts from the given entry content.
@@ -110,8 +59,13 @@ export const extractDateTime = ({ dateFieldName, fields, content }) => {
     return undefined;
   }
 
-  const { utc, outputUTC } = parseDateTimeConfig(config);
-  const timeZone = utc || outputUTC ? 'UTC' : undefined;
+  const { format, dateOnly, utc, outputUTC, singleCustomTimeZone } = parseDateTimeConfig(config);
+
+  // Read the parts in the time zone `getDate()` parsed the value in: a date without a custom format
+  // is UTC midnight, while one in a custom format is the browser’s midnight, and a date/time is
+  // shown in the field’s custom time zone if any, like in the input
+  const timeZone =
+    utc || outputUTC || (dateOnly && !format) ? 'UTC' : dateOnly ? undefined : singleCustomTimeZone;
 
   return getDateTimeParts({ date, timeZone });
 };
@@ -217,7 +171,7 @@ export const getPreviewPath = ({
   // Handle the case where the default locale is omitted from the preview path, ensuring that the
   // URL is correctly generated without the locale segment for the default locale.
   if (locale === defaultLocale && omitDefaultLocaleFromPreviewPath) {
-    template = template.replace(/{{locale}}[./]/, '');
+    template = omitLocalePlaceholder(template) ?? template;
   }
 
   return fillEntryPathTemplate({
@@ -243,6 +197,10 @@ export const getPreviewPath = ({
  * @param {string} [options.baseURL] Base URL to use instead of the site’s own, typically the deploy
  * preview URL reported by a CI/CD provider for an Editorial Workflow pull request. It takes
  * precedence over the `site_url` option, which may be unset.
+ * @param {boolean} [options.fallbackToRoot] Whether to link to the root of the site when the
+ * collection or collection file has no `preview_path` option, as Decap CMS does. It’s meant for a
+ * deploy preview, whose address changes with each pull request, so the CMS is the easiest place to
+ * find it; a link to the home page of the live site isn’t worth offering on every entry.
  * @returns {string | undefined} URL on the live site or the deploy preview.
  * @see https://decapcms.org/docs/deploy-preview-links/
  */
@@ -253,6 +211,15 @@ export const getEntryPreviewURL = (entry, locale, collection, collectionFile, op
 
   if (!showLinks || !baseURL) {
     return undefined;
+  }
+
+  const { preview_path: pathTemplate } =
+    collectionFile ?? /** @type {InternalEntryCollection} */ (collection);
+
+  // Only a missing option falls back to the root: a `preview_path` that can’t be filled in for this
+  // entry still gives no link, as the page it names is somewhere else on the site
+  if (options.fallbackToRoot && !pathTemplate) {
+    return `${baseURL.replace(/\/$/, '')}/`;
   }
 
   const previewPath = getPreviewPath({
@@ -278,5 +245,9 @@ export const getEntryPreviewURL = (entry, locale, collection, collectionFile, op
  * @param {InternalLocaleCode} locale Locale.
  * @returns {string} URL on the repository.
  */
-export const getEntryRepoBlobURL = (entry, locale) =>
-  `${backend.current?.repository?.blobBaseURL}/${entry.locales[locale]?.path}?plain=1`;
+export const getEntryRepoBlobURL = (entry, locale) => {
+  const path = entry.locales[locale]?.path;
+
+  // A name can contain characters like `#` or `%` that have a meaning in a URL
+  return `${backend.current?.repository?.blobBaseURL}/${path ? encodePathSegments(path) : ''}?plain=1`;
+};

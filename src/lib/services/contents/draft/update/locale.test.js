@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createProxy } from '$lib/services/contents/draft/create/proxy.svelte';
+import { isDraftModified } from '$lib/services/contents/draft';
+import { createProxy, isDuplicatedField } from '$lib/services/contents/draft/create/proxy.svelte';
 import { getDefaultValues } from '$lib/services/contents/draft/defaults';
 import { getField } from '$lib/services/contents/entry/fields';
+import { useActualDraftFieldArgs } from '$lib/test/fields';
 
 import {
   copyDefaultLocaleValues as _copyDefaultLocaleValues,
@@ -13,6 +15,8 @@ import {
 vi.mock('$lib/services/contents/draft/create/proxy.svelte');
 vi.mock('$lib/services/contents/draft/defaults');
 vi.mock('$lib/services/contents/entry/fields');
+
+await useActualDraftFieldArgs();
 
 describe('draft/update/locale', () => {
   /** @type {any} */
@@ -115,6 +119,73 @@ describe('draft/update/locale', () => {
       expect(visited).toEqual(['en', 'ja', 'fr']);
     });
 
+    it('should visit every locale for a field in a duplicated List or Object field', () => {
+      const draft = {
+        collectionName: 'posts',
+        fileName: undefined,
+        isIndexFile: false,
+        currentValues: valueStore,
+      };
+
+      /** @type {string[]} */
+      const visited = [];
+
+      /**
+       * Run the function for the given field.
+       * @param {object} args Arguments.
+       * @param {Record<string, any>} [args.store] Value store.
+       * @param {any} [args.i18n] `i18n` option given by the caller.
+       */
+      const run = ({ store = valueStore, i18n = false } = {}) => {
+        visited.length = 0;
+        forEachTargetLocale(
+          {
+            valueStore: store,
+            locale: 'en',
+            i18n,
+            draft: /** @type {any} */ (draft),
+            keyPath: 'meta.tags',
+          },
+          (_valueMap, _locale) => {
+            visited.push(_locale);
+          },
+        );
+      };
+
+      vi.mocked(isDuplicatedField).mockReturnValue(true);
+
+      // The field configuration is looked up, so the `false` the caller defaulted to is ignored
+      const tagsField = { name: 'tags', widget: 'list' };
+
+      vi.mocked(getField).mockReturnValue(/** @type {any} */ (tagsField));
+      run();
+      expect(visited).toEqual(['en', 'ja', 'fr']);
+      expect(isDuplicatedField).toHaveBeenCalledWith({
+        fieldConfig: tagsField,
+        getFieldArgs: {
+          collectionName: 'posts',
+          fileName: undefined,
+          isIndexFile: false,
+          keyPath: 'meta.tags',
+          valueMap: valueStore.en,
+        },
+      });
+
+      // The given `i18n` is used if the field can’t be found
+      vi.mocked(getField).mockReturnValue(undefined);
+      run({ i18n: true });
+      expect(isDuplicatedField).toHaveBeenLastCalledWith(
+        expect.objectContaining({ fieldConfig: { i18n: true } }),
+      );
+
+      // Another value store, e.g. the rich text editor components’ values, isn’t looked up
+      vi.mocked(isDuplicatedField).mockClear();
+      run({ store: { en: {}, ja: {} } });
+      expect(visited).toEqual(['en']);
+      expect(isDuplicatedField).not.toHaveBeenCalled();
+      vi.mocked(isDuplicatedField).mockReset();
+    });
+
     it('should hand the callback that locale’s own content', () => {
       forEachTargetLocale({ valueStore, locale: 'fr', i18n: false }, (valueMap, _locale) => {
         expect(valueMap).toBe(valueStore[_locale]);
@@ -162,6 +233,54 @@ describe('draft/update/locale', () => {
 
       // Fields with i18n: false should NOT be copied to new locales
       expect(result.date).toBeUndefined();
+    });
+
+    it('gives a translatable UUID field a new UUID rather than the default locale’s', () => {
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+      /** @type {Record<string, any>} */
+      const fieldMap = {
+        id: { name: 'id', widget: 'uuid', i18n: true },
+        slug: { name: 'slug', widget: 'uuid', i18n: 'translate', prefix: 'post-' },
+        shared: { name: 'shared', widget: 'uuid', i18n: 'duplicate' },
+        given: { name: 'given', widget: 'uuid', i18n: true },
+        'blocks.0.id': { name: 'id', widget: 'uuid', i18n: true },
+        key: { name: 'key', widget: 'compute', i18n: true, value: '{{uuid_short}}' },
+        sharedKey: { name: 'sharedKey', widget: 'compute', i18n: 'duplicate', value: '{{uuid}}' },
+        label: { name: 'label', widget: 'compute', i18n: true, value: '{{fields.title}}' },
+      };
+
+      vi.mocked(getField).mockImplementation(({ keyPath }) => fieldMap[keyPath]);
+
+      const enId = '11111111-1111-4111-8111-111111111111';
+
+      mockEntryDraft.currentValues.en = {
+        id: enId,
+        slug: `post-${enId}`,
+        shared: enId,
+        given: enId,
+        'blocks.0.id': enId,
+        key: 'abcd1234',
+        sharedKey: enId,
+        label: 'English Title',
+      };
+
+      const result = copyDefaultLocaleValues({ given: 'existing' }, 'fr');
+
+      expect(result.id).toMatch(uuidRegex);
+      expect(result.id).not.toBe(enId);
+      expect(result.slug).toMatch(/^post-[0-9a-f-]{36}$/);
+      expect(result.slug).not.toBe(`post-${enId}`);
+      expect(result['blocks.0.id']).toMatch(uuidRegex);
+      expect(result['blocks.0.id']).not.toBe(enId);
+      // A value already there is kept
+      expect(result.given).toBe('existing');
+      // A duplicated field follows the default locale
+      expect(result.shared).toBe(enId);
+      expect(result.sharedKey).toBe(enId);
+      // A Compute field generating UUIDs is cleared to be resolved again, but not any other one
+      expect(result.key).toBe('');
+      expect(result.label).toBe('English Title');
     });
 
     it('should remove i18n disabled fields', () => {
@@ -576,6 +695,44 @@ describe('draft/update/locale', () => {
       expect(result.locale_code).toBe('fr');
     });
 
+    it('should keep a subfield duplicated along with its parent List field', () => {
+      vi.mocked(getField).mockImplementation(({ keyPath }) => {
+        if (keyPath === 'title') {
+          return { name: 'title', widget: 'string', i18n: 'translate' };
+        }
+
+        if (keyPath === 'items') {
+          return { name: 'items', widget: 'list', i18n: 'duplicate' };
+        }
+
+        if (/^items\.\d+\.name$/.test(keyPath)) {
+          return { name: 'name', widget: 'string' };
+        }
+
+        if (keyPath === 'note') {
+          return { name: 'note', widget: 'string' };
+        }
+
+        return undefined;
+      });
+
+      vi.mocked(isDuplicatedField).mockImplementation(({ getFieldArgs }) =>
+        getFieldArgs.keyPath.startsWith('items.'),
+      );
+
+      mockEntryDraft.currentValues.en = {
+        title: 'English Title',
+        'items.0.name': 'A',
+        'items.1.name': 'B',
+        note: 'Note',
+      };
+
+      const result = copyDefaultLocaleValues({ title: '', items: [] }, 'fr');
+
+      expect(result).toEqual({ title: '', items: [], 'items.0.name': 'A', 'items.1.name': 'B' });
+      vi.mocked(isDuplicatedField).mockReset();
+    });
+
     describe('keyPathPrefix option', () => {
       beforeEach(() => {
         vi.mocked(getField).mockImplementation(({ keyPath }) => {
@@ -745,6 +902,30 @@ describe('draft/update/locale', () => {
 
       expect(result.currentLocales.ja).toBe(true);
       expect(result.currentValues.ja.title).toBe('Existing');
+    });
+
+    it('should leave the draft unmodified when a locale is enabled and then disabled', () => {
+      mockEntryDraft.originalLocales = { en: true, ja: false };
+      mockEntryDraft.currentLocales = { en: true, ja: false };
+      mockEntryDraft.originalSlugs = {};
+      mockEntryDraft.currentSlugs = {};
+      mockEntryDraft.currentValues.en.rating = 5;
+      mockEntryDraft.originalValues.en.rating = 5;
+
+      vi.mocked(getField).mockImplementation(({ keyPath }) =>
+        keyPath === 'rating' ? { name: 'rating', widget: 'number', i18n: true } : undefined,
+      );
+
+      toggleLocale({ draft: mockEntryDraft, locale: 'ja' });
+
+      // A number is copied from the default locale, unlike the original values
+      expect(mockEntryDraft.currentValues.ja.rating).toBe(5);
+      expect(mockEntryDraft.originalValues.ja.rating).toBeUndefined();
+      expect(isDraftModified(mockEntryDraft)).toBe(true);
+
+      toggleLocale({ draft: mockEntryDraft, locale: 'ja' });
+
+      expect(isDraftModified(mockEntryDraft)).toBe(false);
     });
 
     it('should clear validities when disabling locale', () => {

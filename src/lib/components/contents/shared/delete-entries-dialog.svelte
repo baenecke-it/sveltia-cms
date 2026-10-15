@@ -3,26 +3,26 @@
   import { Alert, ConfirmationDialog, Toast } from '@sveltia/ui';
 
   import CascadeDeleteNote from '$lib/components/common/cascade-delete-note.svelte';
-  import { getAssetFolder } from '$lib/services/assets/folders';
+  import { isCommitCancelled } from '$lib/services/backends/commit-prompt';
+  import { getErrorMessage } from '$lib/services/backends/git/shared/errors';
   import { selectedCollection } from '$lib/services/contents/collection';
   import {
     contentUpdatesToast,
     UPDATE_TOAST_DEFAULT_STATE,
   } from '$lib/services/contents/collection/data';
-  import { deleteEntries } from '$lib/services/contents/collection/data/delete';
   import { selectedEntries } from '$lib/services/contents/collection/entries';
   import { listedEntries, listedUnpublishedEntries } from '$lib/services/contents/collection/view';
-  import { getAssociatedAssets } from '$lib/services/contents/entry/assets';
-  import { planCascadeDelete } from '$lib/services/contents/entry/relations/cascade/delete';
+  import { getEntryRelativeAssets } from '$lib/services/contents/entry/assets';
+  import {
+    EMPTY_CASCADE_DELETE_PLAN,
+    planCascadeDelete,
+  } from '$lib/services/contents/entry/relations/cascade/delete';
   import { isWorkflowEnabled } from '$lib/services/workflow';
-  import { deleteWorkflowEntries, discardWorkflowEntries } from '$lib/services/workflow/save';
+  import { deleteOrDiscardEntries } from '$lib/services/workflow/delete';
 
   /**
-   * @import { Asset, CascadeDeletePlan, Entry, UnpublishedEntry } from '$lib/types/private';
+   * @import { Entry, UnpublishedEntry } from '$lib/types/private';
    */
-
-  /** @type {CascadeDeletePlan} */
-  const EMPTY_PLAN = { targets: [], blockers: [] };
 
   /**
    * @typedef {object} Props
@@ -33,6 +33,7 @@
   let { open = $bindable(false) } = $props();
 
   let showErrorToast = $state(false);
+  let errorMessage = $state('');
 
   // Deleting an unpublished entry discards the draft instead of committing a deletion, so the two
   // kinds of entries have to be handled separately
@@ -45,19 +46,6 @@
     /** @type {Entry[]} */ (selectedEntries.current.filter((entry) => !('workflow' in entry))),
   );
 
-  /**
-   * Get the assets stored alongside the given entry, which are removed with it.
-   * @param {Entry} entry Entry to look at.
-   * @returns {Asset[]} Assets, or an empty list unless the collection stores them with the entry.
-   */
-  const getEntryAssets = (entry) => {
-    const collectionName = selectedCollection.current?.name;
-
-    return collectionName && getAssetFolder({ collectionName })?.entryRelative
-      ? getAssociatedAssets({ entry, collectionName, relative: true })
-      : [];
-  };
-
   // What the deletion means for the entries referencing the published ones through Relation fields.
   // Only worked out while the dialog is open: it scans every entry that could hold a reference,
   // which is too much to do on every change of the selection
@@ -66,26 +54,20 @@
 
     return open && collection && publishedEntries.length
       ? planCascadeDelete({ collection, entries: publishedEntries })
-      : EMPTY_PLAN;
+      : EMPTY_CASCADE_DELETE_PLAN;
   });
 
-  const associatedAssets = $derived.by(() => {
+  // Assets committed alongside an unpublished entry don’t exist on the configured branch yet, so
+  // only look at the published entries here
+  const publishedEntryAssets = $derived.by(() => {
     const collectionName = selectedCollection.current?.name;
 
-    // Assets committed alongside an unpublished entry don’t exist on the configured branch yet, so
-    // only look at the published entries here
-    if (
-      publishedEntries.length &&
-      collectionName &&
-      getAssetFolder({ collectionName })?.entryRelative
-    ) {
-      return publishedEntries.flatMap((entry) =>
-        getAssociatedAssets({ entry, collectionName, relative: true }),
-      );
-    }
-
-    return [];
+    return publishedEntries.map((entry) => ({
+      entry,
+      assets: collectionName ? getEntryRelativeAssets({ entry, collectionName }) : [],
+    }));
   });
+  const associatedAssets = $derived(publishedEntryAssets.flatMap(({ assets }) => assets));
 
   /**
    * Delete the selected entries, discarding any unpublished draft rather than committing a deletion
@@ -93,37 +75,26 @@
    */
   const deleteSelectedEntries = async () => {
     try {
-      if (draftEntries.length) {
-        await discardWorkflowEntries(draftEntries);
-      }
+      const collection = selectedCollection.current;
 
-      if (publishedEntries.length) {
-        if (selectedCollection.current && isWorkflowEnabled(selectedCollection.current)) {
-          // Committing the removals straight to the configured branch would bypass review and be
-          // rejected outright when the branch is protected
-          // @see https://github.com/decaporg/decap-cms/issues/6610
-          await deleteWorkflowEntries(
-            publishedEntries.map((entry) => ({
-              entry,
-              collection: /** @type {any} */ (selectedCollection.current),
-              assets: getEntryAssets(entry),
-            })),
-          );
+      const toastState = await deleteOrDiscardEntries({
+        drafts: draftEntries,
+        items: publishedEntryAssets,
+        collection,
+        useWorkflow: isWorkflowEnabled(collection),
+      });
 
-          contentUpdatesToast.current = {
-            ...UPDATE_TOAST_DEFAULT_STATE,
-            deleted: true,
-            deletionPending: true,
-            count: publishedEntries.length,
-          };
-        } else {
-          await deleteEntries(publishedEntries, associatedAssets);
-        }
+      if (toastState) {
+        contentUpdatesToast.current = { ...UPDATE_TOAST_DEFAULT_STATE, ...toastState };
       }
     } catch (/** @type {any} */ ex) {
-      showErrorToast = true;
-      // eslint-disable-next-line no-console
-      console.error(ex);
+      // The user has cancelled the commit at the commit message prompt, which isn’t a failure
+      if (!isCommitCancelled(ex)) {
+        errorMessage = getErrorMessage(ex, 'deleting_entry_failed');
+        showErrorToast = true;
+        // eslint-disable-next-line no-console
+        console.error(ex);
+      }
 
       return;
     }
@@ -172,5 +143,5 @@
 </ConfirmationDialog>
 
 <Toast bind:show={showErrorToast}>
-  <Alert status="error">{_('deleting_entry_failed')}</Alert>
+  <Alert status="error">{errorMessage}</Alert>
 </Toast>

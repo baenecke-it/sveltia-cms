@@ -32,6 +32,9 @@ vi.mock('$lib/services/contents/draft/create/duplicate-assets', () => ({
 vi.mock('$lib/services/contents/draft/create/proxy.svelte', () => ({
   createProxy: vi.fn(({ target }) => target),
 }));
+vi.mock('$lib/services/contents/draft/create/versioned-map.svelte', () => ({
+  createValueMap: vi.fn((target) => target),
+}));
 
 vi.mock('$lib/services/contents/editor', () => ({ showDuplicateToast: { current: false } }));
 
@@ -42,7 +45,10 @@ vi.mock('$lib/services/user/env.svelte', () => ({
   initUserEnvDetection: vi.fn(),
 }));
 
-vi.mock('$lib/services/contents/entry/fields', () => ({
+vi.mock('$lib/services/contents/entry/fields', async (importOriginal) => ({
+  getDraftFieldArgs: /** @type {typeof import('$lib/services/contents/entry/fields')} */ (
+    await importOriginal()
+  ).getDraftFieldArgs,
   LIST_KEY_PATH_REGEX: /\.\d+$/,
   getField: vi.fn(),
   getFieldKind: vi.fn(() => 'builtin'),

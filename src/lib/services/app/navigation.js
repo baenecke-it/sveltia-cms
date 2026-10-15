@@ -5,6 +5,7 @@ import { showAssetOverlay } from '$lib/services/assets/view';
 import { cmsConfig } from '$lib/services/config';
 import { showContentOverlay } from '$lib/services/contents/editor';
 import { createDerivedState, createRawState } from '$lib/services/utils/state.svelte';
+import { decodeURIComponentSafely, encodePathSegments } from '$lib/services/utils/url';
 import { openNewTab } from '$lib/services/utils/window';
 
 /**
@@ -63,13 +64,19 @@ export const overlayTitle = createRawState('');
  * @returns {{ path: string, params: Record<string, string> }} Path and search params.
  */
 export const parseLocation = (href = window.location.href) => {
-  const { origin, hash } = new URL(href);
-  const { pathname, searchParams } = new URL(`${origin}${hash.substring(1)}`);
+  const hashPath = new URL(href).hash.substring(1);
+
+  // Parse the hash as the path of a URL of its own. It’s given a leading slash if it lacks one,
+  // e.g. a link with the slashes percent-encoded, as the URL would be invalid otherwise. A fixed
+  // origin is used as the page’s may be `null`, e.g. on a `file:` URL
+  const { pathname, searchParams } = new URL(
+    `http://localhost${hashPath.startsWith('/') ? '' : '/'}${hashPath}`,
+  );
 
   return {
     // Drop any trailing slash before decoding, so a hand-typed `#/collections/` resolves the same
     // way as `#/collections` rather than matching no route at all. The root path is left as is
-    path: decodeURIComponent(pathname.replace(/(?!^)\/+$/, '')),
+    path: decodeURIComponentSafely(pathname.replace(/(?!^)\/+$/, '')),
     params: Object.fromEntries(
       // Merge multiple values of the same key with a comma, e.g. `?a=1&a=2` becomes `{ a: '1,2' }`.
       // This is to support both `?tags=tag1,tag2` and `?tags=tag1&tags=tag2` formats for dynamic
@@ -85,6 +92,85 @@ export const parseLocation = (href = window.location.href) => {
  * @type {ViewTransition | null}
  */
 let activeTransition = null;
+
+/**
+ * Longest time, in milliseconds, the running view transition waits for the holds added with
+ * {@link holdViewTransition} before it takes the snapshot of the new state anyway.
+ */
+export const VIEW_TRANSITION_HOLD_LIMIT = 300;
+
+/**
+ * Promises the running view transition waits for before the new state is captured.
+ * @type {Set<Promise<any>>}
+ */
+const transitionHolds = new Set();
+/**
+ * Whether the running view transition has been skipped, in which case it doesn’t wait for holds.
+ */
+let transitionSkipped = false;
+/**
+ * Function to stop waiting for the holds, once the running transition has been skipped, if any.
+ * @type {(() => void) | undefined}
+ */
+let stopWaitingForHolds = undefined;
+
+/**
+ * Make the running view transition wait for the given promise before it captures the new state,
+ * for up to {@link VIEW_TRANSITION_HOLD_LIMIT} milliseconds, so that content loaded asynchronously,
+ * such as an image in the asset details overlay, is part of the animation rather than popping in
+ * once it’s over. Call this while the content is being updated; the call does nothing if no
+ * transition is running.
+ * @param {Promise<any>} promise Promise to wait for. A rejection counts as settled.
+ */
+export const holdViewTransition = (promise) => {
+  if (activeTransition) {
+    transitionHolds.add(promise);
+  }
+};
+
+/**
+ * Wait for the holds added with {@link holdViewTransition}, up to the time limit, and clear them.
+ */
+const waitForTransitionHolds = async () => {
+  if (!transitionHolds.size || transitionSkipped) {
+    transitionHolds.clear();
+
+    return;
+  }
+
+  const skipped = /** @type {PromiseWithResolvers<void>} */ (Promise.withResolvers());
+
+  stopWaitingForHolds = skipped.resolve;
+
+  await Promise.race([
+    Promise.allSettled(transitionHolds),
+    sleep(VIEW_TRANSITION_HOLD_LIMIT),
+    skipped.promise,
+  ]);
+
+  stopWaitingForHolds = undefined;
+  transitionHolds.clear();
+};
+
+// Finish the running view transition as soon as a key is pressed. Until the animation is over, the
+// transition overlay catches every hit test, and Sveltia UI only activates a button with its
+// keyboard shortcut if a hit test finds the button, so a shortcut pressed right after the page
+// changed would be ignored, e.g. Accel+S or Escape right after the entry editor opened, and the
+// browser would handle Accel+S itself. The listener is added as the module is loaded, so it runs
+// before the one Sveltia UI adds once a component with a shortcut is mounted. Rendering stays
+// suppressed until the new state has been captured, even for a skipped transition, so it also stops
+// waiting for the content it holds for, e.g. while the user flips through assets with a key
+globalThis.addEventListener?.(
+  'keydown',
+  () => {
+    if (activeTransition) {
+      activeTransition.skipTransition();
+      transitionSkipped = true;
+      stopWaitingForHolds?.();
+    }
+  },
+  { capture: true },
+);
 
 /**
  * Start page transition, if possible, after updating the content.
@@ -111,6 +197,7 @@ export const startViewTransition = (transitionType, updateContent) => {
           resolve(undefined);
         });
       });
+      await waitForTransitionHolds();
     },
   };
 
@@ -121,6 +208,7 @@ export const startViewTransition = (transitionType, updateContent) => {
     const transition = document.startViewTransition(options);
 
     activeTransition = transition;
+    transitionSkipped = false;
 
     // The browser skips a transition it can’t animate — most often because the document is hidden,
     // e.g. the user switched to another tab while a save was in flight — and says so by rejecting
@@ -138,6 +226,8 @@ export const startViewTransition = (transitionType, updateContent) => {
       })
       .finally(() => {
         activeTransition = null;
+        // A hold added once the new state had been captured has nothing left to delay
+        transitionHolds.clear();
       });
   } catch {
     // A browser that throws while the transition is being set up leaves nothing to wait for, so
@@ -234,6 +324,9 @@ export const updateContentFromHashChange = (event, updateContent, routeRegex) =>
  * Navigate to a different URL or replace the current URL. This is similar to SvelteKit’s `goto`
  * method but assumes hash-based SPA routing.
  * @param {string} path URL path. It will appear in th URL hash but omit the leading `#` sign here.
+ * Encode any entry or asset path in it with {@link encodePathSegments}, so a file or folder name
+ * containing a `%`, `#` or `?` sign makes it through the URL hash intact and is decoded back to the
+ * same name by {@link parseLocation}.
  * @param {GoToMethodOptions} [options] Options.
  */
 export const goto = async (
@@ -242,8 +335,13 @@ export const goto = async (
 ) => {
   const { path: currentPath } = parseLocation();
 
-  // If we’re already on this page AND not updating state, don’t navigate or trigger a transition
-  if (currentPath === path && !Object.keys(state).length && !replaceState) {
+  // If we’re already on this page AND not updating state, don’t navigate or trigger a transition.
+  // The given path is encoded, while the current one is decoded
+  if (
+    currentPath === decodeURIComponentSafely(path) &&
+    !Object.keys(state).length &&
+    !replaceState
+  ) {
     return;
   }
 
@@ -298,27 +396,86 @@ export const redirectLegacyEntryLink = () => {
   // Carry any query string over, so the editor locale and dynamic default values survive
   const query = new URLSearchParams(params).toString();
 
-  goto(`/collections/${collectionName}/entries/${subPath}${query ? `?${query}` : ''}`, {
-    replaceState: true,
-  });
+  goto(
+    `${encodePathSegments(`/collections/${collectionName}/entries/${subPath}`)}${query ? `?${query}` : ''}`,
+    {
+      replaceState: true,
+    },
+  );
 
   return true;
 };
 
 /**
- * Go back to the previous page if possible, or navigate to the given fallback URL.
- * @param {string} path Fallback URL path.
- * @param {GoToMethodOptions} [options] Options to be passed to {@link goto}.
+ * Page names that make up the whole route. Unlike the content library and the other pages that
+ * take a path of their own, anything following these in the URL is a dead link.
  */
-export const goBack = (path, options = {}) => {
+const STANDALONE_PAGE_NAMES = ['workflow', 'config', 'menu'];
+/**
+ * Search modes set by the pages that search their own items.
+ * @type {Record<string, 'contents' | 'assets'>}
+ */
+const PAGE_SEARCH_MODES = { collections: 'contents', assets: 'assets' };
+
+/**
+ * Result of {@link resolveRoute}: a URL to redirect to, a dead link, or the page to show along with
+ * the search mode to set. `searchMode` is `undefined` when the current search mode is to be kept.
+ * @typedef {{ redirect: string } | { notFound: true } | {
+ * pageName: string, searchMode: 'contents' | 'assets' | null | undefined }} ResolvedRoute
+ */
+
+/**
+ * Determine which page to show for the given URL path.
+ * @param {string} path URL path, as returned by {@link parseLocation}.
+ * @param {string[]} pageNames Names of the available pages.
+ * @returns {ResolvedRoute} Result.
+ */
+export const resolveRoute = (path, pageNames) => {
+  // The page name has to fill the whole first path segment, so `/collections-foo` doesn’t pass for
+  // the content library and land on a page that can’t make sense of the rest of the path
+  const { pageName } = path.match(`^\\/(?<pageName>${pageNames.join('|')})(?=\\/|$)`)?.groups ?? {};
+
+  if (!pageName) {
+    // The bare `#/` path is where the app starts, so open the content library. Any other unknown
+    // path is a dead link. Show a Not Found page instead of redirecting, which would hide the fact
+    // that the URL the user followed no longer goes anywhere
+    return path === '/' ? { redirect: '#/collections' } : { notFound: true };
+  }
+
+  if (STANDALONE_PAGE_NAMES.includes(pageName) && path !== `/${pageName}`) {
+    return { notFound: true };
+  }
+
+  // The content library and the asset library search their own items. The search page keeps the
+  // current mode, and any other page has nothing to search
+  return {
+    pageName,
+    searchMode: pageName === 'search' ? undefined : (PAGE_SEARCH_MODES[pageName] ?? null),
+  };
+};
+
+/**
+ * Go back to the previous page if possible, or navigate to the given fallback URL.
+ * @param {string} path Fallback URL path. With the Navigation API, the previous page is only
+ * returned to when it’s at this path, or when `returnTo` accepts its path.
+ * @param {GoToMethodOptions & { returnTo?: (path: string) => boolean }} [options] Options to be
+ * passed to {@link goto}, and `returnTo` to tell which other previous pages to return to, e.g. the
+ * search results an entry was opened from.
+ */
+export const goBack = (path, { returnTo, ...options } = {}) => {
   const transitionType = 'backwards';
 
   // Use the Navigation API if available, which is more reliable than `window.history`
   if (window.navigation?.currentEntry) {
     const { index } = window.navigation.currentEntry;
     const { sameDocument, url } = window.navigation.entries()[index - 1] ?? {};
+    const previousPath = url ? parseLocation(url).path : undefined;
 
-    if (sameDocument && url && parseLocation(url).path === path) {
+    if (
+      sameDocument &&
+      previousPath !== undefined &&
+      (previousPath === decodeURIComponentSafely(path) || returnTo?.(previousPath))
+    ) {
       startViewTransition(transitionType, () => {
         window.navigation.back();
       });
@@ -336,6 +493,25 @@ export const goBack = (path, options = {}) => {
   } else {
     goto(path, { ...options, transitionType });
   }
+};
+
+/**
+ * Get the path the entry editor goes back to: the collections list for a singleton file, or the
+ * collection entries list otherwise — the folder being browsed for a nested collection, so the user
+ * lands where they opened the entry from.
+ * @param {object} args Arguments.
+ * @param {string | undefined} args.collectionName Name of the entry’s collection.
+ * @param {string} [args.dirPath] Folder being browsed in a nested collection, if any.
+ * @returns {string} Route path.
+ */
+export const getEntryEditorBackPath = ({ collectionName, dirPath = '' }) => {
+  if (collectionName === '_singletons') {
+    return '/collections';
+  }
+
+  return dirPath
+    ? encodePathSegments(`/collections/${collectionName}/filter/${dirPath}`)
+    : `/collections/${collectionName}`;
 };
 
 /**

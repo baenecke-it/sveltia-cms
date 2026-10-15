@@ -4,9 +4,11 @@ import { fetchBlobText } from '$lib/services/backends/git/github/files';
 import {
   createPullRequest,
   deleteBranch,
+  fetchBranchHead,
   fetchPullRequestFileList,
   fetchPullRequestFiles,
-  reopenPullRequest,
+  parseFileNodes,
+  parseRestFiles,
   updateDraftState,
   updateLabels,
 } from '$lib/services/backends/git/github/pull-requests';
@@ -42,6 +44,40 @@ describe('GitHub pull request helpers', () => {
     mockStores();
     vi.mocked(fetchAPI).mockResolvedValue({});
     vi.mocked(fetchGraphQL).mockResolvedValue({});
+  });
+
+  describe('parseFileNodes', () => {
+    test('converts the GraphQL file nodes to workflow files', () => {
+      expect(
+        parseFileNodes([
+          { path: 'a.md', changeType: 'ADDED' },
+          { path: 'b.md', changeType: 'MODIFIED' },
+          { path: 'c.md', changeType: 'DELETED' },
+          { path: 'd.md', changeType: 'RENAMED' },
+        ]),
+      ).toEqual([
+        { path: 'a.md', sha: '', size: 0, deleted: false, renamed: false },
+        { path: 'b.md', sha: '', size: 0, deleted: false, renamed: false },
+        { path: 'c.md', sha: '', size: 0, deleted: true, renamed: false },
+        { path: 'd.md', sha: '', size: 0, deleted: false, renamed: true },
+      ]);
+    });
+  });
+
+  describe('parseRestFiles', () => {
+    test('converts the REST files to workflow files with the previous path of a rename', () => {
+      expect(
+        parseRestFiles([
+          { filename: 'a.md', status: 'added', patch: '@@' },
+          { filename: 'b.md', status: 'removed' },
+          { filename: 'new.md', status: 'renamed', previous_filename: 'old.md' },
+        ]),
+      ).toEqual([
+        { path: 'a.md', sha: '', size: 0, deleted: false, previousPath: undefined },
+        { path: 'b.md', sha: '', size: 0, deleted: true, previousPath: undefined },
+        { path: 'new.md', sha: '', size: 0, deleted: false, previousPath: 'old.md' },
+      ]);
+    });
   });
 
   describe('fetchPullRequestFileList', () => {
@@ -118,6 +154,31 @@ describe('GitHub pull request helpers', () => {
       expect(pullRequest.files[1].text).toBeUndefined();
       // Deleted files are skipped
       expect(pullRequest.files[2].sha).toBe('');
+    });
+
+    test('reads the files at the head commit, or at the branch without one', async () => {
+      const pullRequests = /** @type {any[]} */ ([
+        {
+          branch: 'cms/posts/hello',
+          headSHA: 'abc123',
+          files: [{ path: 'content/posts/hello.md', sha: '', size: 0, deleted: false }],
+        },
+        {
+          branch: 'cms/posts/draft',
+          files: [{ path: 'content/posts/draft.md', sha: '', size: 0, deleted: false }],
+        },
+      ]);
+
+      vi.mocked(fetchGraphQL).mockResolvedValue({ repository: {} });
+
+      await fetchPullRequestFiles(pullRequests);
+
+      // The content shown is that of the commit a publish is pinned to, even if the branch has
+      // moved on since the pull request was listed
+      const [[query]] = vi.mocked(fetchGraphQL).mock.calls;
+
+      expect(query).toContain('"abc123:content/posts/hello.md"');
+      expect(query).toContain('"cms/posts/draft:content/posts/draft.md"');
     });
 
     test('normalizes a null text for an empty text file', async () => {
@@ -227,19 +288,73 @@ describe('GitHub pull request helpers', () => {
     });
   });
 
+  describe('fetchBranchHead', () => {
+    test('reads the commit the branch points at', async () => {
+      vi.mocked(fetchGraphQL).mockResolvedValue({
+        repository: { branchHead: { target: { oid: 'abc123' } } },
+      });
+
+      await expect(fetchBranchHead('cms/posts/hello')).resolves.toBe('abc123');
+
+      // The ref is asked for by its qualified name, so a tag of the same name isn’t picked up
+      expect(fetchGraphQL).toHaveBeenCalledWith(expect.stringContaining('branchHead: ref('), {
+        owner: 'owner',
+        repo: 'repo',
+        branch: 'refs/heads/cms/posts/hello',
+      });
+    });
+
+    test('answers undefined for a branch that is gone', async () => {
+      // A pull request merged or closed outside the CMS leaves no branch behind
+      vi.mocked(fetchGraphQL).mockResolvedValue({ repository: { branchHead: null } });
+
+      await expect(fetchBranchHead('cms/posts/hello')).resolves.toBeUndefined();
+    });
+  });
+
   describe('deleteBranch', () => {
     test('deletes the reference', async () => {
       await deleteBranch('cms/posts/hello');
 
       expect(fetchAPI).toHaveBeenCalledWith('/repos/owner/repo/git/refs/heads/cms/posts/hello', {
         method: 'DELETE',
-        responseType: 'raw',
+        // Not `raw`, which would hand an error response back instead of throwing it
+        responseType: 'text',
       });
     });
 
-    test('ignores a failure', async () => {
-      vi.mocked(fetchAPI).mockRejectedValue(new Error('Not found'));
+    test('ignores a failure, but logs it', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      vi.mocked(fetchAPI).mockRejectedValue(new Error('Error', { cause: { status: 500 } }));
       await expect(deleteBranch('cms/posts/hello')).resolves.toBeUndefined();
+      expect(warn).toHaveBeenCalledOnce();
+      warn.mockRestore();
+    });
+
+    test.each([404, 422])(
+      'ignores a branch that is already gone (%i) without logging it',
+      async (status) => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+        vi.mocked(fetchAPI).mockRejectedValue(new Error('Error', { cause: { status } }));
+        await expect(deleteBranch('cms/posts/hello')).resolves.toBeUndefined();
+        expect(warn).not.toHaveBeenCalled();
+        warn.mockRestore();
+      },
+    );
+
+    test('encodes a branch name that would otherwise be cut short', async () => {
+      await deleteBranch('cms/posts/c#-tips');
+
+      // Left as is, `#` would start a fragment, and the request would delete `cms/posts/c` instead
+      expect(fetchAPI).toHaveBeenCalledWith(
+        '/repos/owner/repo/git/refs/heads/cms/posts/c%23-tips',
+        {
+          method: 'DELETE',
+          responseType: 'text',
+        },
+      );
     });
   });
 
@@ -251,6 +366,8 @@ describe('GitHub pull request helpers', () => {
 
       await updateLabels(/** @type {any} */ ({ number: 1 }), 'pending_review');
 
+      // The labels are read from the pulls endpoint, which only needs pull request access
+      expect(fetchAPI).toHaveBeenNthCalledWith(1, '/repos/owner/repo/pulls/1');
       expect(fetchAPI).toHaveBeenLastCalledWith('/repos/owner/repo/issues/1', {
         method: 'PATCH',
         body: { labels: ['bug', 'sveltia-cms/pending_review'] },
@@ -398,17 +515,6 @@ describe('GitHub pull request helpers', () => {
 
         // Labelling needs write access to the configured repository, which a contributor lacks
         expect(fetchAPI).toHaveBeenCalledTimes(1);
-      });
-    });
-
-    describe('reopenPullRequest', () => {
-      test('reopens the pull request on the configured repository', async () => {
-        await reopenPullRequest(/** @type {any} */ ({ number: 7 }));
-
-        expect(fetchAPI).toHaveBeenCalledWith('/repos/owner/repo/pulls/7', {
-          method: 'PATCH',
-          body: { state: 'open' },
-        });
       });
     });
   });

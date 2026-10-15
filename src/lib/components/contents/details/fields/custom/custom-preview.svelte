@@ -1,6 +1,7 @@
 <!--
   @component
-  Render a custom field preview registered via `CMS.registerFieldType()`.
+  Render a custom field preview registered via `CMS.registerFieldType()`, or the summary component
+  of a custom field type for a collapsed List field item, which receives the same props.
   @see https://decapcms.org/docs/custom-widgets/
   @see https://sveltiacms.app/en/docs/api/field-types
 -->
@@ -8,6 +9,7 @@
   import { createElement } from 'react';
   import { onMount } from 'svelte';
 
+  import { assetURLUpdates } from '$lib/services/api/asset-proxy';
   import { fieldStateContext } from '$lib/services/api/field-state';
   import { immutableLoaded, loadImmutable } from '$lib/services/api/immutable';
   import { getReactDom, loadReactDom, reactDomLoaded } from '$lib/services/api/react-dom';
@@ -25,7 +27,7 @@
    * @typedef {object} Props
    * @property {CustomField} fieldConfig Field configuration.
    * @property {any} currentValue Current field value.
-   * @property {CustomFieldPreview} preview React component for preview.
+   * @property {CustomFieldPreview} preview React component for preview, or a summary component.
    */
 
   const entryDraft = getEntryDraftContext();
@@ -43,8 +45,12 @@
 
   /** @type {HTMLDivElement | undefined} */
   let container = $state();
-  /** @type {Root | undefined} */
-  let reactRoot = $state();
+  /**
+   * React root, created on the first render. Not reactive, as the effect rendering the component
+   * assigns it, and would otherwise run again right away.
+   * @type {Root | undefined}
+   */
+  let reactRoot;
 
   /**
    * Render the React component with the current props.
@@ -57,6 +63,7 @@
 
     const props = buildPreviewProps({
       locale,
+      keyPath,
       fieldConfig,
       currentValue,
       draft: entryDraft.current,
@@ -99,6 +106,8 @@
     // previews via a cache, which is why the values are not read through it and have to be tracked
     // here. The re-render stays cheap.
     void getValueMapSnapshot(entryDraft.current, locale);
+    // Render again once an asset the preview got with `getAsset()` has a blob URL
+    void assetURLUpdates.current;
 
     // Render the preview once the container and the library are ready, then keep it up to date
     if (immutableLoaded.current && reactDomLoaded.current && container) {
@@ -111,7 +120,9 @@
 
 <style>
   div {
-    /* Allow the React component to use the full width */
+    /* Allow the React component to use the full width, but let it shrink beside a list item
+      thumbnail rather than overflow */
     width: 100%;
+    min-width: 0;
   }
 </style>

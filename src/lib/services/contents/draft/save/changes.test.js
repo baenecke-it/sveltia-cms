@@ -3,14 +3,18 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { backend } from '$lib/services/backends';
 import { cmsConfig } from '$lib/services/config';
+import { allEntries } from '$lib/services/contents';
 
 import {
   createBaseSavingEntryData,
   createSavingEntryData,
-  getMultiFileChange,
-  getPreviousSha,
-  getSingleFileChange,
+  getArrayItemTarget,
+  planMultiFileChange,
+  planSingleFileChange,
+  preparePendingEntryCommit,
+  removeDisabledLocales,
 } from './changes';
+import { buildEntryFileChanges } from './file-changes';
 
 vi.mock('@sveltia/utils/crypto');
 vi.mock('@sveltia/utils/file');
@@ -25,6 +29,9 @@ vi.mock('$lib/services/backends', () => ({
 vi.mock('$lib/services/config', () => ({
   cmsConfig: { current: undefined },
 }));
+vi.mock('$lib/services/contents/collection', () => ({
+  getCollection: vi.fn(),
+}));
 vi.mock('$lib/services/contents/draft/save/assets');
 vi.mock('$lib/services/contents/draft/save/entry-path');
 vi.mock('$lib/services/contents/draft/save/serialize');
@@ -37,6 +44,32 @@ vi.mock('$lib/services/api/events', () => ({
 vi.mock('$lib/services/user/prefs.svelte', () => ({
   prefs: {},
 }));
+
+/**
+ * Build the file changes for an entry draft from the plans, as `createSavingEntryData` does.
+ * @param {object} args Arguments.
+ * @param {any} args.draft Entry draft.
+ * @param {any} args.savingEntry Entry to be saved.
+ * @returns {Promise<any[]>} File changes.
+ */
+const buildChanges = ({ draft, savingEntry }) =>
+  buildEntryFileChanges({
+    draft,
+    config: draft.collectionFile ?? draft.collection,
+    _file: draft.collection._file,
+    entry: savingEntry,
+    cacheDB: undefined,
+    /**
+     * Plan the change to a file of the entry.
+     * @param {string} [locale] Locale of the file, or `undefined` for the single file.
+     * @returns {any} Planned change.
+     */
+    planChange: (locale) =>
+      locale === undefined
+        ? planSingleFileChange({ draft, savingEntry })
+        : planMultiFileChange({ draft, savingEntry, locale }),
+  });
+
 describe('draft/save/changes', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -108,6 +141,217 @@ describe('draft/save/changes', () => {
       expect(result.savingEntry.slug).toBe('test-post');
       expect(result.changes).toHaveLength(1);
       expect(result.changes[0].action).toBe('create');
+    });
+
+    it('should leave the internal list item properties out of the saving entry', async () => {
+      const { createEntryPath } = await import('./entry-path');
+      const { serializeContent } = await import('./serialize');
+      const { formatEntryFile } = await import('$lib/services/contents/file/format');
+      const { callEventHooks } = await import('$lib/services/api/events');
+
+      vi.mocked(createEntryPath).mockReturnValue('posts/test-post.md');
+      vi.mocked(serializeContent).mockReturnValue({ title: 'Test' });
+      vi.mocked(formatEntryFile).mockResolvedValue('formatted content');
+
+      const draft = {
+        id: 'test-uuid',
+        isNew: true,
+        collection: {
+          _type: 'entry',
+          _file: { fullPathRegEx: null },
+          _i18n: {
+            i18nEnabled: false,
+            allLocales: ['en'],
+            defaultLocale: 'en',
+            structureMap: { i18nSingleFile: false },
+            canonicalSlug: { key: 'translationKey' },
+          },
+        },
+        collectionName: 'posts',
+        collectionFile: undefined,
+        fileName: undefined,
+        isIndexFile: false,
+        currentLocales: { en: true },
+        currentValues: {
+          en: {
+            title: 'Test',
+            'items.0.name': 'A',
+            'items.0.__sc_item_id': 'id-1',
+            'items.0.__sc_item_original_key_path': 'items.0',
+          },
+        },
+        files: {},
+      };
+
+      const slugs = { defaultLocaleSlug: 'test-post', canonicalSlug: undefined };
+      const { savingEntry } = await createSavingEntryData({ draft, slugs });
+      const expected = { title: 'Test', 'items.0.name': 'A' };
+
+      expect(savingEntry.locales.en.content).toEqual(expected);
+      expect(vi.mocked(callEventHooks).mock.calls[0][0].entry.locales.en.content).toEqual(expected);
+      // The draft keeps them
+      expect(draft.currentValues.en['items.0.__sc_item_id']).toBe('id-1');
+    });
+
+    it('should not call the preSave event hooks with `runPreSave: false`', async () => {
+      const { createEntryPath } = await import('./entry-path');
+      const { serializeContent } = await import('./serialize');
+      const { formatEntryFile } = await import('$lib/services/contents/file/format');
+      const { callEventHooks } = await import('$lib/services/api/events');
+
+      vi.mocked(createEntryPath).mockReturnValue('tags/svelte.md');
+      vi.mocked(serializeContent).mockReturnValue({ title: 'Svelte' });
+      vi.mocked(formatEntryFile).mockResolvedValue('formatted content');
+
+      const draft = {
+        id: 'test-uuid',
+        isNew: true,
+        collection: {
+          _type: 'entry',
+          _file: { fullPathRegEx: null },
+          _i18n: {
+            i18nEnabled: false,
+            allLocales: ['_default'],
+            defaultLocale: '_default',
+            structureMap: { i18nSingleFile: false },
+            canonicalSlug: { key: 'translationKey' },
+          },
+        },
+        collectionName: 'tags',
+        isIndexFile: false,
+        currentLocales: { _default: true },
+        currentValues: { _default: { title: 'Svelte' } },
+        files: {},
+      };
+
+      const slugs = { defaultLocaleSlug: 'svelte', canonicalSlug: undefined };
+      const result = await createSavingEntryData({ draft, slugs, runPreSave: false });
+
+      expect(result.changes).toHaveLength(1);
+      expect(callEventHooks).not.toHaveBeenCalled();
+    });
+
+    it('should save an entry without a file in the default locale', async () => {
+      const { createEntryPath } = await import('./entry-path');
+      const { serializeContent } = await import('./serialize');
+      const { formatEntryFile } = await import('$lib/services/contents/file/format');
+
+      vi.mocked(createEntryPath).mockImplementation(({ locale }) => `posts/hello.${locale}.md`);
+      vi.mocked(serializeContent).mockReturnValue({ title: 'Salut' });
+      vi.mocked(formatEntryFile).mockResolvedValue('formatted content');
+
+      /**
+       * Create a draft of an entry that only has a French file.
+       * @param {Record<string, boolean>} currentLocales Locales enabled in the draft.
+       * @returns {any} Draft.
+       */
+      const createDraft = (currentLocales) => ({
+        id: 'test-uuid',
+        isNew: false,
+        originalEntry: {
+          id: 'test-uuid',
+          slug: 'hello',
+          subPath: 'hello',
+          locales: { fr: { slug: 'hello', path: 'posts/hello.fr.md', content: {} } },
+        },
+        collection: {
+          _type: 'entry',
+          _file: { fullPathRegEx: /^posts\/(?<subPath>.+?)\.(?:en|fr)\.md$/ },
+          _i18n: {
+            i18nEnabled: true,
+            allLocales: ['en', 'fr'],
+            defaultLocale: 'en',
+            structureMap: { i18nSingleFile: false, i18nMultiFile: true },
+            canonicalSlug: { key: 'translationKey' },
+          },
+        },
+        collectionName: 'posts',
+        collectionFile: undefined,
+        fileName: undefined,
+        isIndexFile: false,
+        originalLocales: { en: false, fr: true },
+        currentLocales,
+        currentValues: { de: { title: 'Hallo' }, fr: { title: 'Salut' } },
+        files: {},
+      });
+
+      const slugs = {
+        defaultLocaleSlug: 'hello',
+        canonicalSlug: undefined,
+        localizedSlugs: undefined,
+      };
+
+      const result = await createSavingEntryData({ draft: createDraft({ fr: true }), slugs });
+
+      // The French file stands in for the missing English one, like when the entry is read
+      expect(result.savingEntry.subPath).toBe('hello');
+      expect(result.savingEntry.locales.fr).toMatchObject({ path: 'posts/hello.fr.md' });
+      expect(result.changes).toContainEqual(
+        expect.objectContaining({ action: 'update', path: 'posts/hello.fr.md' }),
+      );
+
+      // Any locale will do if none has content
+      const result2 = await createSavingEntryData({ draft: createDraft({}), slugs });
+
+      expect(result2.savingEntry.subPath).toBe('hello');
+    });
+
+    it('should keep the position of an existing entry stored in an array file', async () => {
+      const { createEntryPath } = await import('./entry-path');
+      const { serializeContent } = await import('./serialize');
+      const { formatEntryFile } = await import('$lib/services/contents/file/format');
+
+      vi.mocked(createEntryPath).mockReturnValue('data/members.json');
+      vi.mocked(serializeContent).mockReturnValue({ title: 'Test' });
+      vi.mocked(formatEntryFile).mockResolvedValue('formatted content');
+
+      const originalEntry = {
+        id: 'test-uuid',
+        slug: 'test-post',
+        arrayIndex: 2,
+        locales: { en: { slug: 'test-post', path: 'data/members.json', content: {} } },
+      };
+
+      const draft = {
+        id: 'test-uuid',
+        isNew: false,
+        originalEntry,
+        collection: {
+          _type: 'entry',
+          file: 'data/members.json',
+          _file: { fullPathRegEx: null, arrayFile: true, fullPath: 'data/members.json' },
+          _i18n: {
+            i18nEnabled: false,
+            allLocales: ['en'],
+            defaultLocale: 'en',
+            structureMap: { i18nSingleFile: false },
+            canonicalSlug: { key: 'translationKey' },
+          },
+        },
+        collectionName: 'members',
+        collectionFile: undefined,
+        fileName: undefined,
+        isIndexFile: false,
+        currentLocales: { en: true },
+        currentValues: { en: { title: 'Test' } },
+        files: {},
+      };
+
+      const slugs = {
+        defaultLocaleSlug: 'test-post',
+        canonicalSlug: undefined,
+        localizedSlugs: undefined,
+      };
+
+      const result = await createSavingEntryData({ draft, slugs });
+
+      expect(result.savingEntry.arrayIndex).toBe(2);
+      expect(result.changes).toHaveLength(1);
+      expect(result.changes[0]).toMatchObject({
+        action: 'update',
+        path: 'data/members.json',
+        arrayItem: { index: 2, locales: originalEntry.locales },
+      });
     });
 
     it('should read the file configuration from the collection file for a singleton', async () => {
@@ -572,50 +816,48 @@ describe('draft/save/changes', () => {
     });
   });
 
-  describe('getPreviousSha (internal)', () => {
-    it('should return undefined when previousPath is undefined', async () => {
-      const result = await getPreviousSha({ previousPath: undefined, cacheDB: undefined });
-
-      expect(result).toBeUndefined();
+  describe('getArrayItemTarget', () => {
+    it('should return nothing for a new entry or an entry not stored in an array file', () => {
+      expect(getArrayItemTarget(undefined)).toEqual({});
+      expect(getArrayItemTarget({ locales: {} })).toEqual({});
     });
 
-    it('should return undefined when cache entry not found', async () => {
-      const mockCacheDB = {
-        get: vi.fn().mockResolvedValue(undefined),
-      };
+    it('should return the position and content of an entry stored in an array file', () => {
+      const locales = { _default: { path: 'data/members.json', content: { name: 'A' } } };
 
-      const result = await getPreviousSha({
-        previousPath: 'posts/old-post.md',
-        cacheDB: mockCacheDB,
+      allEntries.current = [];
+
+      // Without the entry in the store, the given entry stands in
+      expect(getArrayItemTarget({ id: 'a', arrayIndex: 0, locales })).toEqual({
+        arrayItem: { index: 0, locales },
       });
-
-      expect(result).toBeUndefined();
-      expect(mockCacheDB.get).toHaveBeenCalledWith('posts/old-post.md');
     });
 
-    it('should return sha from cache when found', async () => {
-      const mockCacheDB = {
-        get: vi.fn().mockResolvedValue({ sha: 'abc123' }),
+    it('should take the content from the entry in the store rather than a changed copy', () => {
+      const storedLocales = {
+        _default: { path: 'data/members.json', content: { photo: 'a.png' } },
       };
 
-      const result = await getPreviousSha({
-        previousPath: 'posts/old-post.md',
-        cacheDB: mockCacheDB,
+      const changedLocales = {
+        _default: { path: 'data/members.json', content: { photo: 'b.png' } },
+      };
+
+      // A copy with the reference to a renamed asset already replaced
+      allEntries.current = [
+        /** @type {any} */ ({ id: 'b', arrayIndex: 0, locales: {} }),
+        /** @type {any} */ ({ id: 'a', arrayIndex: 1, locales: storedLocales }),
+      ];
+
+      expect(getArrayItemTarget({ id: 'a', arrayIndex: 1, locales: changedLocales })).toEqual({
+        arrayItem: { index: 1, locales: storedLocales },
       });
 
-      expect(result).toBe('abc123');
-      expect(mockCacheDB.get).toHaveBeenCalledWith('posts/old-post.md');
+      allEntries.current = [];
     });
   });
 
-  describe('getSingleFileChange (internal)', () => {
-    it('should create file change for new entry', async () => {
-      const { formatEntryFile } = await import('$lib/services/contents/file/format');
-      const { serializeContent } = await import('./serialize');
-
-      vi.mocked(formatEntryFile).mockResolvedValue('formatted content');
-      vi.mocked(serializeContent).mockReturnValue({ title: 'Test' });
-
+  describe('planSingleFileChange (internal)', () => {
+    it('should plan a file creation for new entry', () => {
       const draft = {
         collection: {
           _type: 'entry',
@@ -641,52 +883,94 @@ describe('draft/save/changes', () => {
         },
       };
 
-      const result = await getSingleFileChange({ draft, savingEntry, cacheDB: undefined });
-
-      expect(result.action).toBe('create');
-      expect(result.slug).toBe('new-post');
-      expect(result.path).toBe('posts/new-post.md');
-      expect(result.previousPath).toBeUndefined();
+      expect(planSingleFileChange({ draft, savingEntry })).toEqual({
+        action: 'create',
+        slug: 'new-post',
+        path: 'posts/new-post.md',
+        previousPath: undefined,
+        currentPath: undefined,
+      });
     });
 
-    it('should format the index file with its own configuration', async () => {
-      const { formatEntryFile } = await import('$lib/services/contents/file/format');
-      const { serializeContent } = await import('./serialize');
-
-      vi.mocked(formatEntryFile).mockResolvedValue('{}');
-      vi.mocked(serializeContent).mockReturnValue({ layout: 'post' });
-
-      const indexFile = { format: 'json', extension: 'json' };
+    it('should target the item of an existing entry stored in an array file', () => {
+      const locales = { en: { slug: 'a', path: 'data/members.json', content: { title: 'A' } } };
 
       const draft = {
         collection: {
           _type: 'entry',
-          _file: { format: 'frontmatter', extension: 'md', indexFile },
+          _file: { format: 'json', arrayFile: true, fullPath: 'data/members.json' },
           _i18n: { i18nEnabled: false, defaultLocale: 'en' },
         },
         isNew: false,
-        originalEntry: { locales: { en: { path: 'posts/posts.json' } } },
+        originalEntry: { arrayIndex: 1, locales },
         collectionFile: undefined,
-        isIndexFile: true,
       };
 
       const savingEntry = {
-        locales: { en: { slug: 'posts', path: 'posts/posts.json', content: { layout: 'post' } } },
+        locales: { en: { slug: 'a', path: 'data/members.json', content: { title: 'B' } } },
       };
 
-      const result = await getSingleFileChange({ draft, savingEntry, cacheDB: undefined });
-
-      expect(result.action).toBe('update');
-      expect(formatEntryFile).toHaveBeenCalledWith(expect.objectContaining({ _file: indexFile }));
+      expect(planSingleFileChange({ draft, savingEntry })).toEqual({
+        action: 'update',
+        slug: 'a',
+        path: 'data/members.json',
+        previousPath: undefined,
+        currentPath: 'data/members.json',
+        arrayItem: { index: 1, locales },
+      });
     });
 
-    it('should create file change for renamed entry', async () => {
-      const { formatEntryFile } = await import('$lib/services/contents/file/format');
-      const { serializeContent } = await import('./serialize');
+    it('should not target an item for a new entry stored in an array file', () => {
+      const draft = {
+        collection: {
+          _type: 'entry',
+          _file: { format: 'json', arrayFile: true, fullPath: 'data/members.json' },
+          _i18n: { i18nEnabled: false, defaultLocale: 'en' },
+        },
+        isNew: true,
+        originalEntry: undefined,
+        collectionFile: undefined,
+      };
 
-      vi.mocked(formatEntryFile).mockResolvedValue('formatted content');
-      vi.mocked(serializeContent).mockReturnValue({ title: 'Test' });
+      const savingEntry = {
+        locales: { en: { slug: 'a', path: 'data/members.json', content: { title: 'A' } } },
+      };
 
+      const result = planSingleFileChange({ draft, savingEntry });
+
+      expect(result.action).toBe('create');
+      expect(result).not.toHaveProperty('arrayItem');
+    });
+
+    it('should take the default locale from the collection file', () => {
+      const draft = {
+        collection: { _type: 'file', _i18n: { i18nEnabled: false, defaultLocale: 'en' } },
+        collectionFile: {
+          name: 'about',
+          _file: { format: 'yaml' },
+          _i18n: { i18nEnabled: true, defaultLocale: 'ja' },
+        },
+        isNew: false,
+        originalEntry: { locales: { ja: { path: 'data/about.yaml' } } },
+      };
+
+      const savingEntry = {
+        locales: {
+          en: { slug: 'about-en', path: 'data/about-en.yaml', content: {} },
+          ja: { slug: 'about', path: 'data/about.yaml', content: {} },
+        },
+      };
+
+      expect(planSingleFileChange({ draft, savingEntry })).toEqual({
+        action: 'update',
+        slug: 'about',
+        path: 'data/about.yaml',
+        previousPath: undefined,
+        currentPath: 'data/about.yaml',
+      });
+    });
+
+    it('should plan a move for renamed entry', () => {
       const draft = {
         collection: {
           _type: 'entry',
@@ -716,20 +1000,16 @@ describe('draft/save/changes', () => {
         },
       };
 
-      const result = await getSingleFileChange({ draft, savingEntry, cacheDB: undefined });
-
-      expect(result.action).toBe('move');
-      expect(result.slug).toBe('new-post');
-      expect(result.previousPath).toBe('posts/old-post.md');
+      expect(planSingleFileChange({ draft, savingEntry })).toEqual({
+        action: 'move',
+        slug: 'new-post',
+        path: 'posts/new-post.md',
+        previousPath: 'posts/old-post.md',
+        currentPath: 'posts/old-post.md',
+      });
     });
 
-    it('should create file change for updated entry', async () => {
-      const { formatEntryFile } = await import('$lib/services/contents/file/format');
-      const { serializeContent } = await import('./serialize');
-
-      vi.mocked(formatEntryFile).mockResolvedValue('formatted content');
-      vi.mocked(serializeContent).mockReturnValue({ title: 'Test' });
-
+    it('should plan an update for updated entry', () => {
       const draft = {
         collection: {
           _type: 'entry',
@@ -759,27 +1039,24 @@ describe('draft/save/changes', () => {
         },
       };
 
-      const result = await getSingleFileChange({ draft, savingEntry, cacheDB: undefined });
-
-      expect(result.action).toBe('update');
-      expect(result.slug).toBe('same-post');
-      expect(result.previousPath).toBeUndefined();
+      expect(planSingleFileChange({ draft, savingEntry })).toEqual({
+        action: 'update',
+        slug: 'same-post',
+        path: 'posts/same-post.md',
+        previousPath: undefined,
+        currentPath: 'posts/same-post.md',
+      });
     });
   });
 
-  describe('getMultiFileChange (internal)', () => {
-    it('should create file change for new locale', async () => {
-      const { formatEntryFile } = await import('$lib/services/contents/file/format');
-      const { serializeContent } = await import('./serialize');
-
-      vi.mocked(formatEntryFile).mockResolvedValue('formatted content');
-      vi.mocked(serializeContent).mockReturnValue({ title: 'Test' });
-
+  describe('planMultiFileChange (internal)', () => {
+    it('should plan a file creation for new locale', () => {
       const draft = {
         collection: {
           _type: 'entry',
           _file: { format: 'yaml-frontmatter' },
         },
+        fields: [{ name: 'title', widget: 'string', comment: 'Page title' }],
         isNew: true,
         originalLocales: {},
         currentLocales: { en: true },
@@ -798,18 +1075,39 @@ describe('draft/save/changes', () => {
         },
       };
 
-      const result = await getMultiFileChange({
-        draft,
-        savingEntry,
-        cacheDB: undefined,
-        locale: 'en',
+      expect(planMultiFileChange({ draft, savingEntry, locale: 'en' })).toEqual({
+        action: 'create',
+        slug: 'new-post',
+        path: 'posts/en/new-post.md',
+        previousPath: undefined,
+        currentPath: undefined,
       });
-
-      expect(result?.action).toBe('create');
-      expect(result?.slug).toBe('new-post');
     });
 
-    it('should create delete change for removed locale', async () => {
+    it('should plan a file creation for a locale added to an existing entry', () => {
+      const draft = {
+        collection: { _type: 'entry', _file: { format: 'yaml-frontmatter' } },
+        isNew: false,
+        originalLocales: { en: true },
+        currentLocales: { en: true, fr: true },
+        originalEntry: { locales: { en: { path: 'posts/en/post.md' } } },
+        collectionFile: undefined,
+      };
+
+      const savingEntry = {
+        locales: { fr: { slug: 'post', path: 'posts/fr/post.md', content: { title: 'Post' } } },
+      };
+
+      expect(planMultiFileChange({ draft, savingEntry, locale: 'fr' })).toEqual({
+        action: 'create',
+        slug: 'post',
+        path: 'posts/fr/post.md',
+        previousPath: undefined,
+        currentPath: undefined,
+      });
+    });
+
+    it('should plan a deletion for removed locale', () => {
       const draft = {
         collection: {
           _type: 'entry',
@@ -837,17 +1135,44 @@ describe('draft/save/changes', () => {
         },
       };
 
-      const result = await getMultiFileChange({
-        draft,
-        savingEntry,
-        cacheDB: undefined,
-        locale: 'ja',
+      // Without a slug in the original entry, the one of the saving entry is used
+      expect(planMultiFileChange({ draft, savingEntry, locale: 'ja' })).toEqual({
+        action: 'delete',
+        slug: 'old-post',
+        path: 'posts/ja/old-post.md',
+        currentPath: 'posts/ja/old-post.md',
       });
-
-      expect(result?.action).toBe('delete');
     });
 
-    it('should return undefined for unchanged locale', async () => {
+    it('should delete the original file of a removed locale when the entry is renamed', () => {
+      const draft = {
+        collection: {
+          _type: 'entry',
+          _file: { format: 'yaml-frontmatter' },
+        },
+        isNew: false,
+        originalLocales: { ja: true },
+        currentLocales: { ja: false },
+        originalEntry: {
+          locales: {
+            ja: { slug: 'old-post', path: 'posts/ja/old-post.md' },
+          },
+        },
+        collectionFile: undefined,
+      };
+
+      // A disabled locale only gets a path, built from the new slug
+      const savingEntry = { locales: { ja: { path: 'posts/ja/new-post.md' } } };
+
+      expect(planMultiFileChange({ draft, savingEntry, locale: 'ja' })).toEqual({
+        action: 'delete',
+        slug: 'old-post',
+        path: 'posts/ja/old-post.md',
+        currentPath: 'posts/ja/old-post.md',
+      });
+    });
+
+    it('should return undefined for unchanged locale', () => {
       const draft = {
         collection: {
           _type: 'entry',
@@ -865,23 +1190,10 @@ describe('draft/save/changes', () => {
         locales: {},
       };
 
-      const result = await getMultiFileChange({
-        draft,
-        savingEntry,
-        cacheDB: undefined,
-        locale: 'fr',
-      });
-
-      expect(result).toBeUndefined();
+      expect(planMultiFileChange({ draft, savingEntry, locale: 'fr' })).toBeUndefined();
     });
 
-    it('should create move change for renamed locale in multi-file entry', async () => {
-      const { formatEntryFile } = await import('$lib/services/contents/file/format');
-      const { serializeContent } = await import('./serialize');
-
-      vi.mocked(formatEntryFile).mockResolvedValue('formatted content');
-      vi.mocked(serializeContent).mockReturnValue({ title: 'Test' });
-
+    it('should plan a move for renamed locale in multi-file entry', () => {
       const draft = {
         collection: {
           _type: 'entry',
@@ -909,24 +1221,16 @@ describe('draft/save/changes', () => {
         },
       };
 
-      const result = await getMultiFileChange({
-        draft,
-        savingEntry,
-        cacheDB: undefined,
-        locale: 'en',
+      expect(planMultiFileChange({ draft, savingEntry, locale: 'en' })).toEqual({
+        action: 'move',
+        slug: 'new-post',
+        path: 'posts/en/new-post.md',
+        previousPath: 'posts/en/old-post.md',
+        currentPath: 'posts/en/old-post.md',
       });
-
-      expect(result?.action).toBe('move');
-      expect(result?.previousPath).toBe('posts/en/old-post.md');
     });
 
-    it('should create update change for existing locale without rename', async () => {
-      const { formatEntryFile } = await import('$lib/services/contents/file/format');
-      const { serializeContent } = await import('./serialize');
-
-      vi.mocked(formatEntryFile).mockResolvedValue('formatted content');
-      vi.mocked(serializeContent).mockReturnValue({ title: 'Test' });
-
+    it('should plan an update for existing locale without rename', () => {
       const draft = {
         collection: {
           _type: 'entry',
@@ -954,15 +1258,235 @@ describe('draft/save/changes', () => {
         },
       };
 
-      const result = await getMultiFileChange({
-        draft,
-        savingEntry,
-        cacheDB: undefined,
-        locale: 'en',
+      expect(planMultiFileChange({ draft, savingEntry, locale: 'en' })).toEqual({
+        action: 'update',
+        slug: 'same-post',
+        path: 'posts/en/same-post.md',
+        previousPath: undefined,
+        currentPath: 'posts/en/same-post.md',
       });
+    });
+  });
 
-      expect(result?.action).toBe('update');
-      expect(result?.previousPath).toBeUndefined();
+  describe('plans for an entry someone else has deleted', () => {
+    it('should create the single file rather than move it', () => {
+      const draft = {
+        collection: {
+          _type: 'entry',
+          _file: { format: 'yaml-frontmatter' },
+          _i18n: { i18nEnabled: false, defaultLocale: 'en' },
+        },
+        isNew: false,
+        originalEntry: { locales: { en: { slug: 'old', path: 'posts/old.md' } } },
+        collectionFile: undefined,
+      };
+
+      const savingEntry = {
+        locales: { en: { slug: 'new', path: 'posts/new.md', content: { title: 'New' } } },
+      };
+
+      // The old file is gone, so there’s nothing to move, and no SHA to look up for it
+      expect(planSingleFileChange({ draft, savingEntry, recreate: true })).toEqual({
+        action: 'create',
+        slug: 'new',
+        path: 'posts/new.md',
+        previousPath: undefined,
+        currentPath: undefined,
+      });
+    });
+
+    it('should create every locale file rather than update, move or delete it', () => {
+      const draft = {
+        collection: { _type: 'entry', _file: { format: 'yaml-frontmatter' } },
+        isNew: false,
+        originalLocales: { en: true, fr: true, de: true },
+        currentLocales: { en: true, fr: true, de: false },
+        originalEntry: {
+          locales: {
+            en: { slug: 'post', path: 'posts/en/post.md' },
+            fr: { slug: 'post', path: 'posts/fr/post.md' },
+            de: { slug: 'post', path: 'posts/de/post.md' },
+          },
+        },
+        collectionFile: undefined,
+      };
+
+      const savingEntry = {
+        locales: {
+          en: { slug: 'post', path: 'posts/en/post.md', content: { title: 'Post' } },
+          fr: { slug: 'renamed', path: 'posts/fr/renamed.md', content: { title: 'Post' } },
+          de: { path: 'posts/de/post.md' },
+        },
+      };
+
+      /**
+       * Plan the change to the file of the given locale.
+       * @param {string} locale Locale.
+       * @returns {any} Planned change.
+       */
+      const plan = (locale) => planMultiFileChange({ draft, savingEntry, locale, recreate: true });
+
+      expect(plan('en')).toEqual({
+        action: 'create',
+        slug: 'post',
+        path: 'posts/en/post.md',
+        previousPath: undefined,
+        currentPath: undefined,
+      });
+      expect(plan('fr')).toEqual({
+        action: 'create',
+        slug: 'renamed',
+        path: 'posts/fr/renamed.md',
+        previousPath: undefined,
+        currentPath: undefined,
+      });
+      // The file of the locale turned off is gone along with the others
+      expect(plan('de')).toBeUndefined();
+    });
+  });
+
+  describe('removeDisabledLocales', () => {
+    it('should leave out the locales without content', () => {
+      const entry = {
+        id: 'id',
+        slug: 'post',
+        locales: {
+          en: { slug: 'post', path: 'posts/post.en.md', content: { title: 'Post' } },
+          fr: { path: 'posts/post.fr.md' },
+        },
+      };
+
+      expect(removeDisabledLocales(entry)).toEqual({
+        id: 'id',
+        slug: 'post',
+        locales: { en: entry.locales.en },
+      });
+      // The entry the change plan was worked out from is left alone
+      expect(Object.keys(entry.locales)).toEqual(['en', 'fr']);
+    });
+  });
+
+  describe('file changes built from the plans', () => {
+    it('should format each locale file with the field comments', async () => {
+      const { formatEntryFile } = await import('$lib/services/contents/file/format');
+      const { serializeContent } = await import('./serialize');
+
+      vi.mocked(formatEntryFile).mockResolvedValue('formatted content');
+      vi.mocked(serializeContent).mockReturnValue({ title: 'Test' });
+
+      const draft = {
+        collection: {
+          _type: 'entry',
+          _file: { format: 'yaml-frontmatter' },
+          _i18n: { i18nEnabled: true, allLocales: ['en'], defaultLocale: 'en', structureMap: {} },
+        },
+        fields: [{ name: 'title', widget: 'string', comment: 'Page title' }],
+        isNew: true,
+        originalLocales: {},
+        currentLocales: { en: true },
+        originalSlugs: undefined,
+        originalEntry: undefined,
+        collectionFile: undefined,
+      };
+
+      const savingEntry = {
+        locales: {
+          en: {
+            slug: 'new-post',
+            path: 'posts/en/new-post.md',
+            content: { title: 'New Post' },
+          },
+        },
+      };
+
+      expect(await buildChanges({ draft, savingEntry })).toEqual([
+        {
+          action: 'create',
+          slug: 'new-post',
+          path: 'posts/en/new-post.md',
+          previousPath: undefined,
+          previousSha: undefined,
+          data: 'formatted content',
+        },
+      ]);
+      expect(vi.mocked(serializeContent)).toHaveBeenCalledWith(
+        expect.objectContaining({ locale: 'en', valueMap: { title: 'New Post' } }),
+      );
+      expect(vi.mocked(formatEntryFile).mock.calls[0][0].comments).toEqual({
+        title: 'Page title',
+      });
+    });
+
+    it('should not format the file of a removed locale', async () => {
+      const { formatEntryFile } = await import('$lib/services/contents/file/format');
+
+      const draft = {
+        collection: {
+          _type: 'entry',
+          _file: { format: 'yaml-frontmatter' },
+          _i18n: { i18nEnabled: true, allLocales: ['ja'], defaultLocale: 'ja', structureMap: {} },
+        },
+        isNew: false,
+        originalLocales: { ja: true },
+        currentLocales: { ja: false },
+        originalEntry: { locales: { ja: { slug: 'old-post', path: 'posts/ja/old-post.md' } } },
+        collectionFile: undefined,
+      };
+
+      const savingEntry = { locales: { ja: { path: 'posts/ja/new-post.md' } } };
+
+      expect(await buildChanges({ draft, savingEntry })).toEqual([
+        {
+          action: 'delete',
+          slug: 'old-post',
+          path: 'posts/ja/old-post.md',
+          previousSha: undefined,
+        },
+      ]);
+      expect(formatEntryFile).not.toHaveBeenCalled();
+    });
+
+    it('should format the index file with its own configuration', async () => {
+      const { createEntryPath } = await import('./entry-path');
+      const { formatEntryFile } = await import('$lib/services/contents/file/format');
+      const { serializeContent } = await import('./serialize');
+
+      vi.mocked(createEntryPath).mockReturnValue('posts/posts.json');
+      vi.mocked(formatEntryFile).mockResolvedValue('{}');
+      vi.mocked(serializeContent).mockReturnValue({ layout: 'post' });
+
+      const indexFile = { format: 'json', extension: 'json' };
+
+      const draft = {
+        id: 'test-uuid',
+        collection: {
+          _type: 'entry',
+          _file: { format: 'frontmatter', extension: 'md', fullPathRegEx: null, indexFile },
+          _i18n: {
+            i18nEnabled: false,
+            allLocales: ['en'],
+            defaultLocale: 'en',
+            structureMap: {},
+            canonicalSlug: { key: 'translationKey' },
+          },
+        },
+        collectionName: 'posts',
+        isNew: false,
+        originalEntry: { locales: { en: { path: 'posts/posts.json' } } },
+        collectionFile: undefined,
+        fileName: undefined,
+        isIndexFile: true,
+        currentLocales: { en: true },
+        currentValues: { en: { layout: 'post' } },
+        files: {},
+      };
+
+      const slugs = { defaultLocaleSlug: 'posts', canonicalSlug: undefined };
+      const { changes } = await createSavingEntryData({ draft, slugs });
+
+      expect(changes).toHaveLength(1);
+      expect(changes[0].action).toBe('update');
+      expect(formatEntryFile).toHaveBeenCalledWith(expect.objectContaining({ _file: indexFile }));
     });
   });
 
@@ -1174,6 +1698,103 @@ describe('draft/save/changes', () => {
       expect(vi.mocked(replaceBlobURL)).toHaveBeenCalled();
     });
 
+    it('should fail with a clear error when a file has no folder to be saved to', async () => {
+      const { createEntryPath } = await import('./entry-path');
+      const { replaceBlobURL } = await import('$lib/services/contents/draft/save/assets');
+      const { getField } = await import('$lib/services/contents/entry/fields');
+      const { getBlobRegex } = await import('@sveltia/utils/file');
+
+      vi.mocked(createEntryPath).mockReturnValue('posts/test-post.md');
+      vi.mocked(getField).mockReturnValue({ widget: 'image' });
+      vi.mocked(getBlobRegex).mockReturnValue(/blob:http[^\s]*/g);
+
+      // Neither the file nor the site has a folder, as with only a cloud media library configured
+      const draft = {
+        collection: {
+          _type: 'entry',
+          _i18n: {
+            canonicalSlug: { key: 'translationKey' },
+          },
+        },
+        collectionName: 'posts',
+        collectionFile: undefined,
+        fileName: undefined,
+        isIndexFile: false,
+        currentLocales: { en: true },
+        currentValues: {
+          en: { title: 'Test', image: 'blob:http://localhost:5000/abc123' },
+        },
+        files: {
+          'blob:http://localhost:5000/abc123': {
+            file: { name: 'image.jpg', size: 1024 },
+          },
+        },
+      };
+
+      const slugs = {
+        defaultLocaleSlug: 'test-post',
+        canonicalSlug: 'test-post',
+        localizedSlugs: undefined,
+      };
+
+      await expect(createBaseSavingEntryData({ draft, slugs })).rejects.toThrow(
+        'There is no asset folder to save the file "image.jpg" to',
+      );
+      expect(vi.mocked(replaceBlobURL)).not.toHaveBeenCalled();
+    });
+
+    it('should leave the blob URLs in the draft, so a failed save can be retried', async () => {
+      const { createEntryPath } = await import('./entry-path');
+      const { replaceBlobURL } = await import('$lib/services/contents/draft/save/assets');
+      const { getField } = await import('$lib/services/contents/entry/fields');
+      const { getBlobRegex } = await import('@sveltia/utils/file');
+
+      vi.mocked(createEntryPath).mockReturnValue('posts/test-post.md');
+      vi.mocked(getField).mockReturnValue({ widget: 'image' });
+      vi.mocked(getBlobRegex).mockReturnValue(/blob:http[^\s]*/g);
+      vi.mocked(replaceBlobURL).mockImplementation(async ({ content, keyPath, blobURL }) => {
+        content[keyPath] = /** @type {string} */ (content[keyPath]).replace(blobURL, '/image.jpg');
+      });
+
+      const blobURL = 'blob:http://localhost:5000/abc123';
+
+      const draft = {
+        collection: {
+          _type: 'entry',
+          _i18n: {
+            canonicalSlug: { key: 'translationKey' },
+          },
+        },
+        collectionName: 'posts',
+        collectionFile: undefined,
+        fileName: undefined,
+        isIndexFile: false,
+        currentLocales: { en: true },
+        currentValues: {
+          en: { title: ' Test ', image: blobURL },
+        },
+        files: {
+          [blobURL]: { file: { name: 'image.jpg', size: 1024 }, folder: 'uploads' },
+        },
+      };
+
+      const slugs = {
+        defaultLocaleSlug: 'test-post',
+        canonicalSlug: 'test-post',
+        localizedSlugs: undefined,
+      };
+
+      const result = await createBaseSavingEntryData({ draft, slugs });
+
+      expect(result.localizedEntryMap.en.content).toEqual({
+        title: 'Test',
+        image: '/image.jpg',
+        translationKey: 'test-post',
+      });
+      // The draft itself is untouched
+      expect(draft.currentValues.en).toEqual({ title: ' Test ', image: blobURL });
+    });
+
     it('should handle markdown fields with blob URLs and enable encoding', async () => {
       const { createEntryPath } = await import('./entry-path');
       const { getField } = await import('$lib/services/contents/entry/fields');
@@ -1201,6 +1822,7 @@ describe('draft/save/changes', () => {
         files: {
           'blob:http://localhost:5000/xyz789': {
             file: { name: 'image.jpg', size: 2048 },
+            folder: 'uploads',
           },
         },
       };
@@ -1251,6 +1873,7 @@ describe('draft/save/changes', () => {
         files: {
           'blob:http://localhost:5000/xyz789': {
             file: { name: 'image.jpg', size: 2048 },
+            folder: 'uploads',
           },
         },
       };
@@ -1274,12 +1897,27 @@ describe('draft/save/changes', () => {
       );
     });
 
-    it('should trim whitespace from string values', async () => {
+    it('should trim whitespace from string values as the field needs', async () => {
       const { createEntryPath } = await import('./entry-path');
       const { getBlobRegex } = await import('@sveltia/utils/file');
+      const { getField } = await import('$lib/services/contents/entry/fields');
 
       vi.mocked(createEntryPath).mockReturnValue('posts/test-post.md');
       vi.mocked(getBlobRegex).mockReturnValue(/blob:http[^\s]*/g);
+
+      /** @type {Record<string, any>} */
+      const fields = {
+        title: { name: 'title' },
+        subtitle: { name: 'subtitle', widget: 'string' },
+        body: { name: 'body', widget: 'markdown' },
+        rich: { name: 'rich', widget: 'richtext' },
+        summary: { name: 'summary', widget: 'text' },
+        code: { name: 'code', widget: 'code' },
+        snippet: { name: 'snippet', widget: 'code', output_code_only: false },
+        'list.0': { name: 'list', widget: 'code' },
+      };
+
+      vi.mocked(getField).mockImplementation(({ keyPath }) => fields[keyPath]);
 
       const draft = {
         collection: {
@@ -1294,7 +1932,19 @@ describe('draft/save/changes', () => {
         isIndexFile: false,
         currentLocales: { en: true },
         currentValues: {
-          en: { title: '  Test Post  ', body: '\n\nContent\n\n' },
+          en: {
+            title: '  Test Post  ',
+            subtitle: '\tSub\n',
+            body: '    indented code\n\nContent\n\n',
+            rich: '\n\nRich  \n',
+            summary: '  Line 1\n  Line 2\n',
+            code: '  indented: 1\ntop: 2\n',
+            'snippet.code': '\tpass\n',
+            'snippet.lang': 'python',
+            'list.0': '  x\n',
+            unknown: '  value  ',
+            'meta.note': '  note  ',
+          },
         },
         files: {},
       };
@@ -1306,10 +1956,22 @@ describe('draft/save/changes', () => {
       };
 
       const result = await createBaseSavingEntryData({ draft, slugs });
+      const { content } = result.localizedEntryMap.en;
 
-      expect(result.localizedEntryMap.en).toBeDefined();
-      expect(result.localizedEntryMap.en.content.title).toBe('Test Post');
-      expect(result.localizedEntryMap.en.content.body).toBe('Content');
+      // Other fields, and values no field describes, are trimmed on both ends
+      expect(content.title).toBe('Test Post');
+      expect(content.subtitle).toBe('Sub');
+      expect(content.unknown).toBe('value');
+      expect(content['meta.note']).toBe('note');
+      // Multiline text keeps its leading whitespace
+      expect(content.body).toBe('    indented code\n\nContent');
+      expect(content.rich).toBe('\n\nRich');
+      expect(content.summary).toBe('  Line 1\n  Line 2');
+      // Code is kept as is
+      expect(content.code).toBe('  indented: 1\ntop: 2\n');
+      expect(content['snippet.code']).toBe('\tpass\n');
+      expect(content['snippet.lang']).toBe('python');
+      expect(content['list.0']).toBe('  x\n');
     });
 
     it('should skip non-string values without trimming', async () => {
@@ -1553,6 +2215,7 @@ describe('draft/save/changes', () => {
           _type: 'entry',
           name: 'pages',
           folder: 'content/pages',
+          fields: [],
           nested: {},
           _file: {
             fullPathRegEx:
@@ -1612,6 +2275,7 @@ describe('draft/save/changes', () => {
           _type: 'entry',
           name: 'pages',
           folder: 'content/pages',
+          fields: [],
           slug: '{{title | localize}}',
           nested: {},
           _file: {
@@ -1668,6 +2332,7 @@ describe('draft/save/changes', () => {
           _type: 'entry',
           name: 'pages',
           folder: 'content/pages',
+          fields: [],
           nested: {},
           _file: {},
           _i18n: {
@@ -1811,7 +2476,7 @@ describe('draft/save/changes', () => {
     });
   });
 
-  describe('getSingleFileChange with i18n', () => {
+  describe('single-file changes with i18n', () => {
     it('should serialize all locales with content when i18nEnabled is true', async () => {
       const { formatEntryFile } = await import('$lib/services/contents/file/format');
       const { serializeContent } = await import('./serialize');
@@ -1825,7 +2490,9 @@ describe('draft/save/changes', () => {
           _file: { format: 'yaml-frontmatter' },
           _i18n: {
             i18nEnabled: true,
+            allLocales: ['en', 'ja'],
             defaultLocale: 'en',
+            structureMap: { i18nSingleFile: true },
           },
         },
         isNew: true,
@@ -1849,7 +2516,7 @@ describe('draft/save/changes', () => {
         },
       };
 
-      await getSingleFileChange({ draft, savingEntry, cacheDB: undefined });
+      await buildChanges({ draft, savingEntry });
 
       expect(vi.mocked(serializeContent)).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1878,7 +2545,9 @@ describe('draft/save/changes', () => {
           _file: { format: 'yaml-frontmatter' },
           _i18n: {
             i18nEnabled: true,
+            allLocales: ['en', 'ja'],
             defaultLocale: 'en',
+            structureMap: { i18nSingleFile: true },
           },
         },
         isNew: true,
@@ -1902,7 +2571,7 @@ describe('draft/save/changes', () => {
         },
       };
 
-      await getSingleFileChange({ draft, savingEntry, cacheDB: undefined });
+      await buildChanges({ draft, savingEntry });
 
       // serializeContent should only be called for en (which has content)
       const calls = vi.mocked(serializeContent).mock.calls.filter(([args]) => args.locale === 'ja');
@@ -1911,7 +2580,7 @@ describe('draft/save/changes', () => {
     });
   });
 
-  describe('getSingleFileChange with single_file_default_root', () => {
+  describe('single-file changes with single_file_default_root', () => {
     it('should spread default locale content at root and nest non-default locales under their key', async () => {
       const { formatEntryFile } = await import('$lib/services/contents/file/format');
       const { serializeContent } = await import('./serialize');
@@ -1929,10 +2598,12 @@ describe('draft/save/changes', () => {
           _file: { format: 'yaml' },
           _i18n: {
             i18nEnabled: true,
+            allLocales: ['de', 'en'],
             defaultLocale: 'de',
             structureMap: { i18nSingleFileDefaultRoot: true },
           },
         },
+        fields: [{ name: 'title', widget: 'string', comment: 'Page title' }],
         isNew: true,
         originalSlugs: undefined,
         originalEntry: undefined,
@@ -1946,7 +2617,7 @@ describe('draft/save/changes', () => {
         },
       };
 
-      await getSingleFileChange({ draft, savingEntry, cacheDB: undefined });
+      await buildChanges({ draft, savingEntry });
 
       const [formatArgs] = vi.mocked(formatEntryFile).mock.calls[0];
 
@@ -1956,6 +2627,8 @@ describe('draft/save/changes', () => {
         content: 'Deutsche Version.',
         en: { title: 'About Us', content: 'English version.' },
       });
+      // The comments follow the same structure as the content
+      expect(formatArgs.comments).toEqual({ title: 'Page title', 'en.title': 'Page title' });
     });
 
     it('should omit non-default locales without content', async () => {
@@ -1971,6 +2644,7 @@ describe('draft/save/changes', () => {
           _file: { format: 'yaml' },
           _i18n: {
             i18nEnabled: true,
+            allLocales: ['en', 'fr'],
             defaultLocale: 'en',
             structureMap: { i18nSingleFileDefaultRoot: true },
           },
@@ -1988,7 +2662,7 @@ describe('draft/save/changes', () => {
         },
       };
 
-      await getSingleFileChange({ draft, savingEntry, cacheDB: undefined });
+      await buildChanges({ draft, savingEntry });
 
       const [formatArgs] = vi.mocked(formatEntryFile).mock.calls[0];
 
@@ -2009,6 +2683,7 @@ describe('draft/save/changes', () => {
           _file: { format: 'yaml' },
           _i18n: {
             i18nEnabled: true,
+            allLocales: ['en', 'fr'],
             defaultLocale: 'en',
             structureMap: { i18nSingleFileDefaultRoot: true },
           },
@@ -2027,7 +2702,7 @@ describe('draft/save/changes', () => {
         },
       };
 
-      await getSingleFileChange({ draft, savingEntry, cacheDB: undefined });
+      await buildChanges({ draft, savingEntry });
 
       const [formatArgs] = vi.mocked(formatEntryFile).mock.calls[0];
 
@@ -2036,14 +2711,8 @@ describe('draft/save/changes', () => {
     });
   });
 
-  describe('getSingleFileChange with previousPath handling', () => {
-    it('should not include previousPath when entry is not renamed', async () => {
-      const { formatEntryFile } = await import('$lib/services/contents/file/format');
-      const { serializeContent } = await import('./serialize');
-
-      vi.mocked(formatEntryFile).mockResolvedValue('formatted content');
-      vi.mocked(serializeContent).mockReturnValue({ title: 'Test' });
-
+  describe('planSingleFileChange with previousPath handling', () => {
+    it('should not include previousPath when entry is not renamed', () => {
       const draft = {
         collection: {
           _type: 'entry',
@@ -2073,20 +2742,15 @@ describe('draft/save/changes', () => {
         },
       };
 
-      const result = await getSingleFileChange({ draft, savingEntry, cacheDB: undefined });
+      const result = planSingleFileChange({ draft, savingEntry });
 
       // Line 237: previousPath should be undefined when NOT renamed
       expect(result.previousPath).toBeUndefined();
       expect(result.action).toBe('update');
+      expect(result.currentPath).toBe('posts/same-slug.md');
     });
 
-    it('should use originalSlugs._ as fallback when locale-specific key not found', async () => {
-      const { formatEntryFile } = await import('$lib/services/contents/file/format');
-      const { serializeContent } = await import('./serialize');
-
-      vi.mocked(formatEntryFile).mockResolvedValue('formatted content');
-      vi.mocked(serializeContent).mockReturnValue({ title: 'Test' });
-
+    it('should use originalSlugs._ as fallback when locale-specific key not found', () => {
       const draft = {
         collection: {
           _type: 'entry',
@@ -2117,22 +2781,17 @@ describe('draft/save/changes', () => {
         },
       };
 
-      const result = await getSingleFileChange({ draft, savingEntry, cacheDB: undefined });
+      const result = planSingleFileChange({ draft, savingEntry });
 
       // Line 184: Should use originalSlugs._ as fallback
       expect(result.action).toBe('move');
       expect(result.previousPath).toBe('posts/old-post.md');
+      expect(result.currentPath).toBe('posts/old-post.md');
     });
   });
 
-  describe('getMultiFileChange with fallback to global folder', () => {
-    it('should handle locale without slug/path gracefully', async () => {
-      const { formatEntryFile } = await import('$lib/services/contents/file/format');
-      const { serializeContent } = await import('./serialize');
-
-      vi.mocked(formatEntryFile).mockResolvedValue('formatted content');
-      vi.mocked(serializeContent).mockReturnValue({ title: 'Test' });
-
+  describe('planMultiFileChange with fallback to global folder', () => {
+    it('should handle locale without slug/path gracefully', () => {
       const draft = {
         collection: {
           _type: 'entry',
@@ -2160,26 +2819,16 @@ describe('draft/save/changes', () => {
         },
       };
 
-      const result = await getMultiFileChange({
-        draft,
-        savingEntry,
-        cacheDB: undefined,
-        locale: 'en',
-      });
+      const result = planMultiFileChange({ draft, savingEntry, locale: 'en' });
 
       // Should handle slug/path changes
       expect(result?.action).toBe('move');
       expect(result?.slug).toBe('test-new');
       expect(result?.path).toBe('posts/test-new.md');
+      expect(result?.currentPath).toBe('posts/test.md');
     });
 
-    it('should use originalSlugs._ fallback in multi-file entry rename (line 237)', async () => {
-      const { formatEntryFile } = await import('$lib/services/contents/file/format');
-      const { serializeContent } = await import('./serialize');
-
-      vi.mocked(formatEntryFile).mockResolvedValue('formatted content');
-      vi.mocked(serializeContent).mockReturnValue({ title: 'Test' });
-
+    it('should use originalSlugs._ fallback in multi-file entry rename (line 237)', () => {
       const draft = {
         collection: {
           _type: 'entry',
@@ -2208,17 +2857,13 @@ describe('draft/save/changes', () => {
         },
       };
 
-      const result = await getMultiFileChange({
-        draft,
-        savingEntry,
-        cacheDB: undefined,
-        locale: 'en',
-      });
+      const result = planMultiFileChange({ draft, savingEntry, locale: 'en' });
 
       // Line 237: Should detect rename using underscore fallback
       expect(result?.action).toBe('move');
       expect(result?.previousPath).toBe('posts/en/old-name.md');
       expect(result?.path).toBe('posts/en/new-name.md');
+      expect(result?.currentPath).toBe('posts/en/old-name.md');
     });
   });
 
@@ -2282,6 +2927,12 @@ describe('draft/save/changes', () => {
       expect(result.changes.every((c) => c !== undefined)).toBe(true);
       expect(result.changes.filter((c) => c.action === 'create')).toHaveLength(1); // fr is new
       expect(result.changes.filter((c) => c.action === 'update')).toHaveLength(2); // en, ja exist
+      // The changes follow the order of the locales
+      expect(result.changes.map((c) => c.path)).toEqual([
+        'posts/en/test.md',
+        'posts/ja/test.md',
+        'posts/fr/test.md',
+      ]);
     });
 
     it('should use Promise.all for concurrent locale processing (i18n multi-file)', async () => {
@@ -2434,11 +3085,148 @@ describe('draft/save/changes', () => {
 
       const result = await createSavingEntryData({ draft, slugs });
 
-      // For 'ja': currentLocales['ja']=false AND isNew=true → getMultiFileChange returns undefined
-      // The `if (change) { changes.push(change); }` false branch (line 318) is exercised for 'ja'
+      // For 'ja': currentLocales['ja']=false AND isNew=true → planMultiFileChange returns undefined
+      // `buildEntryFileChanges` leaves out the undefined plan for 'ja'
       // Only 'en' produces a file change
       expect(result.savingEntry).toBeDefined();
       expect(result.changes).toHaveLength(1);
+    });
+  });
+
+  describe('preparePendingEntryCommit', () => {
+    /**
+     * Create a collection.
+     * @param {boolean} [multiFile] Whether the entries are stored in a file per locale.
+     * @returns {any} Collection.
+     */
+    const createCollection = (multiFile = false) => ({
+      name: 'tags',
+      _type: 'entry',
+      fields: [{ name: 'title' }],
+      _file: { format: 'yaml-frontmatter', extension: 'md' },
+      _i18n: {
+        i18nEnabled: multiFile,
+        allLocales: multiFile ? ['en', 'fr'] : ['_default'],
+        defaultLocale: multiFile ? 'en' : '_default',
+        structureMap: { i18nSingleFile: false },
+      },
+    });
+
+    /**
+     * Create a pending entry.
+     * @param {Record<string, any>} locales Localized entries.
+     * @returns {any} Pending entry.
+     */
+    const createPendingEntry = (locales) => ({
+      collectionName: 'tags',
+      entry: { id: 'id-svelte', slug: 'svelte', subPath: 'svelte', locales },
+      changes: [
+        { action: 'create', path: 'uploads/logo.png', data: 'blob' },
+        ...Object.values(locales).map(({ path }) => ({ action: 'create', path, data: 'old' })),
+      ],
+      savingAssets: [{ path: 'uploads/logo.png' }],
+      values: ['svelte'],
+    });
+
+    it('should call the preSave event hooks and keep an entry no hook has updated', async () => {
+      const { getCollection } = await import('$lib/services/contents/collection');
+      const { callEventHooks } = await import('$lib/services/api/events');
+      const collection = createCollection();
+
+      vi.mocked(getCollection).mockReturnValue(collection);
+
+      const pendingEntry = createPendingEntry({
+        _default: { slug: 'svelte', path: 'tags/svelte.md', content: { title: 'Svelte' } },
+      });
+
+      expect(await preparePendingEntryCommit(pendingEntry)).toBe(pendingEntry);
+      expect(callEventHooks).toHaveBeenCalledWith({
+        type: 'preSave',
+        entry: pendingEntry.entry,
+        collection,
+        isNew: true,
+      });
+    });
+
+    it.each([
+      [
+        'single file',
+        false,
+        { _default: { slug: 'svelte', path: 'tags/svelte.md', content: { title: 'Svelte' } } },
+        ['tags/svelte.md'],
+      ],
+      [
+        'file per locale',
+        true,
+        {
+          en: { slug: 'svelte', path: 'tags/svelte.en.md', content: { title: 'Svelte' } },
+          fr: { slug: 'svelte', path: 'tags/svelte.fr.md', content: { title: 'Svelte' } },
+        },
+        ['tags/svelte.en.md', 'tags/svelte.fr.md'],
+      ],
+    ])(
+      'should rebuild the file changes of an entry a hook has updated (%s)',
+      async (_label, multiFile, locales, paths) => {
+        const { getCollection } = await import('$lib/services/contents/collection');
+        const { callEventHooks } = await import('$lib/services/api/events');
+        const { serializeContent } = await import('./serialize');
+        const { formatEntryFile } = await import('$lib/services/contents/file/format');
+
+        vi.mocked(getCollection).mockReturnValue(createCollection(multiFile));
+        vi.mocked(serializeContent).mockImplementation(({ valueMap }) => valueMap);
+        vi.mocked(formatEntryFile).mockImplementation(async ({ content }) => content.title);
+        vi.mocked(callEventHooks).mockImplementation(async ({ entry }) => {
+          Object.values(entry.locales).forEach((localizedEntry) => {
+            localizedEntry.content = { title: 'Svelte 5' };
+          });
+        });
+
+        const pendingEntry = createPendingEntry(locales);
+        const result = await preparePendingEntryCommit(pendingEntry);
+
+        expect(Object.values(result.entry.locales).map(({ content }) => content)).toEqual(
+          paths.map(() => ({ title: 'Svelte 5' })),
+        );
+        expect(result.changes).toEqual([
+          { action: 'create', path: 'uploads/logo.png', data: 'blob' },
+          ...paths.map((path) => ({
+            action: 'create',
+            slug: 'svelte',
+            path,
+            previousSha: undefined,
+            data: 'Svelte 5',
+          })),
+        ]);
+        expect(result.savingAssets).toBe(pendingEntry.savingAssets);
+        // The pending entry is left as is, so a retry starts over from it
+        expect(pendingEntry.entry.locales).toEqual(locales);
+        expect(pendingEntry.changes).toHaveLength(paths.length + 1);
+      },
+    );
+
+    it('should skip a locale the entry has no file in', async () => {
+      const { getCollection } = await import('$lib/services/contents/collection');
+      const { callEventHooks } = await import('$lib/services/api/events');
+      const { serializeContent } = await import('./serialize');
+      const { formatEntryFile } = await import('$lib/services/contents/file/format');
+
+      vi.mocked(getCollection).mockReturnValue(createCollection(true));
+      vi.mocked(serializeContent).mockImplementation(({ valueMap }) => valueMap);
+      vi.mocked(formatEntryFile).mockImplementation(async ({ content }) => content.title);
+      vi.mocked(callEventHooks).mockImplementation(async ({ entry }) => {
+        entry.locales.en.content = { title: 'Svelte 5' };
+      });
+
+      const result = await preparePendingEntryCommit(
+        createPendingEntry({
+          en: { slug: 'svelte', path: 'tags/svelte.en.md', content: { title: 'Svelte' } },
+        }),
+      );
+
+      expect(result.changes.map(({ path }) => path)).toEqual([
+        'uploads/logo.png',
+        'tags/svelte.en.md',
+      ]);
     });
   });
 });

@@ -6,6 +6,7 @@ import { showUploadAssetsDialog } from '$lib/services/assets/view';
 import { cmsConfig } from '$lib/services/config';
 import { allEntries } from '$lib/services/contents';
 import { collectionCacheMap } from '$lib/services/contents/collection';
+import { unpublishedEntries } from '$lib/services/workflow';
 import { forkedRepository } from '$lib/services/workflow/open-authoring';
 import { createMockEntry, initTestConfig, setEntries } from '$lib/test/config';
 
@@ -21,6 +22,7 @@ describe('CreateButton', () => {
     showUploadAssetsDialog.current = false;
     forkedRepository.current = undefined;
     allEntries.current = [];
+    unpublishedEntries.current = [];
     cmsConfig.current = /** @type {any} */ ({
       collections: [
         { name: 'posts', label: 'Posts', label_singular: 'Post', folder: 'posts', fields: [] },
@@ -50,6 +52,60 @@ describe('CreateButton', () => {
 
     await menu.getByRole('menuitem', { name: 'Post' }).click();
     await expect.poll(() => window.location.hash).toBe('#/collections/posts/new');
+  });
+
+  test('disables a read-only collection', async () => {
+    cmsConfig.current = /** @type {any} */ ({
+      collections: [
+        { name: 'posts', label: 'Posts', folder: 'posts', fields: [] },
+        { name: 'news', label: 'News', folder: 'news', fields: [], readonly: true },
+      ],
+    });
+
+    await render(CreateButton, {});
+    await page.getByRole('button', { name: 'Create Entry or Assets' }).click();
+
+    const menu = page.getByRole('menu', { name: 'Create Entry or Assets' });
+
+    await expect
+      .element(menu.getByRole('menuitem', { name: 'News' }))
+      .toHaveAttribute('aria-disabled', 'true');
+    await expect
+      .element(menu.getByRole('menuitem', { name: 'Posts' }))
+      .not.toHaveAttribute('aria-disabled', 'true');
+    await expect
+      .element(menu.getByRole('menuitem', { name: 'Assets' }))
+      .not.toHaveAttribute('aria-disabled', 'true');
+  });
+
+  test('disables the button when nothing can be created, e.g. in read-only mode', async () => {
+    cmsConfig.current = /** @type {any} */ ({
+      readonly: true,
+      collections: [{ name: 'posts', label: 'Posts', folder: 'posts', fields: [] }],
+    });
+
+    await render(CreateButton, {});
+
+    await expect
+      .element(page.getByRole('button', { name: 'Create Entry or Assets' }))
+      .toBeDisabled();
+  });
+
+  test('keeps the button enabled while one item is available', async () => {
+    // Uploading is off for a contributor, but an entry can still be created
+    forkedRepository.current = /** @type {any} */ ({ owner: 'me', repo: 'site' });
+    cmsConfig.current = /** @type {any} */ ({
+      collections: [
+        { name: 'news', label: 'News', folder: 'news', fields: [], readonly: true },
+        { name: 'posts', label: 'Posts', folder: 'posts', fields: [] },
+      ],
+    });
+
+    await render(CreateButton, {});
+
+    await expect
+      .element(page.getByRole('button', { name: 'Create Entry or Assets' }))
+      .toBeEnabled();
   });
 
   test('only offers to upload assets without an entry collection', async () => {
@@ -108,6 +164,38 @@ describe('CreateButton', () => {
       .not.toHaveAttribute('aria-disabled', 'true');
     await expect
       .element(menu.getByRole('menuitem', { name: 'Post' }))
+      .toHaveAttribute('aria-disabled', 'true');
+  });
+
+  test('counts a never-published draft toward the entry quota', async () => {
+    await initTestConfig({
+      collections: [
+        {
+          name: 'posts',
+          label: 'Posts',
+          label_singular: 'Post',
+          folder: 'content/posts',
+          limit: 1,
+          fields: [{ name: 'title', widget: 'string' }],
+        },
+      ],
+    });
+    setEntries([]);
+    unpublishedEntries.current = [
+      /** @type {any} */ (
+        createMockEntry({
+          slug: 'hello',
+          entry: /** @type {any} */ ({ workflow: { collectionName: 'posts', status: 'draft' } }),
+        })
+      ),
+    ];
+
+    await render(CreateButton, {});
+    await page.getByRole('button', { name: 'Create Entry or Assets' }).click();
+
+    // The draft only exists in a pull request, but it still takes up the collection’s one slot
+    await expect
+      .element(page.getByRole('menuitem', { name: 'Post' }))
       .toHaveAttribute('aria-disabled', 'true');
   });
 

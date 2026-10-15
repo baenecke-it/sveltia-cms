@@ -1,9 +1,12 @@
 import { isObject } from '@sveltia/utils/object';
 
 import { TEMPLATE_TAG_REPLACE_REGEX } from '$lib/services/common/template/constants';
+import { stripFieldTagPrefix } from '$lib/services/common/template/utils';
+import { hasSlugTag } from '$lib/services/config/parser/collections/array-file';
 import { checkMultipleDefault } from '$lib/services/config/parser/utils/defaults';
 import { getCanonicalSlugKey, hasField } from '$lib/services/config/parser/utils/fields';
 import { addMessage, checkUnsupportedOptions } from '$lib/services/config/parser/utils/validator';
+import { getPublishMode, isWorkflowMode } from '$lib/services/workflow/config';
 
 /**
  * @import {
@@ -14,6 +17,8 @@ import { addMessage, checkUnsupportedOptions } from '$lib/services/config/parser
  * UnsupportedOption,
  * } from '$lib/types/private';
  * @import {
+ * Collection,
+ * CollectionDivider,
  * CollectionFile,
  * EntryCollection,
  * Field,
@@ -88,7 +93,7 @@ const checkFieldReference = ({
 
   keyPaths.forEach((keyPath) => {
     // The `fields.` prefix is supported for compatibility with other config options
-    const key = keyPath.replace(/^fields\./, '');
+    const key = stripFieldTagPrefix(keyPath);
 
     if (key !== canonicalSlugKey && !hasField(fields, key)) {
       addMessage({ strKey, context, collectors, values: { field: keyPath } });
@@ -118,7 +123,7 @@ const checkFieldReferences = ({ fieldConfig, fields, canonicalSlugKey, context, 
       const field = isObject(filter) ? filter.field : undefined;
 
       if (typeof field === 'string' && field && field !== 'slug') {
-        const key = field.replace(/^fields\./, '');
+        const key = stripFieldTagPrefix(field);
 
         if (key !== canonicalSlugKey && !hasField(fields, key)) {
           addMessage({
@@ -146,6 +151,64 @@ const checkFieldReferences = ({ fieldConfig, fields, canonicalSlugKey, context, 
         checkFieldReference({ reference, strKey, fields, canonicalSlugKey, context, collectors });
       }
     });
+  });
+};
+
+/**
+ * Validate the `value_field` option of a Relation field referring to an entry collection that
+ * stores all the entries in one file. The slug of such an entry is its position in the array, which
+ * changes when the entries are reordered or one is deleted, so a stored reference would silently
+ * point to another entry. The value has to come from a field instead.
+ * @param {object} args Arguments.
+ * @param {RelationField} args.fieldConfig Relation field configuration.
+ * @param {ConfigParserContext} args.context Context.
+ * @param {ConfigParserCollectors} args.collectors Collectors.
+ */
+const checkArrayFileValueField = ({ fieldConfig, context, collectors }) => {
+  const { collection, value_field: valueField = '{{slug}}' } = fieldConfig;
+
+  if (hasSlugTag(valueField)) {
+    addMessage({
+      strKey: 'relation_field_array_file_slug',
+      context,
+      collectors,
+      values: { collection },
+    });
+  }
+};
+
+/**
+ * Validate a Relation field in an entry collection that stores all the entries in one file, which
+ * can’t refer to a collection with Editorial Workflow. Renaming or deleting an entry there updates
+ * the references to it in the same pull request, but the file can only be written as a whole on
+ * the configured branch, so the pull request would replace the file with the one entry holding the
+ * reference.
+ * @param {object} args Arguments.
+ * @param {Collection | CollectionDivider | InternalSingletonCollection} args.collection Referenced
+ * collection.
+ * @param {ConfigParserContext} args.context Context.
+ * @param {ConfigParserCollectors} args.collectors Collectors.
+ */
+const checkArrayFileWorkflowRelation = ({ collection, context, collectors }) => {
+  const { cmsConfig, collection: parentCollection } = context;
+
+  if (
+    !parentCollection ||
+    !('file' in parentCollection) ||
+    typeof parentCollection.file !== 'string' ||
+    // A file/singleton collection’s entry can’t be renamed or deleted
+    'divider' in collection ||
+    'files' in collection ||
+    !isWorkflowMode(getPublishMode({ cmsConfig, collection }))
+  ) {
+    return;
+  }
+
+  addMessage({
+    strKey: 'relation_field_array_file_workflow',
+    context,
+    collectors,
+    values: { collection: collection.name },
   });
 };
 
@@ -213,6 +276,17 @@ export const parseRelationFieldConfig = (args) => {
     }
 
     canonicalSlugKey = getCanonicalSlugKey({ cmsConfig, collection, file });
+
+    // A value of the wrong type is reported against the JSON schema
+    if (
+      'file' in collection &&
+      typeof collection.file === 'string' &&
+      (fieldConfig.value_field === undefined || typeof fieldConfig.value_field === 'string')
+    ) {
+      checkArrayFileValueField({ fieldConfig, context, collectors });
+    }
+
+    checkArrayFileWorkflowRelation({ collection, context, collectors });
   } else {
     addMessage({
       strKey: 'relation_field_invalid_collection',

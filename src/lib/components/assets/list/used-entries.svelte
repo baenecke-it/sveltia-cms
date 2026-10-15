@@ -9,12 +9,13 @@
 
   import { goto } from '$lib/services/app/navigation';
   import { getCollectionLabel } from '$lib/services/contents/collection';
+  import { getListedCollections } from '$lib/services/contents/collection/entries';
   import {
     getCollectionFileLabel,
     getCollectionFilesByEntry,
   } from '$lib/services/contents/collection/files';
-  import { getAssociatedCollections } from '$lib/services/contents/entry';
   import { getEntrySummary } from '$lib/services/contents/entry/summary';
+  import { encodePathSegments } from '$lib/services/utils/url';
 
   /**
    * @import { Entry } from '$lib/types/private';
@@ -32,6 +33,17 @@
     entries,
     /* eslint-enable prefer-const */
   } = $props();
+
+  /**
+   * Entries using the asset, each with the collections it’s listed in. A collection that filters
+   * the entry out or is hidden can’t open it, so the entry isn’t linked from there, and an entry
+   * no collection lists isn’t shown at all.
+   */
+  const usages = $derived(
+    entries
+      ?.map((entry) => ({ entry, collections: getListedCollections(entry) }))
+      .filter(({ collections }) => collections.length),
+  );
 </script>
 
 {#snippet usedEntryLink(
@@ -46,22 +58,22 @@
 
 <section>
   <h4>{_('used_in')}</h4>
-  {#if !entries}
+  {#if !usages}
     <p>{_('loading')}</p>
   {:else}
-    {#each entries as entry (entry.id)}
-      {#each getAssociatedCollections(entry) as collection (collection.name)}
+    {#each usages as { entry, collections } (entry.id)}
+      {#each collections as collection (collection.name)}
         {#key appLocale.current}
           {@const collectionLabel = getCollectionLabel(collection)}
           {#each getCollectionFilesByEntry(collection, entry) as file (file.name)}
             {@render usedEntryLink({
-              link: `/collections/${collection.name}/entries/${file.name}`,
+              link: encodePathSegments(`/collections/${collection.name}/entries/${file.name}`),
               collectionLabel,
               entryLabel: getCollectionFileLabel(file),
             })}
           {:else}
             {@render usedEntryLink({
-              link: `/collections/${collection.name}/entries/${entry.subPath}`,
+              link: encodePathSegments(`/collections/${collection.name}/entries/${entry.subPath}`),
               collectionLabel,
               entryLabel: getEntrySummary(collection, entry, { useTemplate: true }),
             })}

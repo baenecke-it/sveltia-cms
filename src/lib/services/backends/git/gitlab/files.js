@@ -4,14 +4,25 @@ import { getPathInfo } from '@sveltia/utils/file';
 
 import { fetchLastCommit } from '$lib/services/backends/git/gitlab/commits';
 import {
+  getWorkflowRepository,
+  initOpenAuthoring,
+  isOpenAuthoringConfigured,
+} from '$lib/services/backends/git/gitlab/fork';
+import {
+  checkBranchAccess,
   checkRepositoryAccess,
   fetchDefaultBranchName,
   getProjectId,
   repository,
 } from '$lib/services/backends/git/gitlab/repository';
 import { fetchAPI, fetchGraphQL } from '$lib/services/backends/git/shared/api';
-import { fetchAndParseFiles } from '$lib/services/backends/git/shared/fetch';
+import { mapConcurrently } from '$lib/services/backends/git/shared/concurrency';
+import { fetchRepositoryFiles } from '$lib/services/backends/git/shared/files';
+import { getManagedPaths } from '$lib/services/backends/git/shared/managed-paths';
 import { startSimulatedProgress } from '$lib/services/backends/git/shared/progress';
+import { toFileListItems } from '$lib/services/backends/git/shared/tree';
+import { getRootDir, toRepoPath } from '$lib/services/backends/root-dir';
+import { splitIntoChunks } from '$lib/services/utils/array';
 
 /**
  * @import {
@@ -23,17 +34,20 @@ import { startSimulatedProgress } from '$lib/services/backends/git/shared/progre
  */
 
 /**
+ * @typedef {object} FileListTree
+ * @property {object} blobs Blobs information.
+ * @property {{ type: string, path: string, sha: string }[]} blobs.nodes List of file blobs.
+ * @property {object} blobs.pageInfo Pagination information.
+ * @property {string} blobs.pageInfo.endCursor Cursor for the next page.
+ * @property {boolean} blobs.pageInfo.hasNextPage Whether there are more pages to fetch.
+ */
+
+/**
  * @typedef {object} FetchFileListResponse
  * @property {object} project Project information.
  * @property {object} project.repository Repository information.
- * @property {object} project.repository.tree Tree information.
- * @property {object} project.repository.tree.blobs Blobs information.
- * @property {{ type: string, path: string, sha: string }[]} project.repository.tree.blobs.nodes
- * List of file blobs.
- * @property {object} project.repository.tree.blobs.pageInfo Pagination information.
- * @property {string} project.repository.tree.blobs.pageInfo.endCursor Cursor for the next page.
- * @property {boolean} project.repository.tree.blobs.pageInfo.hasNextPage Whether there are more
- * pages to fetch.
+ * @property {FileListTree | null} project.repository.tree Tree information, or `null` if there is
+ * none.
  */
 
 /**
@@ -55,11 +69,18 @@ import { startSimulatedProgress } from '$lib/services/backends/git/shared/progre
  * text contents.
  */
 
-const FETCH_FILE_LIST_QUERY = `
-  query($fullPath: ID!, $branch: String!, $cursor: String!) {
+/**
+ * Get the query to fetch a page of the file list.
+ * @param {object} args Arguments.
+ * @param {boolean} args.scoped Whether to list the files in a directory, given as the `$path`
+ * variable, rather than the whole repository.
+ * @returns {string} Query.
+ */
+const getFetchFileListQuery = ({ scoped }) => `
+  query($fullPath: ID!, $branch: String!, $cursor: String!${scoped ? ', $path: String!' : ''}) {
     project(fullPath: $fullPath) {
       repository {
-        tree(ref: $branch, recursive: true) {
+        tree(ref: $branch, ${scoped ? 'path: $path, ' : ''}recursive: true) {
           blobs(after: $cursor) {
             nodes {
               type
@@ -77,41 +98,69 @@ const FETCH_FILE_LIST_QUERY = `
   }
 `;
 
-/**
- * Fetch the repository’s complete file list, and return it in the canonical format.
- * @returns {Promise<BaseFileListItemProps[]>} File list.
- * @see https://docs.gitlab.com/api/graphql/reference/index.html#repositorytree
- * @see https://stackoverflow.com/questions/18952935/how-to-get-subfolders-and-files-using-gitlab-api
- */
-export const fetchFileList = async () => {
-  /** @type {{ type: string, path: string, sha: string }[]} */
-  const blobs = [];
-  let cursor = '';
-
-  // Since GitLab has a limit of 100 records per query, use pagination to fetch all the files
-  for (;;) {
-    const result = /** @type {FetchFileListResponse} */ (
-      await fetchGraphQL(FETCH_FILE_LIST_QUERY, { cursor })
-    );
-
-    const {
-      nodes,
-      pageInfo: { endCursor, hasNextPage },
-    } = result.project.repository.tree.blobs;
-
-    blobs.push(...nodes);
-    cursor = endCursor;
-
-    if (!hasNextPage) {
-      break;
+const FETCH_SUBTREES_QUERY = `
+  query($fullPath: ID!, $ref: String!, $path: String!, $cursor: String!) {
+    project(fullPath: $fullPath) {
+      repository {
+        tree(ref: $ref, path: $path) {
+          trees(after: $cursor) {
+            nodes {
+              name
+              sha
+            }
+            pageInfo {
+              endCursor
+              hasNextPage
+            }
+          }
+        }
+      }
     }
   }
+`;
 
-  // The `size` is not available from the GitLab API in bulk
-  return blobs
-    .filter(({ type }) => type === 'blob')
-    .map(({ path, sha }) => ({ path, sha, size: 0, name: getPathInfo(path).basename }));
+/**
+ * Find the tree SHA of a directory at the given commit, by listing the subdirectories of the
+ * directory that holds it, a page at a time.
+ * @param {string} ref Commit SHA or branch name.
+ * @param {string} dirPath Directory path relative to the repository root.
+ * @returns {Promise<string | undefined>} Tree SHA, or `undefined` if the directory doesn’t exist.
+ * @see https://docs.gitlab.com/api/graphql/reference/#tree
+ */
+export const fetchDirSHA = async (ref, dirPath) => {
+  const { dirname = '', basename } = getPathInfo(dirPath);
+  let cursor = '';
+
+  for (;;) {
+    const result = /** @type {any} */ (
+      await fetchGraphQL(FETCH_SUBTREES_QUERY, { ref, path: dirname, cursor })
+    );
+
+    const { nodes = [], pageInfo } = result.project?.repository?.tree?.trees ?? {};
+
+    const sha = /** @type {{ name: string, sha: string }[]} */ (nodes).find(
+      ({ name }) => name === basename,
+    )?.sha;
+
+    if (sha || !pageInfo?.hasNextPage) {
+      return sha;
+    }
+
+    cursor = pageInfo.endCursor;
+  }
 };
+
+/**
+ * Number of blob batches requested at the same time on GitLab.com. Each batch is a heavy query, so
+ * this is kept well below the general limit on requests in flight.
+ */
+export const BLOB_CONCURRENCY = 4;
+
+/**
+ * Number of blob batches requested at the same time on a self-hosted instance, which typically runs
+ * on less powerful hardware and is more likely to time out under load.
+ */
+export const SELF_HOSTED_BLOB_CONCURRENCY = 2;
 
 const FETCH_BLOBS_QUERY = `
   query($fullPath: ID!, $branch: String!, $paths: [String!]!) {
@@ -119,6 +168,7 @@ const FETCH_BLOBS_QUERY = `
       repository {
         blobs(ref: $branch, paths: $paths) {
           nodes {
+            path
             rawTextBlob
           }
         }
@@ -139,7 +189,8 @@ const FETCH_BLOBS_QUERY = `
  * @param {string} query GraphQL query string.
  * @param {Record<string, any>} [variables] Any variable to be applied to the query, other than the
  * paths.
- * @returns {Promise<BlobItem[]>} Fetched blobs, in the same order as the given paths.
+ * @returns {Promise<BlobItem[]>} Fetched blobs, in the same order as the given paths. A path that
+ * isn’t on the branch is left out, so select the `path` to match a blob to its file.
  * @throws {Error} When a request for a single path fails.
  * @see https://docs.gitlab.com/api/graphql/#data-limits
  * @see https://gitlab.com/gitlab-org/gitlab/-/merge_requests/212456
@@ -177,7 +228,8 @@ export const fetchBlobBatch = async (paths, query, variables = {}) => {
  * @param {string} query GraphQL query string.
  * @param {Record<string, any>} [variables] Any variable to be applied to the query, other than the
  * paths.
- * @returns {Promise<BlobItem[]>} Fetched blobs, in the same order as the given paths.
+ * @returns {Promise<BlobItem[]>} Fetched blobs, in the same order as the given paths. A path that
+ * isn’t on the branch is left out, so select the `path` to match a blob to its file.
  * @see https://docs.gitlab.com/api/graphql/reference/#repositoryblob
  * @see https://docs.gitlab.com/api/graphql/reference/#tree
  * @see https://forum.gitlab.com/t/graphql-api-read-raw-file/35389
@@ -190,12 +242,10 @@ export const fetchBlobNodes = async (paths, query, variables = {}) => {
 
   const { isSelfHosted = false } = repository;
   const batchSize = isSelfHosted ? 20 : 100;
-  const fetchingPaths = [...paths];
-  /** @type {BlobItem[]} */
-  const blobs = [];
+  const concurrency = isSelfHosted ? SELF_HOSTED_BLOB_CONCURRENCY : BLOB_CONCURRENCY;
 
   // Fetch all the text contents with the GraphQL API. Pagination would fail if `paths` becomes too
-  // long, so we just use a fixed number of paths to iterate. The complexity score of this query is
+  // long, so we just use a fixed number of paths per request. The complexity score of this query is
   // 15 + (2 * node size) so 100 paths = 215 complexity, giving the following conditions:
   // 1. The max number of records is 100
   // 2. The max query complexity is 250 or 300
@@ -207,12 +257,58 @@ export const fetchBlobNodes = async (paths, query, variables = {}) => {
   // Only the first two conditions can be satisfied by a fixed count; the size of a blob is unknown
   // until it’s fetched, so {@link fetchBlobBatch} handles the third one by splitting a batch that
   // turns out to be too large.
+  //
+  // The batches are independent, so a few of them are requested at once rather than one after
+  // another; a large repository needs dozens of them, and each is a full round trip
+  const results = await mapConcurrently(
+    splitIntoChunks(paths, batchSize),
+    (batchPaths) => fetchBlobBatch(batchPaths, query, variables),
+    { concurrency },
+  );
+
+  // Keep the order of the given paths, although callers match a blob to its file by path
+  return results.flat();
+};
+
+/**
+ * Fetch the files in a directory and its subdirectories, a page at a time.
+ * @param {object} args Arguments.
+ * @param {string} [args.ref] Commit SHA or branch name. Default: the branch.
+ * @param {string} [args.path] Directory path relative to the repository root. Default: the root.
+ * @returns {Promise<{ type: string, path: string, sha: string }[]>} Blobs, with paths relative to
+ * the repository root.
+ */
+const fetchTreeBlobs = async ({ ref, path }) => {
+  const query = getFetchFileListQuery({ scoped: !!path });
+  /** @type {{ type: string, path: string, sha: string }[]} */
+  const blobs = [];
+  let cursor = '';
+
+  // Since GitLab has a limit of 100 records per query, use pagination to fetch all the files
   for (;;) {
-    const currentPaths = fetchingPaths.splice(0, batchSize);
+    const result = /** @type {FetchFileListResponse} */ (
+      await fetchGraphQL(query, {
+        cursor,
+        // The `$branch` variable takes a commit SHA as well as a branch name
+        ...(ref && { branch: ref }),
+        ...(path && { path }),
+      })
+    );
 
-    blobs.push(...(await fetchBlobBatch(currentPaths, query, variables)));
+    // A directory that doesn’t exist comes back without blobs, while a missing tree is guarded
+    // against as well; either leaves the list empty, which the caller reports
+    const {
+      nodes,
+      pageInfo: { endCursor, hasNextPage },
+    } = result.project.repository.tree?.blobs ?? {
+      nodes: [],
+      pageInfo: { endCursor: '', hasNextPage: false },
+    };
 
-    if (!fetchingPaths.length) {
+    blobs.push(...nodes);
+    cursor = endCursor;
+
+    if (!hasNextPage) {
       break;
     }
   }
@@ -220,17 +316,88 @@ export const fetchBlobNodes = async (paths, query, variables = {}) => {
   return blobs;
 };
 
+const FETCH_BLOB_IDS_QUERY = `
+  query($fullPath: ID!, $branch: String!, $paths: [String!]!) {
+    project(fullPath: $fullPath) {
+      repository {
+        blobs(ref: $branch, paths: $paths) {
+          nodes {
+            path
+            oid
+          }
+        }
+      }
+    }
+  }
+`;
+
+/**
+ * Fetch the repository’s file list, and return it in the canonical format. Only the folders and
+ * files the CMS manages are listed, rather than the whole repository: GitLab lists a tree 100 files
+ * at a time, one page after another, so listing a big repository takes hundreds of requests in a
+ * row, while the folders can be listed at the same time. With the `root_dir` backend option, only
+ * the files in that directory are listed; the paths are still relative to the repository root.
+ * @param {string} [lastHash] The last commit’s SHA-1 hash. The tree is listed at that commit
+ * rather than at the tip of the branch, which may have moved on since, so the file list matches the
+ * commit the file cache is keyed on. Default: the branch.
+ * @returns {Promise<BaseFileListItemProps[]>} File list.
+ * @see https://docs.gitlab.com/api/graphql/reference/index.html#repositorytree
+ * @see https://stackoverflow.com/questions/18952935/how-to-get-subfolders-and-files-using-gitlab-api
+ */
+export const fetchFileList = async (lastHash) => {
+  const rootDir = getRootDir();
+  const managedPaths = getManagedPaths();
+
+  if (managedPaths) {
+    const { dirs, files } = managedPaths;
+
+    const [dirBlobs, fileBlobs] = await Promise.all([
+      mapConcurrently(dirs, (dir) => fetchTreeBlobs({ ref: lastHash, path: toRepoPath(dir) })),
+      // A file collection’s file is looked up by its path, which is quicker than listing its
+      // folder; one that doesn’t exist is left out
+      fetchBlobNodes(
+        files.map((path) => toRepoPath(path)),
+        FETCH_BLOB_IDS_QUERY,
+        lastHash ? { branch: lastHash } : {},
+      ),
+    ]);
+
+    const blobs = [
+      ...dirBlobs.flat(),
+      ...fileBlobs.map(({ path, oid }) => ({
+        type: 'blob',
+        path: /** @type {string} */ (path),
+        sha: /** @type {string} */ (oid),
+      })),
+    ];
+
+    // A site with no content yet has nothing to list there. The whole root directory is listed
+    // then, so a root directory that does exist isn’t reported as missing
+    if (blobs.length) {
+      return toFileListItems(blobs);
+    }
+  }
+
+  // The `size` is not available from the GitLab API in bulk, so it’s left as `0`
+  return toFileListItems(await fetchTreeBlobs({ ref: lastHash, path: rootDir }));
+};
+
 /**
  * Fetch the blobs for the given file paths, and map them back to those paths.
  * @param {string[]} paths List of file paths to fetch.
- * @param {string} query GraphQL query string.
- * @returns {Promise<Record<string, BlobItem>>} Fetched blobs mapped by file path.
+ * @param {string} query GraphQL query string, which has to select the `path` of each blob.
+ * @param {Record<string, any>} [variables] Any variable to be applied to the query, other than the
+ * paths.
+ * @returns {Promise<Record<string, BlobItem>>} Fetched blobs mapped by file path. A path missing
+ * from the branch has no blob.
  */
-export const fetchBlobs = async (paths, query) => {
-  const blobs = await fetchBlobNodes(paths, query);
+export const fetchBlobs = async (paths, query, variables = {}) => {
+  const blobs = await fetchBlobNodes(paths, query, variables);
 
-  // Map the blobs back to their respective file paths
-  return Object.fromEntries(paths.map((path, index) => [path, blobs[index]]));
+  // Map the blobs back by their own paths rather than by position: GitLab leaves a path that isn’t
+  // on the branch out of the response, e.g. a file deleted by a push made during the load, which
+  // would otherwise give every later file the content of the one after it
+  return Object.fromEntries(blobs.map((blob) => [/** @type {string} */ (blob.path), blob]));
 };
 
 /**
@@ -252,9 +419,13 @@ export const parseFileContents = ({ fetchingFiles, blobs }) =>
 /**
  * Fetch the metadata of entry/asset files as well as text file contents.
  * @param {BaseFileListItem[]} fetchingFiles Base file list.
+ * @param {string} [lastHash] The last commit’s SHA-1 hash, which the file list comes from. The
+ * blobs are read at that commit rather than at the tip of the branch, which may have moved on
+ * since, so a text is never cached under the blob SHA of another version of the file. Default: the
+ * branch.
  * @returns {Promise<RepositoryContentsMap>} Fetched contents map.
  */
-export const fetchFileContents = async (fetchingFiles) => {
+export const fetchFileContents = async (fetchingFiles, lastHash) => {
   // Show a simulated progress bar because the request waiting time is long
   const stopProgress = startSimulatedProgress(fetchingFiles.length);
   // Fetch blobs for entry/config files only
@@ -263,7 +434,8 @@ export const fetchFileContents = async (fetchingFiles) => {
   let blobs;
 
   try {
-    blobs = await fetchBlobs(textPaths, FETCH_BLOBS_QUERY);
+    // The `$branch` variable takes a commit SHA as well as a branch name
+    blobs = await fetchBlobs(textPaths, FETCH_BLOBS_QUERY, lastHash ? { branch: lastHash } : {});
   } finally {
     // Also on failure, so the interval doesn’t keep running behind the error message
     stopProgress();
@@ -275,13 +447,20 @@ export const fetchFileContents = async (fetchingFiles) => {
 /**
  * Fetch file list from the backend service, download/parse all the entry files, then cache them in
  * the {@link allEntries} and {@link allAssets} stores.
+ * @param {object} [options] Options.
+ * @param {{ hash: string, message: string }} [options.lastCommit] Last commit on the branch, if the
+ * caller has just fetched it, so it isn’t fetched again.
  */
-export const fetchFiles = async () => {
-  await fetchAndParseFiles({
+export const fetchFiles = async ({ lastCommit } = {}) => {
+  await fetchRepositoryFiles({
+    isOpenAuthoringConfigured,
+    initOpenAuthoring,
     repository,
     checkAccess: checkRepositoryAccess,
+    checkBranchAccess,
     fetchDefaultBranchName,
     fetchLastCommit,
+    lastCommit,
     fetchFileList,
     fetchFileContents,
   });
@@ -298,12 +477,14 @@ export const fetchBlob = async (asset) => {
   const { branch = '' } = repository;
   const { path, workflow } = asset;
   // An asset attached to an unpublished entry is committed to a workflow branch only, so it has to
-  // be read from there; on the configured branch the path is missing or holds the published version
+  // be read from there; on the configured branch the path is missing or holds the published
+  // version. That branch lives in the contributor’s fork with Open Authoring, so it’s read there
   const ref = workflow?.branch ?? branch;
+  const projectId = getProjectId(workflow ? getWorkflowRepository() : undefined);
 
   return /** @type {Promise<Blob>} */ (
     fetchAPI(
-      `/projects/${getProjectId()}/repository/files` +
+      `/projects/${projectId}/repository/files` +
         `/${encodeURIComponent(path)}/raw?lfs=true&ref=${encodeURIComponent(ref)}`,
       { responseType: 'blob' },
     )

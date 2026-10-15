@@ -4,16 +4,16 @@ import { fillTemplate } from '$lib/services/common/template';
 import { getEntriesByCollection } from '$lib/services/contents/collection/entries';
 import {
   getEntryDirPath,
-  getNestedConfig,
+  getSharedEntryFileName,
   isDescendantPath,
 } from '$lib/services/contents/collection/nested';
-import { getPreviousSha } from '$lib/services/contents/draft/save/changes';
-import { buildSingleFileContent } from '$lib/services/contents/draft/save/content';
-import { serializeContent } from '$lib/services/contents/draft/save/serialize';
+import {
+  buildEntryFileChanges,
+  resolveCacheDB,
+} from '$lib/services/contents/draft/save/file-changes';
 import { hasLocalizedSlugs } from '$lib/services/contents/draft/slugs';
-import { createSyntheticDraft, resolveCacheDB } from '$lib/services/contents/entry/changes';
+import { createSyntheticDraft } from '$lib/services/contents/entry/changes';
 import { resolveFileConfig } from '$lib/services/contents/file/config';
-import { formatEntryFile } from '$lib/services/contents/file/format';
 
 /**
  * @import { IndexedDB } from '@sveltia/utils/storage';
@@ -24,6 +24,7 @@ import { formatEntryFile } from '$lib/services/contents/file/format';
  * InternalEntryCollection,
  * InternalLocaleCode,
  * } from '$lib/types/private';
+ * @import { EntryFilePlan } from '$lib/services/contents/draft/save/file-changes';
  */
 
 /**
@@ -172,36 +173,27 @@ const updateCanonicalSlug = ({ collection, entry }) => {
  * @see https://github.com/sveltia/sveltia-cms/issues/984
  */
 const buildMoveChanges = async ({ collection, originalEntry, movedEntry, draft, cacheDB }) => {
-  const {
-    _i18n: {
-      i18nEnabled,
-      allLocales,
-      defaultLocale,
-      structureMap: { i18nSingleFile, i18nSingleFileDefaultRoot } = {},
-    },
-  } = /** @type {InternalEntryCollection} */ (collection);
+  const { defaultLocale } = collection._i18n;
 
-  const _file = resolveFileConfig({ collection, isIndexFile: draft.isIndexFile });
+  return buildEntryFileChanges({
+    draft,
+    config: collection,
+    _file: resolveFileConfig({ collection, isIndexFile: draft.isIndexFile }),
+    entry: movedEntry,
+    cacheDB,
+    /**
+     * Plan the change to a file of the entry.
+     * @param {InternalLocaleCode} [locale] Locale of the file, or `undefined` for the single file.
+     * @returns {EntryFilePlan | undefined} Planned change.
+     */
+    planChange: (locale) => {
+      if (locale === undefined) {
+        const previousPath = originalEntry.locales[defaultLocale].path;
+        const { slug, path } = movedEntry.locales[defaultLocale];
 
-  if (!i18nEnabled || i18nSingleFile || i18nSingleFileDefaultRoot) {
-    const previousPath = originalEntry.locales[defaultLocale].path;
-    const { slug, path } = movedEntry.locales[defaultLocale];
+        return { action: 'move', slug, path, previousPath, currentPath: previousPath };
+      }
 
-    const [previousSha, data] = await Promise.all([
-      getPreviousSha({ cacheDB, previousPath }),
-      formatEntryFile({
-        content: buildSingleFileContent({ config: collection, entry: movedEntry, draft }),
-        _file,
-      }),
-    ]);
-
-    return [
-      /** @type {FileChange} */ ({ action: 'move', slug, path, previousPath, previousSha, data }),
-    ];
-  }
-
-  const localeChanges = await Promise.all(
-    allLocales.map(async (locale) => {
       const localizedEntry = movedEntry.locales[locale];
 
       if (!localizedEntry?.content) {
@@ -219,33 +211,22 @@ const buildMoveChanges = async ({ collection, originalEntry, movedEntry, draft, 
         return undefined;
       }
 
-      const [previousSha, data] = await Promise.all([
-        getPreviousSha({ cacheDB, previousPath }),
-        formatEntryFile({
-          content: serializeContent({ draft, locale, valueMap: localizedEntry.content }),
-          _file,
-        }),
-      ]);
-
-      return /** @type {FileChange} */ ({
+      return {
         action: moved ? 'move' : 'update',
         slug: localizedEntry.slug,
         path: localizedEntry.path,
         previousPath: moved ? previousPath : undefined,
-        previousSha,
-        data,
-      });
-    }),
-  );
-
-  return /** @type {FileChange[]} */ (localeChanges.filter(Boolean));
+        currentPath: previousPath,
+      };
+    },
+  });
 };
 
 /**
  * Build the file changes that move the whole subtree of a nested collection entry along with the
- * entry itself. In the `subfolders` mode, an entry owns the folder it’s stored in, so relocating it
- * with the path editor has to take everything below that folder with it, or the descendants would
- * be orphaned in a folder that no longer has an entry of its own.
+ * entry itself. In the `subfolders` mode, an entry stored as the index file owns the folder it’s
+ * stored in, so relocating it with the path editor has to take everything below that folder with
+ * it, or the descendants would be orphaned in a folder that no longer has an entry of its own.
  * @param {object} args Arguments.
  * @param {InternalCollection} args.collection Collection of the moved entry.
  * @param {Entry} [args.originalEntry] Moved entry as it was before the save. `undefined` for a new
@@ -264,8 +245,16 @@ export const buildNestedMoveChanges = async ({
 }) => {
   /** @type {{ changes: FileChange[], savingEntries: Entry[] }} */
   const noChanges = { changes: [], savingEntries: [] };
+  const indexFileName = getSharedEntryFileName(collection);
 
-  if (!originalEntry || !getNestedConfig(collection)?.subfolders) {
+  // An entry only owns its folder when it’s stored as the index file that names every entry in the
+  // `subfolders` mode. Otherwise it’s a regular file sharing the folder with its siblings and with
+  // whatever is below, none of which moves with it
+  if (
+    !originalEntry ||
+    !indexFileName ||
+    originalEntry.subPath.slice(originalEntry.subPath.lastIndexOf('/') + 1) !== indexFileName
+  ) {
     return noChanges;
   }
 

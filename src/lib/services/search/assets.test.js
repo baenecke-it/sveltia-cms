@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { createMockAssetFolder } from '$lib/test/factories';
+
 import { searchAssets } from './assets';
 import { hasAllMatches, hasMatch, normalize, tokenize } from './util';
 
@@ -8,7 +10,7 @@ import { hasAllMatches, hasMatch, normalize, tokenize } from './util';
  */
 
 // Mock only the stores, not the util functions
-vi.mock('$lib/services/assets', () => ({
+vi.mock('$lib/services/assets/state', () => ({
   publishedAssets: { current: [] },
 }));
 
@@ -29,13 +31,7 @@ describe('searchAssets integration', () => {
       sha: 'mock-sha',
       size: 1024,
       kind: 'image',
-      folder: {
-        collectionName: undefined,
-        internalPath: '/assets',
-        publicPath: '/assets',
-        entryRelative: false,
-        hasTemplateTags: false,
-      },
+      folder: createMockAssetFolder({ internalPath: '/assets', publicPath: '/assets' }),
       // RepositoryFileMetadata properties
       commitAuthor: undefined,
       commitDate: undefined,
@@ -113,6 +109,20 @@ describe('searchAssets integration', () => {
     expect(result).toHaveLength(1);
   });
 
+  it('should not match Japanese file names that differ only in kana marks', () => {
+    const assets = [
+      createAsset('コーヒー.jpg'),
+      createAsset('コピー.jpg'),
+      createAsset('ヒル.jpg'),
+    ];
+
+    expect(searchAssets({ assets, terms: 'コピー' }).map((a) => a.name)).toEqual(['コピー.jpg']);
+    expect(searchAssets({ assets, terms: 'コーヒー' }).map((a) => a.name)).toEqual([
+      'コーヒー.jpg',
+    ]);
+    expect(searchAssets({ assets, terms: 'ビール' })).toEqual([]);
+  });
+
   it('should match every word of a multi-word query in a hyphenated file name', () => {
     const assets = [createAsset('annual-report-cover-photo.png'), createAsset('logo.svg')];
 
@@ -156,8 +166,12 @@ describe('assetSearchResults derived store', () => {
   it('should compute the results from the assets and search terms', async () => {
     // Import after mocks are set up
     const { assetSearchResults } = await import('./assets');
+
     // The mock replaces the real read-only state with a writable one
-    const allAssets = /** @type {any} */ ((await import('$lib/services/assets')).publishedAssets);
+    const allAssets = /** @type {any} */ (
+      (await import('$lib/services/assets/state')).publishedAssets
+    );
+
     const { searchTerms } = await import('$lib/services/search');
 
     allAssets.current = [
@@ -167,13 +181,7 @@ describe('assetSearchResults derived store', () => {
         sha: 'mock-sha',
         size: 1024,
         kind: 'image',
-        folder: {
-          collectionName: undefined,
-          internalPath: '/assets',
-          publicPath: '/assets',
-          entryRelative: false,
-          hasTemplateTags: false,
-        },
+        folder: createMockAssetFolder({ internalPath: '/assets', publicPath: '/assets' }),
       }),
     ];
     searchTerms.current = 'profile';

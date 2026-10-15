@@ -1,11 +1,11 @@
-import { sleep } from '@sveltia/utils/misc';
 import { beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { page } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
-import { processedAssets, uploadingAssets } from '$lib/services/assets';
 import { saveAssets } from '$lib/services/assets/data/create';
 import { globalAssetFolder } from '$lib/services/assets/folders';
+import { processedAssets } from '$lib/services/assets/process';
+import { uploadingAssets } from '$lib/services/assets/state';
 import { showAssetOverlay } from '$lib/services/assets/view';
 import { createMockAsset, initTestConfig, setAssets } from '$lib/test/config';
 import { waitForToastsToHide } from '$lib/test/toast';
@@ -175,9 +175,40 @@ describe('UploadAssetsConfirmDialog', () => {
       );
 
       await expect.element(options.getByRole('radio', { name: 'Replace' })).toBeChecked();
-      // A Sveltia UI radio group starts handling clicks 100 ms after it’s mounted
-      await sleep(150);
       await options.getByRole('radio', { name: 'Keep Both' }).click();
+      await expect.element(options.getByRole('radio', { name: 'Keep Both' })).toBeChecked();
+      await dialog.getByRole('button', { name: 'Upload' }).click();
+
+      await vi.waitFor(() =>
+        expect(saveAssets).toHaveBeenCalledWith(
+          { files: [image], folder, replaceDuplicates: false },
+          { commitType: 'uploadMedia' },
+        ),
+      );
+    } finally {
+      setAssets([]);
+    }
+  });
+
+  test('saves the files left after removing one, keeping the conflict resolution', async () => {
+    vi.mocked(saveAssets).mockResolvedValue(undefined);
+
+    const folder = globalAssetFolder.current;
+
+    setAssets([createMockAsset({ name: 'photo.png', asset: { folder } })]);
+
+    try {
+      await render(UploadAssetsConfirmDialog, {});
+
+      uploadingAssets.current = { folder, files: [image, doc] };
+
+      const dialog = page.getByRole('alertdialog');
+      const options = dialog.getByRole('radiogroup', { name: 'File Name Conflict Resolution' });
+
+      await expect.poll(() => dialog.getByRole('listitem').elements().length).toBe(2);
+      await options.getByRole('radio', { name: 'Keep Both' }).click();
+      await dialog.getByRole('listitem').nth(1).getByRole('button', { name: 'Remove' }).click();
+      await expect.poll(() => dialog.getByRole('listitem').elements().length).toBe(1);
       await expect.element(options.getByRole('radio', { name: 'Keep Both' })).toBeChecked();
       await dialog.getByRole('button', { name: 'Upload' }).click();
 
@@ -256,6 +287,65 @@ describe('UploadAssetsConfirmDialog', () => {
       .toBe('error Error Upload failed.');
     await expect.poll(() => uploadingAssets.current.files).toEqual([]);
     await waitForToastsToHide();
+  });
+
+  test('says nothing when the commit is cancelled', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    vi.mocked(saveAssets).mockRejectedValue(new Error('commit_cancelled'));
+
+    await render(UploadAssetsConfirmDialog, {});
+
+    uploadingAssets.current = { folder: globalAssetFolder.current, files: [image] };
+
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Upload' }).click();
+
+    await vi.waitFor(() => expect(saveAssets).toHaveBeenCalled());
+    await expect
+      .poll(() => document.querySelector('.sui.toast:not([aria-hidden="true"]) .sui.alert'))
+      .toBeNull();
+    expect(
+      document.querySelector('.sui.toast:not([aria-hidden="true"]) .sui.alert.error'),
+    ).toBeNull();
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  test('asks about files dropped while an upload is in flight, and keeps them', async () => {
+    const { promise, resolve } = Promise.withResolvers();
+    const folder = globalAssetFolder.current;
+
+    vi.mocked(saveAssets).mockReturnValueOnce(/** @type {any} */ (promise));
+    await render(UploadAssetsConfirmDialog, {});
+    uploadingAssets.current = { folder, files: [image] };
+
+    const dialog = page.getByRole('alertdialog', { name: 'Upload New Assets' });
+
+    await dialog.getByRole('button', { name: 'Upload' }).click();
+    await vi.waitFor(() => expect(saveAssets).toHaveBeenCalledOnce());
+    await expect.poll(() => dialog.elements().length).toBe(0);
+
+    // Another file is dropped while the first one is being committed
+    uploadingAssets.current = { folder, files: [doc] };
+    await expect.element(dialog).toBeVisible();
+    await expect.element(dialog.getByRole('listitem')).toMatchTextContent(/notes\.txt/);
+
+    // The first upload finishing leaves the new selection alone
+    resolve(undefined);
+    await promise;
+    // Let the upload’s `finally` block run
+    await new Promise((r) => {
+      setTimeout(r, 0);
+    });
+    expect(uploadingAssets.current.files).toEqual([doc]);
+    await expect.element(dialog).toBeVisible();
+
+    await dialog.getByRole('button', { name: 'Upload' }).click();
+    await vi.waitFor(() =>
+      expect(saveAssets).toHaveBeenLastCalledWith(
+        { files: [doc], folder, replaceDuplicates: true },
+        { commitType: 'uploadMedia' },
+      ),
+    );
   });
 
   test('closes along with the asset details overlay', async () => {

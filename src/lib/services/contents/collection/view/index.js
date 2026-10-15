@@ -2,20 +2,17 @@ import equal from 'fast-deep-equal';
 import { untrack } from 'svelte';
 
 import { backend } from '$lib/services/backends';
-import { getGroupingKey } from '$lib/services/common/view';
+import { lockedBranch } from '$lib/services/backends/branch-access';
+import { getConditionKey, getGroupingKey, getViewConditions } from '$lib/services/common/view';
+import { isReadonly } from '$lib/services/config/readonly';
 import { allEntries } from '$lib/services/contents';
 import { selectedCollection } from '$lib/services/contents/collection';
-import {
-  countCollectionEntries,
-  getEntriesByCollection,
-  selectedEntries,
-} from '$lib/services/contents/collection/entries';
+import { getEntriesByCollection, selectedEntries } from '$lib/services/contents/collection/entries';
+import { getBulkEditableFields } from '$lib/services/contents/collection/entries/bulk-edit/config';
+import { countQuotaEntries } from '$lib/services/contents/collection/entries/count';
+import { isManuallyOrdered } from '$lib/services/contents/collection/entries/reorder/config';
 import { getCollectionFilesByEntry } from '$lib/services/contents/collection/files';
-import {
-  filterNestedEntries,
-  isNestedCollection,
-  nestedFilterPath,
-} from '$lib/services/contents/collection/nested';
+import { filterNestedEntries, nestedFilterPath } from '$lib/services/contents/collection/nested';
 import { usesCurrentTime } from '$lib/services/contents/collection/view/conditions';
 import { filterEntries, parseFilterConfig } from '$lib/services/contents/collection/view/filter';
 import {
@@ -27,6 +24,7 @@ import {
   currentView,
   entryListSettings,
   initSettings,
+  viewBeforeReorder,
 } from '$lib/services/contents/collection/view/settings';
 import { sortEntries } from '$lib/services/contents/collection/view/sort';
 import { getSortConfig } from '$lib/services/contents/collection/view/sort-keys';
@@ -41,22 +39,36 @@ import { swapUnpublishedEntries, unpublishedEntries } from '$lib/services/workfl
 import { openAuthoring } from '$lib/services/workflow/open-authoring';
 
 /**
- * @import { Entry, EntryListView, InternalEntryCollection } from '$lib/types/private';
+ * @import {
+ * BulkEditErrors,
+ * BulkEdits,
+ * } from '$lib/services/contents/collection/entries/bulk-edit';
+ * @import {
+ * Entry,
+ * EntryListView,
+ * GroupingConditions,
+ * InternalEntryCollection,
+ * } from '$lib/types/private';
  */
 
 /**
  * @typedef {object} CollectionState
  * @property {boolean} isEntryCollection Whether the selected collection is an entry collection.
- * @property {boolean} canCreate Whether new entries can be created in the selected collection.
+ * @property {boolean} readonly Whether the selected collection is read-only, because of its own or
+ * the global `readonly` option. Nothing can be created, deleted or reordered in it then.
+ * @property {boolean} canCreate Whether new entries can be created in the selected collection. It’s
+ * `false` with the `create: false` option, and also with `limit: 0`, which forbids creating entries
+ * the same way rather than being a quota to reach.
  * @property {boolean} canDelete Whether entries can be deleted from the selected collection.
  * @property {boolean} canReorder Whether entries in the selected collection can be reordered.
+ * @property {boolean} canBulkEdit Whether entries in the selected collection can be edited in bulk.
  * @property {number} quota The maximum number of entries allowed in the selected collection.
  * @property {number} remaining The number of additional entries that can be added to the selected
  * collection before reaching the quota.
  * @property {boolean} nearingQuota Whether the number of remaining entries is at or below the
  * warning threshold.
- * @property {boolean} creationDisabled Whether creating new entries is currently disabled, either
- * due to permissions or because the quota has been reached.
+ * @property {boolean} creationDisabled Whether creating new entries is currently disabled, due to
+ * permissions, because the collection is read-only or because the quota has been reached.
  */
 
 /**
@@ -82,11 +94,41 @@ export const reorderedEntries = createRawState([]);
 export const reorderDirty = createRawState(false);
 
 /**
- * View snapshot taken when entering reorder mode, restored on exit so the user’s prior sort/filter/
- * grouping returns once they finish (or cancel) reordering. `undefined` while not in reorder mode.
- * @type {EntryListView | undefined}
+ * Whether the entry collection is in bulk edit mode, which shows the listed entries in a table
+ * where their simple fields can be edited at once. Use {@link setBulkEditMode} to change it, so the
+ * pending edits are reset at the same time.
  */
-let viewBeforeReorder;
+export const bulkEditing = createRawState(false);
+
+/**
+ * Pending edits made in bulk edit mode, keyed by entry ID, then by field name. Only the values that
+ * differ from the stored ones are kept, so the mode has unsaved changes if this isn’t empty.
+ * @type {{ current: BulkEdits }}
+ */
+export const bulkEdits = createRawState({});
+
+/**
+ * Whether the pending edits made in bulk edit mode are being saved. The cells are read-only then,
+ * as the mode is left once the commit is made, which would discard an edit made in the meantime.
+ */
+export const bulkEditSaving = createRawState(false);
+
+/**
+ * Entries shown in bulk edit mode, published by the bulk editor when it’s opened so the toolbar
+ * Save button can read them. The list is a snapshot, so a background refresh doesn’t pull the rows
+ * from under the user.
+ * @type {{ current: Entry[] }}
+ */
+export const bulkEditedEntries = createRawState([]);
+
+/**
+ * Validation messages of the pending edits made in bulk edit mode, keyed by entry ID, then by field
+ * name. Empty until the user tries to save invalid edits; it’s then kept up to date as the edits
+ * change, so a fixed field stops being reported.
+ * @type {{ current: BulkEditErrors }}
+ */
+export const bulkEditErrors = createRawState({});
+
 /**
  * How often {@link viewTime} is updated while a time-based view filter or group is applied. A
  * minute keeps the list close to the clock without recomputing it for nothing.
@@ -153,9 +195,9 @@ export const listedEntries = createDerivedState(() => {
 
   const entries = getEntriesByCollection(_collection.name);
 
-  // Don’t swap while reordering, because the reorder UI persists an order field on the published
-  // entries, and the draft version must not leak into that commit
-  if (reordering.current) {
+  // Don’t swap while reordering or bulk editing, because these modes rewrite the published entries,
+  // and the draft version must not leak into that commit
+  if (reordering.current || bulkEditing.current) {
     return filterNested(entries);
   }
 
@@ -181,7 +223,7 @@ export const listedEntries = createDerivedState(() => {
 export const listedUnpublishedEntries = createDerivedState(() => {
   const { current: _collection } = selectedCollection;
 
-  if (_collection?._type !== 'entry' || reordering.current) {
+  if (_collection?._type !== 'entry' || reordering.current || bulkEditing.current) {
     return [];
   }
 
@@ -241,45 +283,57 @@ const QUOTA_WARNING_THRESHOLD = 5;
  */
 export const collectionState = createDerivedState(() => {
   const { current: _selectedCollection } = selectedCollection;
+  const readonly = !!_selectedCollection && isReadonly({ collection: _selectedCollection });
 
   if (_selectedCollection?._type === 'entry') {
-    const canCreate = _selectedCollection.create ?? true;
-    const canDelete = _selectedCollection.delete ?? true;
+    // `limit: 0` means no entries can ever be created, so it’s treated like `create: false`
+    const canCreate = (_selectedCollection.create ?? true) && _selectedCollection.limit !== 0;
+    const canDelete = !readonly && (_selectedCollection.delete ?? true);
+
     // Reordering writes the new order straight to the configured branch rather than going through
-    // review, so it’s not something an Open Authoring contributor can do
-    const canReorder = !!_selectedCollection.reorder && !openAuthoring.current;
+    // review, even in a collection using Editorial Workflow, so it’s not something an Open
+    // Authoring contributor or a user who can’t push to the branch can do. An entry collection
+    // storing all the entries in one file can always be reordered
+    const canReorder =
+      !readonly &&
+      isManuallyOrdered(_selectedCollection) &&
+      !openAuthoring.current &&
+      !lockedBranch.current;
+
+    // Bulk editing writes straight to the configured branch as well, for the same reasons
+    const canBulkEdit =
+      !readonly &&
+      !!getBulkEditableFields(_selectedCollection).length &&
+      !openAuthoring.current &&
+      !lockedBranch.current;
+
     const quota = _selectedCollection?.limit ?? Infinity;
-
-    // In a nested collection, `listedEntries` only holds the folder being browsed, while the
-    // quota applies to the whole collection. Hugo’s special index file is the collection’s own
-    // page rather than one of the entries in it, so it doesn’t take up a slot — and leaving it in
-    // would make the quota disagree with the count shown next to the collection in the sidebar
-    const entryCount = countCollectionEntries(
-      _selectedCollection.name,
-      isNestedCollection(_selectedCollection)
-        ? getEntriesByCollection(_selectedCollection.name)
-        : listedEntries.current,
-    );
-
+    // The quota applies to the whole collection, including the entries that only exist in a pull
+    // request, so it agrees with the count shown next to the collection in the sidebar
+    const entryCount = countQuotaEntries(_selectedCollection.name);
     const remaining = quota < Infinity ? quota - entryCount : Infinity;
 
     return {
       isEntryCollection: true,
+      readonly,
       canCreate,
       canDelete,
       canReorder,
+      canBulkEdit,
       quota,
       remaining,
       nearingQuota: remaining > 0 && remaining <= QUOTA_WARNING_THRESHOLD,
-      creationDisabled: !canCreate || remaining <= 0,
+      creationDisabled: !canCreate || readonly || remaining <= 0,
     };
   }
 
   return {
     isEntryCollection: false,
+    readonly,
     canCreate: false,
     canDelete: false,
     canReorder: false,
+    canBulkEdit: false,
     quota: Infinity,
     remaining: Infinity,
     nearingQuota: false,
@@ -345,7 +399,9 @@ export const entryGroups = createDerivedState(() => {
 const restoreView = (collection, _allEntries) => {
   const { view_filters: viewFilters, view_groups: viewGroups } = collection;
   /** @type {EntryListView} */
-  const view = { ...(entryListSettings.current?.[collection.name] ?? { type: 'list' }) };
+  // The view type is only set once the user picks one; until then, the default applies. See
+  // `getEntryViewType()`
+  const view = { ...entryListSettings.current?.[collection.name] };
 
   const { default: defaultSort } = getSortConfig({
     collection,
@@ -353,8 +409,34 @@ const restoreView = (collection, _allEntries) => {
     isCommitDateAvailable: _allEntries.some((entry) => !!entry.commitDate),
   });
 
+  // The commit metadata may arrive after the entries, so a saved sort key depending on it is
+  // validated as if it were there, rather than dropped while it’s on its way
+  const { keys: sortKeys } = getSortConfig({
+    collection,
+    isCommitAuthorAvailable: true,
+    isCommitDateAvailable: true,
+  });
+
   const { default: defaultFilter } = parseFilterConfig(viewFilters);
-  const { default: defaultGroup } = parseGroupConfig(viewGroups);
+  const { options: groupOptions, default: defaultGroup } = parseGroupConfig(viewGroups);
+
+  // Drop a saved sort key or group that has been removed from the configuration since the view was
+  // saved, so the defaults apply instead. A stale group would otherwise stay applied while the menu
+  // no longer offers a way to undo it. Stale filters are ignored by `filterEntries()` instead
+  if (view.sort?.key !== undefined && !sortKeys.includes(view.sort.key)) {
+    delete view.sort;
+  }
+
+  if (
+    view.group &&
+    !groupOptions.some(
+      (option) =>
+        getConditionKey(getViewConditions(option)) ===
+        getConditionKey(/** @type {GroupingConditions} */ (view.group)),
+    )
+  ) {
+    delete view.group;
+  }
 
   if (view.sort === undefined && defaultSort) {
     view.sort = defaultSort;
@@ -386,9 +468,9 @@ export const setReorderMode = (value) => {
     reorderDirty.current = false;
 
     // Restore the snapshot taken when entering reorder mode, if any.
-    if (viewBeforeReorder) {
-      currentView.current = viewBeforeReorder;
-      viewBeforeReorder = undefined;
+    if (viewBeforeReorder.current) {
+      currentView.current = viewBeforeReorder.current.view;
+      viewBeforeReorder.current = undefined;
     }
 
     reordering.current = false;
@@ -410,8 +492,9 @@ export const setReorderMode = (value) => {
   const view = currentView.current;
   const reorderGroup = getReorderGroupingConditions(selectedCollection.current);
 
-  // Snapshot so we can restore on exit.
-  viewBeforeReorder = view;
+  // Snapshot so we can restore on exit. The view settings save it in place of the reorder view, so
+  // the user’s own view is kept even if reordering is never finished
+  viewBeforeReorder.current = { collectionName: selectedCollection.current?.name, view };
 
   /** @type {Partial<EntryListView>} */
   const overrides = {};
@@ -437,6 +520,20 @@ export const setReorderMode = (value) => {
   }
 
   reordering.current = true;
+};
+
+/**
+ * Enter or exit bulk edit mode. The pending edits are discarded either way: on entering, so the
+ * mode starts afresh, and on exiting, whether they have been saved or cancelled. Unlike reorder
+ * mode, the view is kept as it is, so the user can pick the entries to edit by filtering the list
+ * first.
+ * @param {boolean} value Whether to enter bulk edit mode.
+ */
+export const setBulkEditMode = (value) => {
+  bulkEdits.current = {};
+  bulkEditErrors.current = {};
+  bulkEditedEntries.current = [];
+  bulkEditing.current = value;
 };
 
 // Restore the view settings when a different entry collection is selected. The entries are also
@@ -478,9 +575,12 @@ createRootEffect(() => {
   }
 });
 
+// Clear the selection when the listed entries or the filters change, so it never includes an entry
+// the current view hides, which a bulk action like Delete would otherwise apply to
 createRootEffect(() => {
   const entries = listedEntries.current;
 
+  void filterConditions.current;
   selectedEntries.current = [];
 
   if (untrack(() => prefs.devModeEnabled)) {
@@ -492,15 +592,20 @@ createRootEffect(() => {
 createRootEffect(() => {
   const collection = selectedCollection.current;
 
-  // Reset the reorder state when switching collections, to avoid accidentally reordering entries in
-  // the wrong collection or leaving the UI in a broken state if the new collection doesn’t support
-  // reordering. Discard any view snapshot first so it isn’t restored against the wrong collection,
-  // which would otherwise corrupt the new collection’s persisted view via `entryListSettings`.
+  // Reset the reorder and bulk edit states when switching collections, to avoid accidentally saving
+  // entries in the wrong collection or leaving the UI in a broken state if the new collection
+  // doesn’t support the mode. Discard any view snapshot first so it isn’t restored against the
+  // wrong collection, which would otherwise corrupt the new collection’s persisted view via
+  // `entryListSettings`.
   untrack(() => {
-    viewBeforeReorder = undefined;
+    viewBeforeReorder.current = undefined;
 
     if (reordering.current) {
       setReorderMode(false);
+    }
+
+    if (bulkEditing.current) {
+      setBulkEditMode(false);
     }
   });
 

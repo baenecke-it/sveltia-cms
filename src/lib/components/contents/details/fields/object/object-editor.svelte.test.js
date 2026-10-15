@@ -4,7 +4,8 @@ import { page } from 'vitest/browser';
 import { globalAssetFolder } from '$lib/services/assets/folders';
 import { env } from '$lib/services/user/env.svelte';
 import { createMockAsset, createMockImageFile, initTestConfig, setAssets } from '$lib/test/config';
-import { createMockDraft, renderWithDraft } from '$lib/test/draft';
+import { createMockDraft } from '$lib/test/draft';
+import { renderFieldEditor } from '$lib/test/field.svelte';
 
 import ObjectEditor from './object-editor.svelte';
 
@@ -72,18 +73,11 @@ const renderEditor = async (
     values: i18n ? { en: { ...values }, fr: { ...values } } : { _default: values },
   });
 
-  const { container } = await renderWithDraft(ObjectEditor, {
+  const { container } = await renderFieldEditor(ObjectEditor, {
+    fieldConfig,
+    locale,
+    props: { required: fieldConfig.required ?? true, ...props },
     draft,
-    props: {
-      locale,
-      keyPath: fieldConfig.name,
-      typedKeyPath: fieldConfig.name,
-      fieldId: fieldConfig.name,
-      fieldLabel: fieldConfig.label ?? fieldConfig.name,
-      fieldConfig,
-      required: fieldConfig.required ?? true,
-      ...props,
-    },
     context,
   });
 
@@ -129,6 +123,27 @@ describe('ObjectEditor', () => {
     expect(page.getByRole('textbox').elements()).toHaveLength(2);
   });
 
+  test('is labelled by its summary only while one is shown', async () => {
+    await renderEditor(authorField, { 'author.name': 'Melvin' });
+
+    const group = page.getByRole('group').first();
+
+    await expect.element(group).not.toHaveAttribute('aria-labelledby');
+    await page.getByRole('button', { name: 'Collapse' }).click();
+    await expect.element(page.getByRole('group', { name: 'Melvin' })).toBeInTheDocument();
+  });
+
+  test('isn’t labelled by a summary that isn’t shown for a collapsed object', async () => {
+    const { container } = await renderEditor(
+      { ...authorField, collapsed: true },
+      { 'author.name': '', 'author.email': '' },
+    );
+
+    await expect.element(page.getByRole('button', { name: 'Expand' })).toBeInTheDocument();
+    expect(container.querySelector('.summary')).toBeNull();
+    expect(container.querySelector('.wrapper')).not.toHaveAttribute('aria-labelledby');
+  });
+
   test('starts collapsed when configured so', async () => {
     const { draft } = await renderEditor({ ...authorField, collapsed: true }, {});
 
@@ -167,6 +182,20 @@ describe('ObjectEditor', () => {
     await expect.element(page.getByRole('checkbox', { name: /Add\W+author/ })).toBeVisible();
   });
 
+  test('passes the typed key path on to the subfields', async () => {
+    const { container } = await renderEditor(
+      authorField,
+      { 'author.name': 'Melvin' },
+      { props: { typedKeyPath: 'posts.*.author' } },
+    );
+
+    // The typed key path locates a field-level media folder, so a list index must not end up in it
+    expect(container.querySelector('[data-key-path="author.name"]')).toHaveAttribute(
+      'data-typed-key-path',
+      'posts.*.author.name',
+    );
+  });
+
   test('picks a type for an object with variable types', async () => {
     const { draft } = await renderEditor(blockField, {});
 
@@ -185,6 +214,40 @@ describe('ObjectEditor', () => {
 
     await page.getByRole('button', { name: 'Remove' }).click();
     await expect.poll(() => getStoredValues(draft, 'block')).toEqual({});
+  });
+
+  test('keeps the focus in the field as a type is picked and removed', async () => {
+    await renderEditor(blockField, {});
+
+    await page.getByRole('button', { name: /Add\W+block/ }).click();
+    await page.getByRole('menuitem', { name: 'Hero' }).click();
+
+    // The Add button is gone, so the expander of the object takes the focus
+    await expect.element(page.getByRole('button', { name: 'Collapse' })).toHaveFocus();
+    // It stays there once the menu has closed
+    await expect.poll(() => document.querySelector('[role="menu"]')).toBeNull();
+    await expect.element(page.getByRole('button', { name: 'Collapse' })).toHaveFocus();
+
+    // The Remove button is gone along with the object, so the Add button takes the focus
+    await page.getByRole('button', { name: 'Remove' }).click();
+    await expect.element(page.getByRole('button', { name: /Add\W+block/ })).toHaveFocus();
+  });
+
+  test('picks a type without a header within a single-subfield list', async () => {
+    const { draft } = await renderEditor(
+      blockField,
+      {},
+      {
+        context: {
+          'field-editor': { fieldContext: 'single-subfield-list-field', parentComponentNames: [] },
+        },
+      },
+    );
+
+    await page.getByRole('button', { name: /Add\W+block/ }).click();
+    await page.getByRole('menuitem', { name: 'Hero' }).click();
+    await expect.poll(() => getStoredValues(draft, 'block')['block.type']).toBe('hero');
+    await expect.element(page.getByRole('textbox', { name: 'heading' })).toBeVisible();
   });
 
   test('summarizes a typed object with the type’s summary, or the field’s', async () => {
@@ -216,12 +279,8 @@ describe('ObjectEditor', () => {
     }
   });
 
-  test('can’t add an optional object in a locale whose values follow the default locale', async () => {
-    await renderEditor(
-      { ...authorField, required: false, i18n: 'duplicate' },
-      {},
-      { locale: 'fr' },
-    );
+  test('can’t add or remove an object when read-only', async () => {
+    await renderEditor({ ...authorField, required: false }, {}, { props: { readonly: true } });
 
     await expect.element(page.getByRole('checkbox', { name: /Add\W+Author/ })).toBeDisabled();
   });
@@ -298,17 +357,44 @@ describe('ObjectEditor', () => {
     expect(container.querySelector('.wrapper')).not.toBeNull();
   });
 
-  test('has nothing to edit in another locale when not localized', async () => {
+  test('is read-only in a locale where its parent duplicates the default locale values', async () => {
+    /** @type {ObjectField} */
+    const parentField = {
+      name: 'outer',
+      widget: 'object',
+      i18n: 'duplicate',
+      fields: [{ ...authorField, required: false }],
+    };
+
+    // The parent field is looked up in the site configuration
+    await initTestConfig({
+      i18n: { structure: 'multiple_folders', locales: ['en', 'fr'], default_locale: 'en' },
+      collections: [
+        {
+          name: 'posts',
+          label: 'Posts',
+          folder: 'content/posts',
+          i18n: true,
+          fields: [parentField],
+        },
+      ],
+    });
+
     const { container } = await renderEditor(
-      authorField,
-      { 'author.name': 'Melvin', 'author.email': '' },
-      { locale: 'fr' },
+      { ...authorField, required: false },
+      { 'outer.author.name': 'Melvin', 'outer.author.email': '' },
+      {
+        locale: 'fr',
+        props: { keyPath: 'outer.author', typedKeyPath: 'outer.author' },
+      },
     );
 
-    await new Promise((resolve) => {
-      setTimeout(resolve, 100);
-    });
-    expect(container.querySelector('.wrapper')).toBeNull();
+    // The values are shown, like those of a subfield with its own `duplicate` option
+    await expect.poll(() => container.querySelector('.wrapper')).not.toBeNull();
+    await expect.element(page.getByRole('textbox', { name: 'name' })).toHaveValue('Melvin');
+    await expect
+      .element(page.getByRole('textbox', { name: 'name' }))
+      .toHaveAttribute('aria-readonly', 'true');
   });
 
   test('hides the header within a single-subfield list', async () => {
@@ -334,7 +420,7 @@ describe('ObjectEditor', () => {
 
       await expect.element(page.getByRole('alert')).toBeVisible();
       expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining('The type key is not found in the object'),
+        expect.stringMatching(/^Object field block: The type key is not found in the object/),
       );
     } finally {
       warn.mockRestore();
@@ -359,6 +445,23 @@ describe('ObjectEditor', () => {
       await page.getByRole('button', { name: 'Collapse' }).click();
       await expect.element(page.getByRole('alert')).toBeVisible();
       expect(draft.expanderStates._['block#']).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('isn’t labelled by a summary while collapsed with an unknown type', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const { draft, container } = await renderEditor(
+        { ...blockField, collapsed: true },
+        { 'block.type': 'video' },
+      );
+
+      await expect.poll(() => draft.expanderStates._['block#']).toBe(false);
+      await expect.element(page.getByRole('alert')).toBeVisible();
+      expect(container.querySelector('.wrapper')).not.toHaveAttribute('aria-labelledby');
     } finally {
       warn.mockRestore();
     }

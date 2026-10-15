@@ -4,8 +4,9 @@
   is shown as is.
 -->
 <script>
-  import { sanitize } from 'isomorphic-dompurify';
   import { parse } from 'marked';
+
+  import { sanitizeRichTextHTML } from '$lib/services/contents/fields/rich-text/sanitize';
 
   /**
    * @typedef {object} Props
@@ -25,7 +26,8 @@
 {#if name.endsWith('.md')}
   {#await parse(text, { breaks: true, async: true }) then rawHTML}
     <div role="figure" class="markdown">
-      {@html sanitize(rawHTML)}
+      <!-- Unlike in the entry preview, a file from the repository can’t embed frames -->
+      {@html sanitizeRichTextHTML(rawHTML, { ADD_TAGS: [] })}
     </div>
   {:catch}
     <pre role="figure">{text}</pre>
@@ -35,6 +37,12 @@
 {/if}
 
 <style>
+  .markdown {
+    /* Make the preview the containing block of any positioned element in the content, so an element
+       with `position: fixed` from an inline style can’t cover the rest of the app */
+    translate: 0;
+  }
+
   pre,
   .markdown {
     display: block;

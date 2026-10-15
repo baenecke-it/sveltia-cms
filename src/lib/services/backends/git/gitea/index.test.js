@@ -29,14 +29,24 @@ vi.mock('$lib/services/backends/git/gitea/constants', () => ({
   DEFAULT_AUTH_ROOT: 'https://gitea.com',
 }));
 
+vi.mock('$lib/services/backends/git/gitea/deployment', () => ({
+  fetchBranchHeadSHA: vi.fn(),
+  fetchDeployments: vi.fn(),
+}));
+
 vi.mock('$lib/services/backends/git/gitea/files', () => ({
   fetchBlob: vi.fn(),
+  fetchDirSHA: vi.fn(),
   fetchFiles: vi.fn(),
 }));
 
 vi.mock('$lib/services/backends/git/gitea/repository', () => ({
   repository: {},
   getBaseURLs: vi.fn(() => ({ treeBaseURL: 'tree-url', blobBaseURL: 'blob-url' })),
+}));
+
+vi.mock('$lib/services/backends/git/gitea/workflow', () => ({
+  default: { fetchPullRequests: vi.fn() },
 }));
 
 vi.mock('$lib/services/backends/git/shared/api', () => ({
@@ -56,6 +66,7 @@ vi.mock('$lib/services/user/prefs.svelte', () => ({
 // Import after mocks
 const { init } = await import('.');
 const { getTokenPageURL } = await import('./auth.js');
+const { apiConfig } = await import('$lib/services/backends/git/shared/api');
 
 describe('Gitea Index Service', () => {
   beforeEach(() => {
@@ -117,6 +128,40 @@ describe('Gitea Index Service', () => {
           treeBaseURL: 'tree-url',
           blobBaseURL: 'blob-url',
         }),
+      );
+    });
+
+    test('should ask for the repository and user scopes by default', () => {
+      init();
+
+      expect(apiConfig.authScope).toBe('read:repository,write:repository,read:user');
+    });
+
+    test('should also ask for the issue scope with Editorial Workflow', () => {
+      cmsConfig.current = /** @type {any} */ ({
+        publish_mode: 'editorial_workflow',
+        backend: { name: 'gitea', repo: 'owner/repo-name', branch: 'main' },
+      });
+
+      init();
+
+      expect(apiConfig.authScope).toBe(
+        'read:repository,write:repository,read:issue,write:issue,read:user',
+      );
+    });
+
+    test('should ask for the issue scope when only a collection enables the feature', () => {
+      // A collection can turn Editorial Workflow on by itself, and the labels it writes need the
+      // scope just the same
+      cmsConfig.current = /** @type {any} */ ({
+        backend: { name: 'gitea', repo: 'owner/repo-name', branch: 'main' },
+        collections: [{ name: 'posts', folder: 'posts', publish_mode: 'editorial_workflow' }],
+      });
+
+      init();
+
+      expect(apiConfig.authScope).toBe(
+        'read:repository,write:repository,read:issue,write:issue,read:user',
       );
     });
 
@@ -271,6 +316,8 @@ describe('Gitea Index Service', () => {
       expect(typeof backend.fetchLastCommit).toBe('function');
       expect(typeof backend.fetchBlob).toBe('function');
       expect(typeof backend.commitChanges).toBe('function');
+      expect(typeof backend.fetchBranchHeadSHA).toBe('function');
+      expect(typeof backend.fetchDeployments).toBe('function');
     });
   });
 });

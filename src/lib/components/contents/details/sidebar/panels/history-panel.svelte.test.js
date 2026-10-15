@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { page } from 'vitest/browser';
 
 import { backend, backendName } from '$lib/services/backends';
+import { getCommitMessagePromptMode } from '$lib/services/backends/commit-prompt';
 import { fetchEntryHistory } from '$lib/services/contents/entry/history';
 import { openNewTab } from '$lib/services/utils/window';
 import { createMockEntry } from '$lib/test/config';
@@ -14,6 +15,11 @@ vi.mock('$lib/services/contents/entry/history', () => ({
   clearEntryHistoryCache: vi.fn(),
 }));
 vi.mock('$lib/services/utils/window', () => ({ openNewTab: vi.fn() }));
+
+vi.mock('$lib/services/backends/commit-prompt', async (importOriginal) => ({
+  .../** @type {object} */ (await importOriginal()),
+  getCommitMessagePromptMode: vi.fn(),
+}));
 
 const entry = createMockEntry({ slug: 'hello' });
 
@@ -30,6 +36,8 @@ const renderPanel = async () => {
 describe('HistoryPanel', () => {
   beforeEach(() => {
     backendName.current = undefined;
+    // The commit messages are only shown with the `prompt_commit_messages` option
+    vi.mocked(getCommitMessagePromptMode).mockReturnValue('prefix');
   });
 
   test('lists the commits', async () => {
@@ -48,26 +56,68 @@ describe('HistoryPanel', () => {
       commits: [
         {
           sha: 'abc',
+          message: 'Update “Hello”',
           authorName: 'Melvin',
           authorAvatarURL: 'data:,',
           date: new Date('2024-01-15T10:00:00Z'),
         },
-        { sha: 'def', authorName: 'Elsie', date: new Date('2024-01-14T10:00:00Z') },
+        // A backend that returns no message
+        { sha: 'def', message: '', authorName: 'Elsie', date: new Date('2024-01-14T10:00:00Z') },
       ],
       error: false,
     });
 
-    const links = panel.getByRole('list').getByRole('link');
+    const links = panel.getByRole('list').getByRole('listitem').getByRole('link');
 
     await expect.poll(() => links.elements().length).toBe(2);
     expect(links.elements().map((el) => el.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
-      'Melvin Jan 15, 2024, 10:00 AM',
+      'Update “Hello” Melvin Jan 15, 2024, 10:00 AM',
       'Elsie Jan 14, 2024, 10:00 AM',
     ]);
+
+    // The message headline comes first, with the full text in a tooltip
+    const message = links.nth(0).element().querySelector('.message');
+
+    expect(message).toHaveTextContent('Update “Hello”');
+    expect(message).toHaveAttribute('title', 'Update “Hello”');
+    expect(message?.querySelector('bdi')).not.toBeNull();
+    expect(message?.nextElementSibling).toHaveClass('meta', 'secondary');
+    expect(message?.nextElementSibling).toHaveTextContent('Melvin Jan 15, 2024, 10:00 AM');
+    // Without a message, the author and the date are shown as before
+    expect(links.nth(1).element().querySelector('.message')).toBeNull();
+    expect(links.nth(1).element().querySelector('.meta')).not.toHaveClass('secondary');
     expect(links.nth(0).element().querySelector('img')).toHaveAttribute('src', 'data:,');
     expect(links.nth(1).element().querySelector('.placeholder')).not.toBeNull();
     // The test backend has no repository to link to
     await expect.element(links.nth(0)).toBeDisabled();
+  });
+
+  test('hides the commit messages without the commit message prompt', async () => {
+    vi.mocked(getCommitMessagePromptMode).mockReturnValue(undefined);
+
+    vi.mocked(fetchEntryHistory).mockResolvedValue({
+      commits: [
+        {
+          sha: 'abc',
+          message: 'Update “Hello”',
+          authorName: 'Melvin',
+          date: new Date('2024-01-15T10:00:00Z'),
+        },
+      ],
+      loading: false,
+      error: false,
+    });
+
+    await renderPanel();
+
+    const link = page.getByRole('link');
+
+    await expect.element(link).toBeInTheDocument();
+    expect(link.element().textContent?.replace(/\s+/g, ' ').trim()).toBe(
+      'Melvin Jan 15, 2024, 10:00 AM',
+    );
+    expect(link.element().querySelector('.message')).toBeNull();
+    expect(link.element().querySelector('.meta')).not.toHaveClass('secondary');
   });
 
   test('links to the commits on the repository', async () => {
@@ -80,7 +130,7 @@ describe('HistoryPanel', () => {
     repository.commitBaseURL = 'https://github.com/me/site/commit';
 
     vi.mocked(fetchEntryHistory).mockResolvedValue({
-      commits: [{ sha: 'abc', authorName: 'Melvin', date: new Date() }],
+      commits: [{ sha: 'abc', message: 'Add a post', authorName: 'Melvin', date: new Date() }],
       loading: false,
       error: false,
     });

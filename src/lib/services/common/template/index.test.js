@@ -5,7 +5,7 @@ import { DEFAULT_I18N_CONFIG } from '$lib/services/contents/i18n/config';
 
 import { processNestedTemplates } from './nested';
 
-import { fillTemplate, hasTemplateTags } from '.';
+import { fillTemplate } from '.';
 
 /**
  * @import { InternalEntryCollection, InternalFileCollection } from '$lib/types/private';
@@ -16,7 +16,7 @@ vi.mock('$lib/services/config/deprecations', () => ({
   warnDeprecation: vi.fn(),
 }));
 vi.mock('$lib/services/contents/collection/entries', () => ({
-  getEntriesByCollection: vi.fn(() => []),
+  getEntriesInCollectionFolder: vi.fn(() => []),
 }));
 vi.mock('$lib/services/contents/entry/fields', () => ({
   LIST_KEY_PATH_REGEX: /\.\d+$/,
@@ -25,7 +25,11 @@ vi.mock('$lib/services/contents/entry/fields', () => ({
 vi.mock('$lib/services/contents/entry/summary', () => ({
   getEntrySummaryFromContent: vi.fn(() => 'summary'),
 }));
-vi.mock('$lib/services/utils/file', () => ({
+vi.mock('$lib/services/workflow', () => ({
+  getUnpublishedEntriesByCollection: vi.fn(() => []),
+}));
+vi.mock('$lib/services/utils/file', async (importOriginal) => ({
+  ...(await importOriginal()),
   renameIfNeeded: vi.fn((slug) => slug),
   sanitizePath: vi.fn((path) =>
     path
@@ -180,6 +184,24 @@ describe('fillTemplate()', async () => {
     expect(fillTemplate('{{name}}', { collection, content: {} })).toMatch(/[0-9a-f]{12}/);
   });
 
+  test('look up the field config of a `fields.`-prefixed tag for a filter', async () => {
+    await setupCmsConfig();
+
+    const { getField } = await import('$lib/services/contents/entry/fields');
+
+    vi.mocked(getField).mockClear();
+
+    expect(
+      fillTemplate("{{fields.published | date('YYYY-MM-DD')}}", {
+        collection,
+        content: { published: '2024-01-23' },
+      }),
+    ).toEqual('2024-01-23');
+
+    // The prefix must be stripped, or the field’s options such as `picker_utc` would be lost
+    expect(getField).toHaveBeenCalledWith(expect.objectContaining({ keyPath: 'published' }));
+  });
+
   test('apply filter', async () => {
     await setupCmsConfig();
 
@@ -254,7 +276,7 @@ describe('fillTemplate()', async () => {
     const template = "{{uuid_shorter}}_{{title}}_{{name | default('{{a}}-{{b}}')}}";
     const first = fillTemplate(template, options);
 
-    expect(first).toMatch(/^[0-9a-f]{8}_[0-9a-f]{12}_[0-9a-f]{12}-[0-9a-f]{12}$/);
+    expect(first).toMatch(/^[0-9a-f]{8}_[0-9a-f]{12}_[0-9a-f]{12}$/);
     expect(fillTemplate(template, options)).toBe(first);
     expect([...randomValues.keys()]).toEqual([
       'en:uuid_shorter',
@@ -436,7 +458,7 @@ describe('fillTemplate()', async () => {
       { entryFilePath: 'article.md', expected: 'md' },
       { entryFilePath: 'article.html.erb', expected: 'erb' },
       { entryFilePath: 'article.backup.json', expected: 'json' },
-      { entryFilePath: 'article', expected: 'article' },
+      { entryFilePath: 'article', expected: '' },
       { entryFilePath: 'path/to/article.txt', expected: 'txt' },
     ];
 
@@ -457,8 +479,8 @@ describe('fillTemplate()', async () => {
 
     const testCases = [
       { entryFilePath: 'article.md', expected: 'article' },
-      { entryFilePath: 'article.html.erb', expected: 'article' },
-      { entryFilePath: 'my-long-filename.backup.json', expected: 'my-long-filename' },
+      { entryFilePath: 'article.html.erb', expected: 'article.html' },
+      { entryFilePath: 'my-long-filename.backup.json', expected: 'my-long-filename.backup' },
       { entryFilePath: 'path/to/article.txt', expected: 'article' },
       { entryFilePath: 'path/to/no-extension', expected: 'no-extension' },
     ];
@@ -473,6 +495,28 @@ describe('fillTemplate()', async () => {
 
       expect(result).toEqual(expected);
     });
+  });
+
+  test('filename extraction with the `multiple_files` i18n structure', async () => {
+    await setupCmsConfig();
+
+    const multiFileCollection = {
+      ...collection,
+      _i18n: {
+        ...DEFAULT_I18N_CONFIG,
+        allLocales: ['en', 'fr'],
+        structureMap: { ...DEFAULT_I18N_CONFIG.structureMap, i18nMultiFile: true },
+      },
+    };
+
+    const result = fillTemplate('{{filename}}.{{extension}}', {
+      collection: multiFileCollection,
+      content: {},
+      type: 'preview_path',
+      entryFilePath: 'content/posts/my.post.fr.md',
+    });
+
+    expect(result).toEqual('my.post.md');
   });
 
   test('custom identifier field', async () => {
@@ -622,6 +666,100 @@ describe('fillTemplate()', async () => {
 
     expect(result.length).toBeLessThanOrEqual(30);
     expect(result).not.toMatch(/-$/);
+  });
+
+  test('remove a custom sanitize replacement left at the end by truncation', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        backend: { name: 'github' },
+        media_folder: 'static/images/uploads',
+        collections: [collection],
+        _siteURL: '',
+        _baseURL: '',
+        slug: {
+          encoding: 'unicode',
+          clean_accents: false,
+          sanitize_replacement: '_',
+          maxlength: 6,
+        },
+      },
+    };
+
+    expect(
+      fillTemplate('{{title}}', {
+        collection: { ...collection, slug_length: undefined },
+        content: { title: 'Hello World' },
+      }),
+    ).toBe('hello');
+  });
+
+  test('remove a trailing hyphen after truncation without the slug options', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = {
+      current: { backend: { name: 'github' }, collections: [collection] },
+    };
+
+    expect(
+      fillTemplate('{{title}}', {
+        collection: { ...collection, slug_length: 6 },
+        content: { title: 'Hello World' },
+      }),
+    ).toBe('hello');
+  });
+
+  test('keep the end of a truncated slug with an empty sanitize replacement', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        backend: { name: 'github' },
+        collections: [collection],
+        slug: { sanitize_replacement: '', maxlength: 6 },
+      },
+    };
+
+    expect(
+      fillTemplate('{{title}}-{{title}}', {
+        collection: { ...collection, slug_length: undefined },
+        content: { title: 'Hello' },
+      }),
+    ).toBe('hello-');
+  });
+
+  test('keep the replacement at the end of a slug that is not truncated', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        backend: { name: 'github' },
+        collections: [collection],
+        slug: { trim: false, maxlength: 50 },
+      },
+    };
+
+    expect(
+      fillTemplate('{{title}}', {
+        collection: { ...collection, slug_length: undefined },
+        content: { title: '--Hello World--' },
+      }),
+    ).toBe('-hello-world-');
+  });
+
+  test('keep the replacement left at the end by truncation with `trim: false`', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        backend: { name: 'github' },
+        collections: [collection],
+        slug: { trim: false, maxlength: 6 },
+      },
+    };
+
+    expect(
+      fillTemplate('{{title}}', {
+        collection: { ...collection, slug_length: undefined },
+        content: { title: 'Hello World' },
+      }),
+    ).toBe('hello-');
   });
 
   test('legacy slug_length overrides config maxlength option', async () => {
@@ -802,7 +940,7 @@ describe('fillTemplate()', async () => {
       content: content2,
     });
 
-    expect(result2).toMatch(/^[0-9a-f]{12}-[0-9a-f]{12}$/);
+    expect(result2).toEqual('backup-slug-tech');
   });
 
   test('date parts without explicit dateTimeParts', async () => {
@@ -1036,9 +1174,10 @@ describe('fillTemplate()', async () => {
   test('getExistingSlugs filters and maps slugs correctly', async () => {
     await setupCmsConfig();
 
-    const { getEntriesByCollection } = await import('$lib/services/contents/collection/entries');
+    const { getEntriesInCollectionFolder } =
+      await import('$lib/services/contents/collection/entries');
 
-    vi.mocked(getEntriesByCollection).mockReturnValueOnce([
+    vi.mocked(getEntriesInCollectionFolder).mockReturnValueOnce([
       // @ts-ignore
       { slug: 'existing-1', locales: { en: { slug: 'existing-en-1' } } },
       // @ts-ignore
@@ -1058,13 +1197,46 @@ describe('fillTemplate()', async () => {
     fillTemplate('{{title}}', { collection, content: { title: 'New Post' } });
   });
 
+  test('getExistingSlugs includes the entries still in a pull request', async () => {
+    await setupCmsConfig();
+
+    const { getEntriesInCollectionFolder } =
+      await import('$lib/services/contents/collection/entries');
+
+    const { getUnpublishedEntriesByCollection } = await import('$lib/services/workflow');
+    const { renameIfNeeded } = await import('$lib/services/utils/file');
+
+    vi.mocked(getEntriesInCollectionFolder).mockReturnValueOnce([
+      // @ts-ignore
+      { slug: 'published', locales: { en: { slug: 'published' } } },
+    ]);
+    // A new entry saved with Editorial Workflow is only in the pull request so far: a second one
+    // with the same title would otherwise take its slug, and with it its file and branch
+    vi.mocked(getUnpublishedEntriesByCollection).mockReturnValueOnce([
+      // @ts-ignore
+      { slug: 'new-post', locales: { en: { slug: 'new-post' } } },
+    ]);
+    vi.mocked(renameIfNeeded).mockImplementationOnce((slug, existingSlugs) => {
+      expect(existingSlugs).toEqual(['published', 'new-post']);
+
+      return `${slug}-1`;
+    });
+
+    expect(fillTemplate('{{title}}', { collection, content: { title: 'New Post' } })).toBe(
+      'new-post-1',
+    );
+    expect(getUnpublishedEntriesByCollection).toHaveBeenCalledWith(collection.name);
+  });
+
   test('getExistingSlugs with locale returns locale-specific slugs', async () => {
     await setupCmsConfig();
 
-    const { getEntriesByCollection } = await import('$lib/services/contents/collection/entries');
+    const { getEntriesInCollectionFolder } =
+      await import('$lib/services/contents/collection/entries');
+
     const { renameIfNeeded } = await import('$lib/services/utils/file');
 
-    vi.mocked(getEntriesByCollection).mockReturnValueOnce([
+    vi.mocked(getEntriesInCollectionFolder).mockReturnValueOnce([
       // @ts-ignore
       { slug: 'entry-1', locales: { en: { slug: 'entry-1-en' }, ja: { slug: 'entry-1-ja' } } },
       // @ts-ignore
@@ -1090,7 +1262,7 @@ describe('fillTemplate()', async () => {
     });
 
     vi.mocked(renameIfNeeded).mockClear();
-    vi.mocked(getEntriesByCollection).mockReturnValueOnce([
+    vi.mocked(getEntriesInCollectionFolder).mockReturnValueOnce([
       // @ts-ignore
       { slug: 'entry-1', locales: { en: { slug: 'entry-1-en' }, ja: { slug: 'entry-1-ja' } } },
       // @ts-ignore
@@ -1110,6 +1282,45 @@ describe('fillTemplate()', async () => {
       content: { title: 'New Post' },
       locale: 'ja',
     });
+  });
+
+  test('getExistingSlugs only counts the file names in the folder chosen with the path editor', async () => {
+    await setupCmsConfig();
+
+    const { getEntriesInCollectionFolder } =
+      await import('$lib/services/contents/collection/entries');
+
+    const { renameIfNeeded } = await import('$lib/services/utils/file');
+
+    /** @type {any[]} */
+    const entries = [
+      { slug: 'docs/intro', locales: {} },
+      { slug: 'intro', locales: {} },
+      { slug: 'docs/guides/intro', locales: {} },
+    ];
+
+    vi.mocked(getEntriesInCollectionFolder).mockReturnValue(entries);
+    vi.mocked(renameIfNeeded).mockImplementation((slug, existingSlugs) =>
+      existingSlugs.includes(slug) ? `${slug}-1` : slug,
+    );
+
+    // The slug of a nested entry is its sub path, so the new slug is compared with the file names
+    // in the folder it goes to
+    expect(
+      fillTemplate('{{title}}', { collection, content: { title: 'Intro' }, dirPath: 'docs' }),
+    ).toBe('intro-1');
+    expect(renameIfNeeded).toHaveBeenLastCalledWith('intro', ['intro']);
+    expect(
+      fillTemplate('{{title}}', { collection, content: { title: 'Intro' }, dirPath: '' }),
+    ).toBe('intro-1');
+    expect(renameIfNeeded).toHaveBeenLastCalledWith('intro', ['intro']);
+    expect(
+      fillTemplate('{{title}}', { collection, content: { title: 'Intro' }, dirPath: 'blog' }),
+    ).toBe('intro');
+    expect(renameIfNeeded).toHaveBeenLastCalledWith('intro', []);
+
+    vi.mocked(getEntriesInCollectionFolder).mockReturnValue([]);
+    vi.mocked(renameIfNeeded).mockImplementation((slug) => slug);
   });
 
   test('processTransformations with nested template tag generates correct default value', async () => {
@@ -1384,162 +1595,12 @@ describe('fillTemplate()', async () => {
   });
 });
 
-describe('hasTemplateTags()', () => {
-  test('should return true for simple template tag', () => {
-    expect(hasTemplateTags('{{title}}')).toBe(true);
-    expect(hasTemplateTags('{{slug}}')).toBe(true);
-    expect(hasTemplateTags('{{year}}')).toBe(true);
-  });
-
-  test('should return true for template tag with content prefix', () => {
-    expect(hasTemplateTags('prefix-{{title}}')).toBe(true);
-    expect(hasTemplateTags('blog-{{slug}}')).toBe(true);
-    expect(hasTemplateTags('Hello {{name}}')).toBe(true);
-  });
-
-  test('should return true for template tag with content suffix', () => {
-    expect(hasTemplateTags('{{title}}-suffix')).toBe(true);
-    expect(hasTemplateTags('{{slug}}/index')).toBe(true);
-    expect(hasTemplateTags('{{year}}-post')).toBe(true);
-  });
-
-  test('should return true for multiple template tags', () => {
-    expect(hasTemplateTags('{{year}}-{{month}}-{{day}}')).toBe(true);
-    expect(hasTemplateTags('{{category}}/{{slug}}')).toBe(true);
-    expect(hasTemplateTags('{{fields.title}}-{{uuid}}')).toBe(true);
-  });
-
-  test('should return true for template tag with nested content', () => {
-    expect(hasTemplateTags('{{fields.title}}')).toBe(true);
-    expect(hasTemplateTags('{{fields.author | default("fallback")}}')).toBe(true);
-    expect(hasTemplateTags("{{title | date('YYYY-MM-DD')}}")).toBe(true);
-  });
-
-  test('should return false for string without template tags', () => {
-    expect(hasTemplateTags('just a plain string')).toBe(false);
-    expect(hasTemplateTags('no-templates-here')).toBe(false);
-    expect(hasTemplateTags('Hello World')).toBe(false);
-  });
-
-  test('should return false for empty string', () => {
-    expect(hasTemplateTags('')).toBe(false);
-  });
-
-  test('should return false for whitespace only', () => {
-    expect(hasTemplateTags('   ')).toBe(false);
-    expect(hasTemplateTags('\t')).toBe(false);
-    expect(hasTemplateTags('\n')).toBe(false);
-  });
-
-  test('should return false for incomplete template tags', () => {
-    expect(hasTemplateTags('{{title')).toBe(false);
-    expect(hasTemplateTags('title}}')).toBe(false);
-    expect(hasTemplateTags('{title}')).toBe(false);
-  });
-
-  test('should return false for empty braces', () => {
-    expect(hasTemplateTags('{{}}')).toBe(false);
-    expect(hasTemplateTags('prefix-{{}}')).toBe(false);
-  });
-
-  test('should handle the negative lookahead case correctly', () => {
-    expect(hasTemplateTags("{{fields.slug | default('{{fields.title}}')}}")).toBe(true);
-    expect(hasTemplateTags("test')")).toBe(false);
-  });
-
-  test('should handle special characters in template tags', () => {
-    expect(hasTemplateTags('{{slug-with-dash}}')).toBe(true);
-    expect(hasTemplateTags('{{slug_with_underscore}}')).toBe(true);
-    expect(hasTemplateTags('{{slug.with.dots}}')).toBe(true);
-  });
-
-  test('should handle spaces inside template tags', () => {
-    expect(hasTemplateTags('{{ title }}')).toBe(true);
-    expect(hasTemplateTags('{{  slug  }}')).toBe(true);
-    expect(hasTemplateTags('{{ fields.author }}')).toBe(true);
-  });
-
-  test('should return true for paths with template tags', () => {
-    expect(hasTemplateTags('content/{{year}}/{{month}}/post.md')).toBe(true);
-    expect(hasTemplateTags('{{dirname}}/{{filename}}.{{extension}}')).toBe(true);
-  });
-
-  test('should return true for template tags with transformations', () => {
-    expect(hasTemplateTags('{{title | upper}}')).toBe(true);
-    expect(hasTemplateTags("{{published | date('MMM D, YYYY')}}")).toBe(true);
-    expect(hasTemplateTags('{{name | truncate(20)}}')).toBe(true);
-    expect(hasTemplateTags("{{author | default('Unknown')}}")).toBe(true);
-  });
-
-  test('should return false for single braces', () => {
-    expect(hasTemplateTags('{title}')).toBe(false);
-    expect(hasTemplateTags('{slug}')).toBe(false);
-  });
-
-  test('should return false for mismatched braces', () => {
-    expect(hasTemplateTags('{{title}')).toBe(false);
-    expect(hasTemplateTags('{slug}}')).toBe(false);
-  });
-
-  test('should handle mixed content with and without tags', () => {
-    expect(hasTemplateTags('static-{{dynamic}}-static')).toBe(true);
-    expect(hasTemplateTags('2024-{{month}}-{{day}}')).toBe(true);
-  });
-
-  test('should return true for UUID tags', () => {
-    expect(hasTemplateTags('{{uuid}}')).toBe(true);
-    expect(hasTemplateTags('{{uuid_short}}')).toBe(true);
-    expect(hasTemplateTags('{{uuid_shorter}}')).toBe(true);
-  });
-
-  test('should return true for datetime tags', () => {
-    expect(hasTemplateTags('{{year}}')).toBe(true);
-    expect(hasTemplateTags('{{month}}')).toBe(true);
-    expect(hasTemplateTags('{{day}}')).toBe(true);
-    expect(hasTemplateTags('{{hour}}')).toBe(true);
-    expect(hasTemplateTags('{{minute}}')).toBe(true);
-    expect(hasTemplateTags('{{second}}')).toBe(true);
-  });
-
-  test('should return true for file path tags', () => {
-    expect(hasTemplateTags('{{dirname}}')).toBe(true);
-    expect(hasTemplateTags('{{filename}}')).toBe(true);
-    expect(hasTemplateTags('{{extension}}')).toBe(true);
-  });
-
-  test('should return true for locale tag', () => {
-    expect(hasTemplateTags('{{locale}}')).toBe(true);
-  });
-
-  test('should return false for literal brace patterns', () => {
-    expect(hasTemplateTags('{{{')).toBe(false);
-    expect(hasTemplateTags('}}}')).toBe(false);
-    expect(hasTemplateTags('{{}}')).toBe(false);
-  });
-
-  test('should handle very long template tags', () => {
-    const longTag = `{{${'a'.repeat(1000)}}}`;
-
-    expect(hasTemplateTags(longTag)).toBe(true);
-  });
-
-  test('should handle regex special characters in surrounding text', () => {
-    expect(hasTemplateTags('file.name-{{slug}}.txt')).toBe(true);
-    expect(hasTemplateTags('path/to/{{title}}/index')).toBe(true);
-    expect(hasTemplateTags('[{{slug}}]')).toBe(true);
-  });
-
-  test('should work with newlines and special whitespace', () => {
-    expect(hasTemplateTags('line1\n{{title}}\nline2')).toBe(true);
-    expect(hasTemplateTags('tab\t{{slug}}\ttab')).toBe(true);
-  });
-});
-
 describe('fillTemplate() for a nested collection', () => {
   /** @type {any} */
   const collection = {
     name: 'pages',
     folder: 'content/pages',
+    fields: [],
     _type: 'entry',
     _file: { basePath: 'content/pages' },
     nested: { depth: 100 },

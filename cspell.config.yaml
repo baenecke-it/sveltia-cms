@@ -23,9 +23,12 @@ ignorePaths:
   - data/**/*.json
   - package/**
   - src/**/*.test.js
+  - e2e/**/*.e2e.js
+  - e2e/fixtures/configs/**
   - src/lib/locales/*.yaml
-  - '!src/lib/locales/en-*.yaml'
   - .claude/**
+  # Non-English locales; negative globs are not supported, so match everything but `en-*.yaml`
+  - src/lib/locales/{[^e]*,e[^n]*}.yaml
 words:
   - analyzing
   - appinstalled
@@ -34,6 +37,7 @@ words:
   - Backblaze
   - backlink
   - backlinks
+  - basehead
   - beforeinstallprompt
   - bindable
   - BMFF
@@ -54,13 +58,16 @@ words:
   - deepmerge
   - DeepSeek
   - dialogs
+  - DIRC
   - dompurify
   - embeddable
   - esbuild
   - esrap
   - exif
   - exifr
+  - fanout
   - FedRAMP
+  - filechooser
   - Flavored
   - Forgejo
   - frontmatter
@@ -69,6 +76,7 @@ words:
   - Ghsas
   - gitdir
   - Gitea
+  - gitlink
   - goldmark
   - groupable
   - heim
@@ -84,6 +92,7 @@ words:
   - iarna
   - iccs
   - IIFE
+  - iids
   - indexeddb
   - infobar
   - infobars
@@ -96,6 +105,7 @@ words:
   - kyoshino
   - libheif
   - llms
+  - longtask
   - Lume
   - lvml
   - maxresults
@@ -105,6 +115,8 @@ words:
   - Mtei
   - Mullvad
   - notranslate
+  - objectformat
+  - oids
   - onclickcapture
   - ondragovercapture
   - ondropcapture
@@ -135,13 +147,20 @@ words:
   - Ragdoll
   - rearchitect
   - rebranded
+  - recentupdate
+  - reflog
+  - reflogs
+  - refstorage
+  - reftable
   - reimagined
+  - reparsed
   - rescanning
   - restype
   - Roadmap
   - safesearch
   - sandboxing
   - Scaleway
+  - sdir
   - sebousan
   - Shiki
   - shikijs
@@ -172,6 +191,7 @@ words:
   - unproxify
   - unreviewed
   - unrs
+  - unsets
   - unsubscribers
   - Uploadcare
   - videoseries

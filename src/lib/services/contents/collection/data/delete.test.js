@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { deleteEntries, updateStores } from './delete';
 
 // Mock dependencies
-vi.mock('$lib/services/assets', () => ({
+vi.mock('$lib/services/assets/state', () => ({
   allAssets: { current: [] },
 }));
 
@@ -37,7 +37,12 @@ vi.mock('@sveltia/utils/storage', () => ({
   IndexedDB: vi.fn(),
 }));
 
-vi.mock('$lib/services/contents/draft/save/changes', () => ({
+vi.mock('$lib/services/contents/draft/save/changes', async (importOriginal) => ({
+  getArrayItemTarget: /** @type {any} */ (await importOriginal()).getArrayItemTarget,
+}));
+
+vi.mock('$lib/services/contents/draft/save/file-changes', async (importOriginal) => ({
+  .../** @type {any} */ (await importOriginal()),
   getPreviousSha: vi.fn().mockResolvedValue('mock-sha-123'),
 }));
 
@@ -49,10 +54,33 @@ vi.mock('$lib/services/contents/collection/entries', () => ({
   getEntriesByCollection: vi.fn(() => []),
 }));
 
-vi.mock('$lib/services/contents/entry/relations/cascade/delete', () => ({
-  planCascadeDelete: vi.fn(() => ({ targets: [], blockers: [] })),
-  buildCascadeDeleteChanges: vi.fn().mockResolvedValue({ changes: [], savingEntries: [] }),
-}));
+vi.mock('$lib/services/contents/entry/relations/cascade/delete', () => {
+  /** @type {import('vitest').Mock<(args: any) => any>} */
+  const planMock = vi.fn(() => ({ targets: [], blockers: [] }));
+
+  /**
+   * Mirror the real wrapper so that the tests can drive it through `planCascadeDelete()`.
+   * @param {any} args Arguments.
+   * @param {string} message Error message.
+   * @returns {any[]} Targets.
+   * @throws {Error} When the plan has blockers.
+   */
+  const planCascadeDeleteOrThrow = (args, message) => {
+    const { targets, blockers } = planMock(args);
+
+    if (blockers.length) {
+      throw new Error(message, { cause: blockers });
+    }
+
+    return targets;
+  };
+
+  return {
+    planCascadeDelete: planMock,
+    planCascadeDeleteOrThrow,
+    buildCascadeDeleteChanges: vi.fn().mockResolvedValue({ changes: [], savingEntries: [] }),
+  };
+});
 
 const { planCascadeDelete, buildCascadeDeleteChanges } =
   await import('$lib/services/contents/entry/relations/cascade/delete');
@@ -96,7 +124,7 @@ describe('Test updateStores()', () => {
   });
 
   test('removes assets from allAssets store when asset paths provided', async () => {
-    const { allAssets } = await import('$lib/services/assets');
+    const { allAssets } = await import('$lib/services/assets/state');
 
     const mockAssets = [
       { path: '/images/image1.jpg', name: 'image1.jpg' },
@@ -115,7 +143,7 @@ describe('Test updateStores()', () => {
 
   test('handles empty arrays gracefully', async () => {
     const { allEntries } = await import('$lib/services/contents');
-    const { allAssets } = await import('$lib/services/assets');
+    const { allAssets } = await import('$lib/services/assets/state');
     const { contentUpdatesToast } = await import('$lib/services/contents/collection/data');
     const initialEntries = [{ id: '1', slug: 'post-1' }];
     const initialAssets = [{ path: '/image.jpg' }];
@@ -196,6 +224,27 @@ describe('Test deleteEntries()', () => {
         collection: { name: 'posts' },
       },
     });
+  });
+
+  test('targets the item of an entry stored in an array file', async () => {
+    const { saveChanges } = await import('$lib/services/backends/save');
+    const { selectedCollection } = await import('$lib/services/contents/collection');
+    const locales = { _default: { path: 'data/members.json', content: { name: 'Jane' } } };
+    const mockEntries = [{ id: '1', slug: 'jane', arrayIndex: 3, locales }];
+
+    selectedCollection.current = /** @type {any} */ ({ name: 'members' });
+
+    await deleteEntries(/** @type {any} */ (mockEntries));
+
+    expect(vi.mocked(saveChanges).mock.calls[0][0].changes).toEqual([
+      {
+        action: 'delete',
+        slug: 'jane',
+        path: 'data/members.json',
+        previousSha: 'mock-sha-123',
+        arrayItem: { index: 3, locales },
+      },
+    ]);
   });
 
   test('includes asset deletions in file changes', async () => {

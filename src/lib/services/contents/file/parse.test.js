@@ -1,7 +1,18 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import {
+  formatFrontMatter,
+  formatJSON,
+  formatTOML,
+  formatYAML,
+} from '$lib/services/contents/file/format';
+import {
+  _resetUnsafeIntegerSources,
+  getUnsafeIntegerSource,
+} from '$lib/services/contents/file/integers';
+import {
   detectFrontMatterFormat,
+  hasCustomParser,
   parseEntryFile,
   parseFrontMatter,
   parseJSON,
@@ -191,6 +202,91 @@ date: 2023-01-01
   });
 });
 
+describe('Integers a number can’t represent exactly', () => {
+  beforeEach(() => {
+    _resetUnsafeIntegerSources();
+  });
+
+  test('are written back as they were read from JSON', () => {
+    const json =
+      '{\n  "big": 12345678901234567890,\n  "list": [\n    -9007199254740993,\n    1.5\n  ]\n}';
+
+    const parsed = parseJSON(json);
+
+    expect(parsed).toEqual({ big: 12345678901234567000, list: [-9007199254740992, 1.5] });
+    expect(formatJSON(parsed)).toBe(json);
+    // An edited value is written as it is
+    expect(formatJSON({ ...parsed, big: 5 })).toContain('"big": 5,');
+  });
+
+  test('are read as usual without the source text, which the reviver gets in modern browsers', () => {
+    const { parse } = JSON;
+
+    // Simulate a browser that doesn’t pass the context to the reviver
+    vi.spyOn(JSON, 'parse').mockImplementation((text, reviver) =>
+      parse(text, reviver && ((key, value) => reviver(key, value))),
+    );
+
+    try {
+      expect(parseJSON('{"big": 12345678901234567890}')).toEqual({ big: 12345678901234567000 });
+      expect(getUnsafeIntegerSource(12345678901234567000)).toBeUndefined();
+    } finally {
+      vi.mocked(JSON.parse).mockRestore();
+    }
+  });
+
+  test('are written back as they were read from YAML', () => {
+    const yaml =
+      'big: 12345678901234567890\nneg: -9007199254740993\nsmall: 3\nlist:\n  - 9007199254740993';
+
+    const parsed = parseYAML(yaml);
+
+    expect(parsed).toEqual({
+      big: 12345678901234567000,
+      neg: -9007199254740992,
+      small: 3,
+      list: [9007199254740992],
+    });
+    expect(formatYAML(parsed)).toBe(yaml);
+    // The options are kept
+    expect(parseYAML('a: &a\n  b: 1234567890123456789\nc:\n  <<: *a', { merge: true })).toEqual({
+      a: { b: 1234567890123456800 },
+      c: { b: 1234567890123456800 },
+    });
+  });
+
+  test('are written back as they were read from TOML', () => {
+    const toml = 'big = 9007199254740993\nsmall = 3\nlist = [ 9007199254740993 ]';
+    const parsed = parseTOML(toml);
+
+    // The parser would otherwise reject the document
+    expect(parsed).toEqual({ big: 9007199254740992, small: 3, list: [9007199254740992] });
+    expect(formatTOML(parsed)).toBe(toml);
+  });
+
+  test('are written back as they were read from front matter', () => {
+    const collection = /** @type {any} */ ({
+      _file: { format: 'frontmatter', extension: 'md' },
+    });
+
+    [
+      '---\nbig: 12345678901234567890\n---\n\nBody',
+      '+++\nbig = 9007199254740993\n+++\n\nBody',
+      '{\n  "big": 12345678901234567890\n}\n\nBody',
+    ].forEach((text) => {
+      const format = detectFrontMatterFormat(text);
+      const content = parseFrontMatter({ collection, format, text });
+
+      expect(
+        formatFrontMatter({
+          content,
+          _file: { ...collection._file, format, fmDelimiters: undefined },
+        }),
+      ).toBe(`${text}\n`);
+    });
+  });
+});
+
 describe('Test detectFrontMatterFormat()', () => {
   test('detects TOML front matter', () => {
     const text = '+++\ntitle = "Test Post"\n+++\n\nContent here';
@@ -369,6 +465,82 @@ describe('Test parseFrontMatter()', () => {
     expect(result.body).toBe('This is the content body.');
   });
 
+  describe('JSON front matter round-trip', () => {
+    /**
+     * Parse the given text as JSON front matter with the given delimiters.
+     * @param {string} text File content.
+     * @param {[string, string]} delimiters Front matter delimiters.
+     * @returns {Record<string, any>} Parsed content.
+     */
+    const parseWith = (text, delimiters) =>
+      parseFrontMatter({
+        collection: /** @type {any} */ ({
+          name: 'posts',
+          _file: { format: 'json-frontmatter', fmDelimiters: delimiters },
+        }),
+        format: 'json-frontmatter',
+        text: text.trim(),
+      });
+
+    const content = {
+      title: 'Test Post',
+      author: { name: 'Jane', links: { site: 'https://example.com' } },
+      tags: ['a', 'b'],
+    };
+
+    test.each([
+      ['default', ['{', '}']],
+      ['custom', ['---', '---']],
+      ['custom brace-less', ['~~~', '~~~']],
+    ])('parses what the formatter writes with %s delimiters', (_label, delimiters) => {
+      const text = formatFrontMatter({
+        content: { ...content, body: 'Body text.' },
+        _file: /** @type {any} */ ({
+          format: 'json-frontmatter',
+          fmDelimiters: delimiters,
+        }),
+      });
+
+      expect(parseWith(text, /** @type {[string, string]} */ (delimiters))).toEqual({
+        ...content,
+        body: 'Body text.',
+      });
+    });
+
+    test('parses what the formatter writes without a body', () => {
+      const text = formatFrontMatter({
+        content: { ...content },
+        _file: /** @type {any} */ ({ format: 'json-frontmatter', fmDelimiters: ['{', '}'] }),
+      });
+
+      expect(parseWith(text, ['{', '}'])).toEqual({ ...content, body: undefined });
+    });
+
+    test('parses a file written with the braces doubled by an earlier version', () => {
+      const text = `{\n${JSON.stringify(content, null, 2)}\n}\n\nBody text.\n`;
+
+      expect(parseWith(text, ['{', '}'])).toEqual({ ...content, body: 'Body text.' });
+    });
+
+    test('parses a doubled-brace file without a body or indentation', () => {
+      const text = `{\n${JSON.stringify(content)}\n}\n`;
+
+      expect(parseWith(text, ['{', '}'])).toEqual({ ...content, body: undefined });
+    });
+
+    test('parses a Decap-style head without braces within custom delimiters', () => {
+      const text = '---\n"title": "Test Post"\n---\n\nBody text.';
+
+      expect(parseWith(text, ['---', '---'])).toEqual({ title: 'Test Post', body: 'Body text.' });
+    });
+
+    test('parses a full JSON object within custom delimiters', () => {
+      const text = '---\n{\n  "title": "Test Post"\n}\n---\n\nBody text.';
+
+      expect(parseWith(text, ['---', '---'])).toEqual({ title: 'Test Post', body: 'Body text.' });
+    });
+  });
+
   test('handles content without front matter', async () => {
     const { getFrontMatterDelimiters } = await import('$lib/services/contents/file/config');
 
@@ -465,6 +637,35 @@ describe('Test parseFrontMatter()', () => {
     });
 
     expect(result.body).toBe('Content without front matter data.');
+  });
+
+  test('handles front matter with no line between the delimiters', async () => {
+    const { getFrontMatterDelimiters } = await import('$lib/services/contents/file/config');
+
+    /** @type {any} */ (getFrontMatterDelimiters).mockReturnValue(['---', '---']);
+
+    const mockCollection = /** @type {any} */ ({
+      name: 'test-collection',
+      _file: { format: 'frontmatter', fmDelimiters: ['---', '---'] },
+    });
+
+    const args = {
+      collection: mockCollection,
+      format: /** @type {const} */ ('yaml-frontmatter'),
+    };
+
+    // Jekyll’s empty front matter
+    expect(parseFrontMatter({ ...args, text: '---\n---\n\nHello' })).toEqual({ body: 'Hello' });
+    expect(parseFrontMatter({ ...args, text: '---\n---' })).toEqual({ body: undefined });
+    // An empty head line yields the same result
+    expect(parseFrontMatter({ ...args, text: '---\n\n---' })).toEqual({ body: undefined });
+    // TOML and JSON front matter
+    expect(
+      parseFrontMatter({ ...args, format: 'toml-frontmatter', text: '---\n---\n\nHello' }),
+    ).toEqual({ body: 'Hello' });
+    expect(
+      parseFrontMatter({ ...args, format: 'json-frontmatter', text: '---\n---\n\nHello' }),
+    ).toEqual({ body: 'Hello' });
   });
 
   test('handles content with only front matter', async () => {
@@ -852,6 +1053,23 @@ describe('Test parseEntryFile()', () => {
     expect(result).toEqual({ custom: 'result' });
   });
 
+  test('tells whether a file is read with a custom parser', () => {
+    customFileFormatRegistry.set('customFormat', { parser: vi.fn() });
+    getCollection.mockReturnValue({ _file: { format: 'customFormat' } });
+    getCollectionFile.mockReturnValue({ _file: { format: 'customFormat' } });
+    expect(hasCustomParser(entryBase)).toBe(true);
+
+    getCollection.mockReturnValue({ _file: { format: 'yaml' } });
+    getCollectionFile.mockReturnValue({ _file: { format: 'yaml' } });
+    expect(hasCustomParser(entryBase)).toBe(false);
+
+    // A file whose collection can’t be found isn’t parsed at all
+    getCollection.mockReturnValue(undefined);
+    expect(hasCustomParser(entryBase)).toBe(false);
+
+    customFileFormatRegistry.delete('customFormat');
+  });
+
   test('parses raw format and returns content as-is', async () => {
     getCollection.mockReturnValue({
       _file: { format: 'raw' },
@@ -1068,6 +1286,21 @@ describe('Test parseEntryFile()', () => {
     );
   });
 
+  test('throws a clear error for a custom format registered without a parser', async () => {
+    customFileFormatRegistry.set('csv', { formatter: vi.fn(), extension: 'csv' });
+    getCollection.mockReturnValue({ _file: { format: 'csv' } });
+    getCollectionFile.mockReturnValue({ _file: { format: 'csv' } });
+
+    try {
+      await expect(parseEntryFile({ ...entryBase, text: 'a,b' })).rejects.toThrow(
+        '/test/file.md could not be parsed, as no `fromFile` method was registered for the ' +
+          'custom “csv” format with `CMS.registerCustomFormat()`',
+      );
+    } finally {
+      customFileFormatRegistry.delete('csv');
+    }
+  });
+
   test('parses frontmatter with inline body (bodyField.inline = true)', async () => {
     const { getFrontMatterDelimiters } = await import('$lib/services/contents/file/config');
 
@@ -1104,6 +1337,57 @@ describe('Test parseEntryFile()', () => {
     expect(result.body).toBe('This is inline body content.');
     // With inline=true, content after frontmatter should NOT be added to body
     expect(result.body).not.toContain('Ignored content');
+  });
+
+  test('reads the body under a key named after an `Object.prototype` member', async () => {
+    const { getFrontMatterDelimiters } = await import('$lib/services/contents/file/config');
+
+    /** @type {any} */ (getFrontMatterDelimiters).mockReturnValue(['---', '---']);
+
+    const _file = { format: 'frontmatter', bodyField: { key: 'constructor', inline: false } };
+
+    const result = parseFrontMatter({
+      collection: /** @type {any} */ ({ name: 'test-collection', _file }),
+      collectionFile: /** @type {any} */ ({ _file }),
+      format: 'yaml-frontmatter',
+      text: '---\ntitle: Test Post\n---\n\nBody text.',
+    });
+
+    // The inherited `Object` was taken for a body in the front matter, and the text was dropped
+    expect(Object.hasOwn(result, 'constructor')).toBe(true);
+    expect(result.constructor).toBe('Body text.');
+  });
+
+  test('reads the text below the front matter as an inline body missing from it', async () => {
+    const { getFrontMatterDelimiters } = await import('$lib/services/contents/file/config');
+
+    /** @type {any} */ (getFrontMatterDelimiters).mockReturnValue(['---', '---']);
+
+    const inlineBodyCollection = /** @type {any} */ ({
+      name: 'test-collection',
+      _file: {
+        format: 'frontmatter',
+        fmDelimiters: ['---', '---'],
+        bodyField: { key: 'body', inline: true },
+      },
+    });
+
+    const result = parseFrontMatter({
+      collection: inlineBodyCollection,
+      format: 'yaml-frontmatter',
+      text: '---\ntitle: Test Post\n---\n\nBelow.',
+    });
+
+    expect(result).toEqual({ title: 'Test Post', body: 'Below.' });
+
+    // No empty body is added to a file without one
+    expect(
+      parseFrontMatter({
+        collection: inlineBodyCollection,
+        format: 'yaml-frontmatter',
+        text: '---\ntitle: Test Post\n---\n',
+      }),
+    ).toEqual({ title: 'Test Post' });
   });
 
   test('parses frontmatter with custom body key', async () => {

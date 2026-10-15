@@ -1,4 +1,3 @@
-import { sleep } from '@sveltia/utils/misc';
 import { beforeAll, beforeEach, describe, expect, test } from 'vitest';
 import { page } from 'vitest/browser';
 
@@ -18,7 +17,7 @@ const pagesCollection = {
   name: 'pages',
   label: 'Pages',
   folder: 'content/pages',
-  nested: { depth: 3 },
+  nested: { depth: 4 },
   meta: { path: { widget: 'string', index_file: 'index' } },
   fields: [{ name: 'title', widget: 'string' }],
 };
@@ -58,8 +57,6 @@ const getLabel = (element) => element.querySelector('.label')?.textContent?.trim
  */
 const openPicker = async () => {
   await page.getByRole('button', { name: 'Parent Folder' }).click();
-  // A Sveltia UI tree starts handling clicks 100 ms after it’s opened
-  await sleep(150);
 };
 
 /** @type {Collection} */
@@ -231,6 +228,8 @@ describe('PathEditor', () => {
     await expect
       .element(page.getByRole('alert'))
       .toHaveTextContent('error The entry cannot be moved into one of its own subfolders.');
+    // The validation panel finds the editor by its validation key
+    expect(document.querySelector('.field[data-validation-key="_path"]')).not.toBeNull();
 
     draft.validities._default._path = { valid: false, duplicateError: true };
     await expect
@@ -290,6 +289,33 @@ describe('PathEditor', () => {
     await expect
       .element(page.getByRole('button', { name: 'Parent Folder' }))
       .toHaveTextContent('folder api-reference expand_more');
+  });
+
+  test('creates no folder deeper than the collection’s depth', async () => {
+    const draft = createMockDraft({
+      collectionName: 'docs',
+      draft: { collection: getCollection('docs'), currentPath: 'guides/advanced' },
+    });
+
+    await renderWithDraft(PathEditor, { draft, props: { locale: '_default' } });
+
+    // An entry in a new folder here would be 4 levels down, beyond the depth of 3
+    await expect.element(page.getByRole('button', { name: 'New Folder' })).toBeDisabled();
+  });
+
+  test('can’t move a read-only entry', async () => {
+    const draft = createMockDraft({
+      collectionName: 'docs',
+      draft: {
+        collection: { .../** @type {any} */ (getCollection('docs')), readonly: true },
+        currentPath: 'guides',
+      },
+    });
+
+    await renderWithDraft(PathEditor, { draft, props: { locale: '_default' } });
+
+    await expect.element(page.getByRole('button', { name: 'Parent Folder' })).toBeDisabled();
+    await expect.element(page.getByRole('button', { name: 'New Folder' })).toBeDisabled();
   });
 
   test('describes the folder in the locale, where it can’t be changed', async () => {

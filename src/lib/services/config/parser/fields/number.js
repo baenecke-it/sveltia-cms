@@ -70,9 +70,9 @@ export const parseNumberFieldConfig = (args) => {
 
   checkDefaultValue(args);
 
-  // A step of zero or less leaves the arrow keys and buttons with nowhere to go. `any` is fine; it
-  // just turns the check off. A value of another type is reported against the JSON schema
-  if (typeof step === 'number' && step <= 0) {
+  // A step of zero or less leaves the arrow keys and buttons with nowhere to go, except `-1`, which
+  // turns them off. A value of another type is reported against the JSON schema
+  if (typeof step === 'number' && step <= 0 && step !== -1) {
     addMessage({ strKey: 'invalid_step', values: { step: String(step) }, context, collectors });
   }
 

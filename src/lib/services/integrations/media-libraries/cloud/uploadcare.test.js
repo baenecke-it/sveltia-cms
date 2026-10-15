@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { formatFileName } from '$lib/services/assets/file-name';
 import { cmsConfig } from '$lib/services/config/state';
 
 import uploadcareService, {
@@ -24,7 +25,7 @@ vi.mock('@sveltia/utils/misc', () => ({
   sleep: vi.fn(),
 }));
 
-vi.mock('$lib/services/utils/file', () => ({
+vi.mock('$lib/services/assets/file-name', () => ({
   formatFileName: vi.fn((name) => name),
 }));
 
@@ -110,6 +111,35 @@ describe('integrations/media-libraries/cloud/uploadcare', () => {
       const key = getPublicKey();
 
       expect(key).toBeUndefined();
+    });
+  });
+
+  describe('getPublicKey with a field configuration', () => {
+    it('should inherit the site-level public key', () => {
+      const fieldConfig = /** @type {any} */ ({
+        widget: 'file',
+        media_libraries: { uploadcare: { settings: { autoFilename: true } } },
+      });
+
+      expect(getPublicKey(fieldConfig)).toBe(mockPublicKey);
+    });
+
+    it('should prefer the field-level public key', () => {
+      const fieldConfig = /** @type {any} */ ({
+        widget: 'file',
+        media_libraries: { uploadcare: { config: { publicKey: 'field-key' } } },
+      });
+
+      expect(getPublicKey(fieldConfig)).toBe('field-key');
+    });
+
+    it('should return undefined when the field disables Uploadcare', () => {
+      const fieldConfig = /** @type {any} */ ({
+        widget: 'file',
+        media_libraries: { uploadcare: false },
+      });
+
+      expect(getPublicKey(fieldConfig)).toBeUndefined();
     });
   });
 
@@ -204,6 +234,17 @@ describe('integrations/media-libraries/cloud/uploadcare', () => {
                 },
               },
             },
+          }),
+        ),
+      ).toBe(true);
+    });
+
+    it('should inherit the site-level public key when the field-level config has none', () => {
+      expect(
+        isEnabled(
+          /** @type {any} */ ({
+            widget: 'file',
+            media_libraries: { uploadcare: { config: { multiple: true } } },
           }),
         ),
       ).toBe(true);
@@ -340,6 +381,43 @@ describe('integrations/media-libraries/cloud/uploadcare', () => {
         size: 12345,
         kind: 'image',
       });
+    });
+
+    it('should keep the site-level settings the field-level options don’t override', () => {
+      cmsConfig.current = /** @type {any} */ ({
+        media_libraries: {
+          uploadcare: {
+            config: { publicKey: mockPublicKey },
+            settings: { autoFilename: true, defaultOperations: '/resize/800x/' },
+          },
+        },
+      });
+
+      const fieldConfig = /** @type {any} */ ({
+        widget: 'image',
+        media_libraries: { uploadcare: { settings: { autoFilename: false } } },
+      });
+
+      const [result] = parseResults(
+        [
+          {
+            uuid: 'abc123',
+            original_filename: 'image.jpg',
+            original_file_url: 'https://ucarecdn.com/abc123/image.jpg',
+            size: 12345,
+            mime_type: 'image/jpeg',
+            is_image: true,
+            is_ready: true,
+            content_info: null,
+            datetime_uploaded: '2025-01-01T00:00:00.000Z',
+            datetime_stored: '2025-01-01T00:00:00.000Z',
+            datetime_removed: null,
+          },
+        ],
+        { fieldConfig },
+      );
+
+      expect(result.downloadURL).toBe('https://ucarecdn.com/abc123/-/resize/800x/');
     });
 
     it('should parse video files correctly', () => {
@@ -1042,11 +1120,12 @@ describe('integrations/media-libraries/cloud/uploadcare', () => {
         /** @type {any} */ ({
           ok: false,
           statusText: 'Unauthorized',
+          text: vi.fn().mockResolvedValue('Incorrect authentication credentials.'),
         }),
       );
 
       await expect(list({ apiKey: mockSecretKey })).rejects.toThrow(
-        'Failed to fetch files: Unauthorized',
+        'Failed to fetch files: Incorrect authentication credentials.',
       );
     });
 
@@ -1267,11 +1346,12 @@ describe('integrations/media-libraries/cloud/uploadcare', () => {
         /** @type {any} */ ({
           ok: false,
           statusText: 'Bad Request',
+          text: vi.fn().mockResolvedValue('Invalid query.'),
         }),
       );
 
       await expect(search('test', { apiKey: mockSecretKey })).rejects.toThrow(
-        'Failed to fetch files: Bad Request',
+        'Failed to fetch files: Invalid query.',
       );
     });
 
@@ -1367,6 +1447,7 @@ describe('integrations/media-libraries/cloud/uploadcare', () => {
     });
 
     afterEach(() => {
+      vi.mocked(formatFileName).mockImplementation((name) => name);
       // Restore original crypto
       Object.defineProperty(globalThis, 'crypto', {
         value: originalCrypto,
@@ -1517,6 +1598,56 @@ describe('integrations/media-libraries/cloud/uploadcare', () => {
       });
     });
 
+    it('should match a file whose name was changed by the formatting', async () => {
+      // A macOS file name is often in the decomposed (NFD) form, which the formatting normalizes
+      const originalName = 'cafe\u0301.jpg';
+      const formattedName = originalName.normalize();
+      const mockFile = new File(['image content'], originalName, { type: 'image/jpeg' });
+
+      vi.mocked(formatFileName).mockImplementationOnce((name) => name.normalize());
+      vi.mocked(fetch).mockResolvedValueOnce(
+        /** @type {any} */ ({
+          ok: true,
+          json: vi.fn().mockResolvedValue({ [formattedName]: 'nfc-uuid' }),
+        }),
+      );
+
+      const result = await upload([mockFile], { apiKey: mockSecretKey });
+
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({
+        id: 'nfc-uuid',
+        fileName: formattedName,
+        size: mockFile.size,
+        kind: 'image',
+        previewURL: 'https://ucarecdn.com/nfc-uuid/-/preview/400x400/',
+      });
+    });
+
+    it('should give files with the same name distinct form field names', async () => {
+      const mockFile1 = new File(['content 1'], 'photo.jpg', { type: 'image/jpeg' });
+      const mockFile2 = new File(['content 22'], 'photo.jpg', { type: 'image/png' });
+
+      vi.mocked(formatFileName).mockImplementation((name, { assetNamesInSameFolder = [] } = {}) =>
+        assetNamesInSameFolder.includes(name) ? name.replace('.', '-1.') : name,
+      );
+      vi.mocked(fetch).mockResolvedValueOnce(
+        /** @type {any} */ ({
+          ok: true,
+          json: vi.fn().mockResolvedValue({ 'photo.jpg': 'uuid-1', 'photo-1.jpg': 'uuid-2' }),
+        }),
+      );
+
+      const result = await upload([mockFile1, mockFile2], { apiKey: mockSecretKey });
+      const formData = /** @type {FormData} */ (vi.mocked(fetch).mock.calls[0]?.[1]?.body);
+
+      expect(formData.get('photo.jpg')).toBeInstanceOf(File);
+      expect(formData.get('photo-1.jpg')).toBeInstanceOf(File);
+      expect(result).toHaveLength(2);
+      expect(result[0]).toMatchObject({ id: 'uuid-1', size: mockFile1.size });
+      expect(result[1]).toMatchObject({ id: 'uuid-2', size: mockFile2.size });
+    });
+
     it('should handle file size as 0 when file not found', async () => {
       const mockFile = new File(['content'], 'original.txt', { type: 'text/plain' });
 
@@ -1569,10 +1700,13 @@ describe('integrations/media-libraries/cloud/uploadcare', () => {
           ok: false,
           status: 403,
           statusText: 'Forbidden',
+          text: vi.fn().mockResolvedValue('Public key is blocked.'),
         }),
       );
 
-      await expect(upload([mockFile], { apiKey: mockSecretKey })).rejects.toThrow();
+      await expect(upload([mockFile], { apiKey: mockSecretKey })).rejects.toThrow(
+        'Failed to upload files: Public key is blocked.',
+      );
     });
 
     it('should handle empty file array', async () => {
@@ -1703,11 +1837,15 @@ describe('integrations/media-libraries/cloud/uploadcare', () => {
 
     it('should throw when the request fails', async () => {
       vi.mocked(fetch).mockResolvedValue(
-        /** @type {any} */ ({ ok: false, statusText: 'Forbidden' }),
+        /** @type {any} */ ({
+          ok: false,
+          statusText: 'Forbidden',
+          text: vi.fn().mockResolvedValue('Secret key is invalid.'),
+        }),
       );
 
       await expect(deleteFiles(assets, { apiKey: mockSecretKey })).rejects.toThrow(
-        'Failed to delete files: Forbidden',
+        'Failed to delete files: Secret key is invalid.',
       );
     });
   });

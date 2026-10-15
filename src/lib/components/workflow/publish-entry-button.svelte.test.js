@@ -1,11 +1,13 @@
 import { beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { page } from 'vitest/browser';
 
+import { mergeLockedBranch } from '$lib/services/backends/branch-access';
+import { createLocalizedError } from '$lib/services/backends/git/shared/errors';
 import { publishingBranches } from '$lib/services/workflow';
 import { forkedRepository } from '$lib/services/workflow/open-authoring';
 import { publishWorkflowEntry } from '$lib/services/workflow/save';
 import { canPublish } from '$lib/services/workflow/validate';
-import { initTestConfig } from '$lib/test/config';
+import { createMockWorkflowEntry, initTestConfig } from '$lib/test/config';
 import { createMockDraft, renderWithDraft } from '$lib/test/draft';
 import { waitForToastsToHide } from '$lib/test/toast';
 
@@ -28,19 +30,11 @@ vi.mock('$lib/services/workflow/validate', () => ({ canPublish: vi.fn(() => true
  * Build an unpublished entry.
  * @param {string} status Workflow status.
  * @param {string} [slug] Entry slug.
+ * @param {Record<string, any>} [pullRequest] Pull request properties to override.
  * @returns {any} Entry.
  */
-const createEntry = (status, slug = 'hello') => ({
-  id: `posts/${slug}`,
-  slug,
-  subPath: slug,
-  locales: {},
-  workflow: {
-    status,
-    collectionName: 'posts',
-    pullRequest: { number: 1, branch: `cms/posts/${slug}` },
-  },
-});
+const createEntry = (status, slug = 'hello', pullRequest = {}) =>
+  createMockWorkflowEntry({ status, slug, pullRequest });
 
 /**
  * Build a draft editing the given unpublished entry.
@@ -57,6 +51,7 @@ describe('PublishEntryButton', () => {
 
   beforeEach(() => {
     forkedRepository.current = undefined;
+    mergeLockedBranch.current = undefined;
     publishingBranches.current = [];
     vi.mocked(canPublish).mockReturnValue(true);
     window.location.hash = '#/collections/posts/entries/hello';
@@ -88,7 +83,7 @@ describe('PublishEntryButton', () => {
     await expect
       .element(dialog)
       .toHaveTextContent(
-        'Publish Entry Are you sure you want to publish this entry? Your changes will take effect right away. Publish Cancel',
+        'Publish Entry Are you sure you want to publish this entry? Your changes will go live once your site has been rebuilt. Publish Cancel',
       );
     await dialog.getByRole('button', { name: 'Publish' }).click();
 
@@ -173,6 +168,59 @@ describe('PublishEntryButton', () => {
     await waitForToastsToHide();
   });
 
+  test('says what stands in the way when trying again wouldn’t help', async () => {
+    vi.mocked(publishWorkflowEntry).mockRejectedValue(
+      createLocalizedError(
+        'Cannot publish as an Open Authoring contributor',
+        'open_authoring.publish_unsupported',
+      ),
+    );
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await renderWithDraft(PublishEntryButton, {
+      draft: createMockDraft(),
+      props: { entry: createEntry('pending_publish') },
+    });
+
+    await page.getByRole('button', { name: 'Publish Entry' }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Publish' }).click();
+
+    await expect
+      .element(page.getByRole('alert'))
+      .toHaveTextContent(
+        'error Error Only a maintainer can publish changes to this site. Mark your entry as In Review instead, and someone will take a look.',
+      );
+    await waitForToastsToHide();
+  });
+
+  test.each([
+    [
+      'other_changes',
+      'This entry can’t be published here, because it comes with other changes the CMS can’t show you. Ask a developer to review it.',
+    ],
+    [
+      'entry_changed',
+      'The entry has been changed since you opened it. Reload the page to review the latest version before publishing it.',
+    ],
+  ])('says why a publish was refused: %s', async (reason, message) => {
+    vi.mocked(publishWorkflowEntry).mockRejectedValue(
+      new Error('publish_refused', { cause: { reason, paths: [] } }),
+    );
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await renderWithDraft(PublishEntryButton, {
+      draft: createMockDraft(),
+      props: { entry: createEntry('pending_publish') },
+    });
+
+    await page.getByRole('button', { name: 'Publish Entry' }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Publish' }).click();
+
+    // Trying again wouldn’t help, so the message says what stands in the way instead
+    await expect.element(page.getByRole('alert')).toHaveTextContent(`error Error ${message}`);
+    await waitForToastsToHide();
+  });
+
   test('is presented as Delete for a pending deletion', async () => {
     await renderWithDraft(PublishEntryButton, {
       draft: createMockDraft(),
@@ -226,6 +274,35 @@ describe('PublishEntryButton', () => {
 
   test('is hidden for an Open Authoring contributor', async () => {
     forkedRepository.current = /** @type {any} */ ({ owner: 'me', repo: 'site' });
+
+    const { container } = await renderWithDraft(PublishEntryButton, {
+      draft: createMockDraft(),
+      props: { entry: createEntry('pending_publish') },
+    });
+
+    expect(container.querySelector('button')).toBeNull();
+  });
+
+  test('is hidden for a user who can’t merge the pull request', async () => {
+    const { container } = await renderWithDraft(PublishEntryButton, {
+      draft: createMockDraft(),
+      props: { entry: createEntry('pending_publish', 'hello', { canMerge: false }) },
+    });
+
+    expect(container.querySelector('button')).toBeNull();
+  });
+
+  test('is shown for a user who can merge the pull request', async () => {
+    await renderWithDraft(PublishEntryButton, {
+      draft: createMockDraft(),
+      props: { entry: createEntry('pending_publish', 'hello', { canMerge: true }) },
+    });
+
+    await expect.element(page.getByRole('button', { name: 'Publish Entry' })).toBeVisible();
+  });
+
+  test('is hidden when the configured branch doesn’t let the user merge into it', async () => {
+    mergeLockedBranch.current = 'main';
 
     const { container } = await renderWithDraft(PublishEntryButton, {
       draft: createMockDraft(),

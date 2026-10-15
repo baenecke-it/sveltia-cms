@@ -3,9 +3,11 @@ import { page } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
 import { appIconURLs } from '$lib/services/app/branding';
+import { missingBrowserFeatures } from '$lib/services/app/browser-support';
+import { installPrompt } from '$lib/services/app/install';
 import { announcedPageStatus, mainAreaTitle, overlayTitle } from '$lib/services/app/navigation';
 import { backendName } from '$lib/services/backends';
-import { cmsConfigLoaded } from '$lib/services/config';
+import { cmsConfig, cmsConfigLoaded } from '$lib/services/config';
 import { dataLoaded } from '$lib/services/contents';
 import { user } from '$lib/services/user/account.svelte';
 import { auth } from '$lib/services/user/auth.svelte';
@@ -72,6 +74,28 @@ describe('App', () => {
     expect(document.querySelector('link[rel="manifest"]')).toBeNull();
   });
 
+  test('doesn’t load the configuration in an unsupported browser', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    missingBrowserFeatures.current = ['Iterator helpers'];
+    cmsConfig.current = undefined;
+
+    try {
+      await render(App, { config });
+
+      await expect
+        .element(page.getByRole('alert'))
+        .toMatchTextContent('Your browser is not supported.');
+      expect(cmsConfigLoaded.current).toBe(false);
+      expect(consoleError).toHaveBeenCalledWith('Unsupported browser. Missing features:', [
+        'Iterator helpers',
+      ]);
+    } finally {
+      missingBrowserFeatures.current = [];
+      consoleError.mockRestore();
+    }
+  });
+
   test('shows the app once signed in and the data is loaded', async () => {
     await render(App, { config });
     await expect.poll(() => cmsConfigLoaded.current).toBe(true);
@@ -123,6 +147,19 @@ describe('App', () => {
       expect(internal.target).toBe('');
       internal.remove();
 
+      // The press can land on an element within the link
+      const nested = document.createElement('a');
+      const strong = document.createElement('strong');
+
+      nested.href = 'https://example.com/guide';
+      strong.textContent = 'Guide';
+      nested.appendChild(strong);
+      document.body.appendChild(nested);
+      strong.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      expect(nested.target).toBe('_blank');
+      expect(nested.rel).toBe('noopener noreferrer');
+      nested.remove();
+
       // Anything else is left alone
       document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
       expect(link.target).toBe('_blank');
@@ -161,6 +198,28 @@ describe('App', () => {
     } finally {
       header.remove();
       ncRoot.remove();
+    }
+  });
+
+  test('keeps the install prompt the browser offers before the account menu is opened', async () => {
+    const { unmount } = await render(App, { config });
+
+    const event = Object.assign(new Event('beforeinstallprompt', { cancelable: true }), {
+      prompt: vi.fn(),
+    });
+
+    try {
+      window.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+      expect(installPrompt.current).toBe(event);
+
+      // The listeners are removed with the app
+      unmount();
+      installPrompt.current = null;
+      window.dispatchEvent(event);
+      expect(installPrompt.current).toBeNull();
+    } finally {
+      installPrompt.current = null;
     }
   });
 });

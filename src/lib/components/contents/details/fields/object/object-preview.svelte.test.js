@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest';
 import { page } from 'vitest/browser';
 
 import { createMockDraft, renderWithDraft } from '$lib/test/draft';
+import { renderFieldPreview } from '$lib/test/field.svelte';
 
 import ObjectPreview from './object-preview.svelte';
 
@@ -35,20 +36,14 @@ const blockField = {
  * @param {Record<string, any>} values Flattened values.
  * @returns {Promise<HTMLElement>} Container.
  */
-const renderPreview = async (fieldConfig, values) => {
-  const { container } = await renderWithDraft(ObjectPreview, {
-    draft: createMockDraft({ fields: [fieldConfig], values: { _default: values } }),
-    props: {
-      locale: '_default',
-      keyPath: fieldConfig.name,
-      typedKeyPath: fieldConfig.name,
+const renderPreview = async (fieldConfig, values) =>
+  (
+    await renderFieldPreview(ObjectPreview, {
       fieldConfig,
-      currentValue: undefined,
-    },
-  });
-
-  return container;
-};
+      locale: '_default',
+      draft: createMockDraft({ fields: [fieldConfig], values: { _default: values } }),
+    })
+  ).container;
 
 describe('ObjectPreview', () => {
   test('previews each subfield', async () => {
@@ -61,10 +56,33 @@ describe('ObjectPreview', () => {
 
     expect(sections).toHaveLength(2);
     expect(sections[0]).toHaveAttribute('data-key-path', 'author.name');
+    // Each subfield is marked outside its lazily rendered preview, for the Edit Pane to scroll to
+    expect(sections[1].parentElement).toHaveAttribute('data-lazy-key-path', 'author.email');
     expect(sections[0]).toHaveTextContent('name Melvin Lucas');
     expect(sections[1].querySelector('a')).toHaveAttribute('href', 'mailto:melvin@example.com');
     // No type label
     expect(container.querySelector('[role="group"]')).not.toHaveAttribute('aria-labelledby');
+  });
+
+  test('passes the typed key path on to the subfields', async () => {
+    const { container } = await renderWithDraft(ObjectPreview, {
+      draft: createMockDraft({
+        fields: [authorField],
+        values: { _default: { 'author.name': 'M' } },
+      }),
+      props: {
+        locale: '_default',
+        keyPath: 'author',
+        typedKeyPath: 'posts.*.author',
+        fieldConfig: authorField,
+        currentValue: undefined,
+      },
+    });
+
+    expect(container.querySelector('section')).toHaveAttribute(
+      'data-typed-key-path',
+      'posts.*.author.name',
+    );
   });
 
   test('previews the subfields of the selected type under its label', async () => {

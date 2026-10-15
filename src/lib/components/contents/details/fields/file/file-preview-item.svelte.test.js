@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest';
+import { describe, expect, onTestFinished, test, vi } from 'vitest';
 
 import { createMockDraft, renderWithDraft } from '$lib/test/draft';
 
@@ -7,6 +7,53 @@ import FilePreviewItem from './file-preview-item.svelte';
 /**
  * @import { MediaField } from '$lib/types/public';
  */
+
+/**
+ * URLs to resolve given values to, each after a delay in milliseconds, so the lookup for one value
+ * can be answered after the one for a later value.
+ */
+const { mockedURLs, lookups } = vi.hoisted(() => ({
+  /** @type {Map<string, { url: string, delay: number }>} */
+  mockedURLs: new Map(),
+  /**
+   * Arguments of every URL lookup.
+   * @type {any[]}
+   */
+  lookups: [],
+}));
+
+/** A transparent 1×1 PNG, which loads without a network request. */
+const PNG_DATA_URL =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+
+vi.mock('$lib/services/assets/media-field', async (importOriginal) => {
+  /** @type {any} */
+  const original = await importOriginal();
+
+  return {
+    ...original,
+    /**
+     * Resolve the URL, from the mocked ones if given.
+     * @param {any} args Arguments.
+     * @returns {Promise<string | undefined>} URL.
+     */
+    getMediaFieldURL: async (args) => {
+      lookups.push(args);
+
+      const mocked = mockedURLs.get(args.value);
+
+      if (!mocked) {
+        return original.getMediaFieldURL(args);
+      }
+
+      await new Promise((resolve) => {
+        setTimeout(resolve, mocked.delay);
+      });
+
+      return mocked.url;
+    },
+  };
+});
 
 /**
  * Render the item.
@@ -23,6 +70,12 @@ const renderItem = async (value, config = {}) => {
     props: { value, fieldConfig, typedKeyPath: 'doc' },
   });
 
+  // The example URLs can’t be loaded. Keep a failed request, whenever it fails, from replacing the
+  // image or player with the fallback icon before it’s checked
+  container.addEventListener('error', (event) => event.stopImmediatePropagation(), {
+    capture: true,
+  });
+
   return container;
 };
 
@@ -32,6 +85,27 @@ describe('FilePreviewItem', () => {
     const container = await renderItem(url, { widget: 'image' });
 
     await expect.poll(() => container.querySelector('img')?.getAttribute('src')).toBe(url);
+  });
+
+  test('looks the file up for the locale being previewed', async () => {
+    /** @type {MediaField} */
+    const fieldConfig = { name: 'cover', widget: 'image' };
+
+    mockedURLs.set('photo.png', { url: PNG_DATA_URL, delay: 0 });
+    lookups.length = 0;
+    onTestFinished(() => {
+      mockedURLs.clear();
+    });
+
+    const { container } = await renderWithDraft(FilePreviewItem, {
+      draft: createMockDraft({ fields: [fieldConfig] }),
+      props: { value: 'photo.png', fieldConfig, typedKeyPath: 'cover', locale: 'fr' },
+    });
+
+    await expect.poll(() => container.querySelector('img')?.getAttribute('src')).toBe(PNG_DATA_URL);
+    // An entry-relative path is relative to the locale’s own entry file
+    expect(lookups).toContainEqual(expect.objectContaining({ value: 'photo.png', locale: 'fr' }));
+    expect(lookups.every(({ locale }) => locale === 'fr')).toBe(true);
   });
 
   test('detects the kind of a file and shows a player with controls', async () => {
@@ -50,7 +124,35 @@ describe('FilePreviewItem', () => {
   });
 
   test('shows nothing for a blank value or an unresolved blob', async () => {
+    expect((await renderItem('')).querySelector('p')).toBeNull();
     expect((await renderItem('  ')).querySelector('p')).toBeNull();
     expect((await renderItem('blob:abc')).querySelector('p')).toBeNull();
+  });
+
+  test('ignores the preview of an earlier value resolved after the current one', async () => {
+    const slow = 'https://example.com/slow.png';
+    const fast = 'https://example.com/fast.png';
+    const fastURL = `${PNG_DATA_URL}#fast`;
+    /** @type {MediaField} */
+    const fieldConfig = { name: 'doc', widget: 'image' };
+    const props = $state({ value: slow, fieldConfig, typedKeyPath: 'doc' });
+
+    mockedURLs.set(slow, { url: `${PNG_DATA_URL}#slow`, delay: 200 });
+    mockedURLs.set(fast, { url: fastURL, delay: 0 });
+    onTestFinished(() => {
+      mockedURLs.clear();
+    });
+
+    const { container } = await renderWithDraft(FilePreviewItem, {
+      draft: createMockDraft({ fields: [fieldConfig] }),
+      props,
+    });
+
+    props.value = fast;
+    await expect.poll(() => container.querySelector('img')?.getAttribute('src')).toBe(fastURL);
+    await new Promise((resolve) => {
+      setTimeout(resolve, 300);
+    });
+    expect(container.querySelector('img')?.getAttribute('src')).toBe(fastURL);
   });
 });

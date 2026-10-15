@@ -1,18 +1,15 @@
-import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { page } from 'vitest/browser';
 
 import { copyFromLocale } from '$lib/services/contents/draft/update/copy';
 import { prefs } from '$lib/services/user/prefs.svelte';
+import { initTestConfig } from '$lib/test/config';
 import { createMockDraft, renderWithDraft } from '$lib/test/draft';
 
 import CopyMenuItems from './copy-menu-items.svelte';
 
-vi.mock('$lib/services/contents/draft/update/copy', () => ({
-  getTurndownService: vi.fn(),
-  getCopyingFieldMap: vi.fn(),
-  updateToast: vi.fn(),
-  translateFields: vi.fn(),
-  copyFields: vi.fn(),
+vi.mock('$lib/services/contents/draft/update/copy', async (importOriginal) => ({
+  ...(await importOriginal()),
   copyFromLocale: vi.fn(),
 }));
 
@@ -32,7 +29,7 @@ const i18n = {
  */
 const renderItems = async (props, draftProps = {}) => {
   const draft = createMockDraft({
-    fields: [{ name: 'title', widget: 'string' }],
+    fields: [{ name: 'title', widget: 'string', i18n: true }],
     i18n,
     values: {
       en: { title: 'Hello' },
@@ -48,6 +45,25 @@ const renderItems = async (props, draftProps = {}) => {
 };
 
 describe('CopyMenuItems', () => {
+  beforeAll(async () => {
+    // Only a translatable field is copied, which the configuration tells
+    await initTestConfig({
+      i18n: { structure: 'multiple_folders', locales: ['en', 'fr', 'de'], default_locale: 'en' },
+      collections: [
+        {
+          name: 'posts',
+          label: 'Posts',
+          folder: 'content/posts',
+          i18n: true,
+          fields: [
+            { name: 'title', widget: 'string', i18n: true },
+            { name: 'tags', widget: 'list', i18n: true },
+          ],
+        },
+      ],
+    });
+  });
+
   beforeEach(() => {
     prefs.defaultTranslationService = 'google';
   });
@@ -66,7 +82,20 @@ describe('CopyMenuItems', () => {
     expect(copyFromLocale).toHaveBeenCalledWith({
       draft,
       options: { sourceLanguage: 'fr', targetLanguage: 'de', keyPath: 'title', translate: false },
+      entryDraft: expect.objectContaining({ current: draft }),
     });
+  });
+
+  test('names a locale by its code when it has no display name', async () => {
+    // `en_US` isn’t a valid language tag, so `Intl.DisplayNames` can’t name it
+    await renderItems({ locale: 'de', otherLocales: ['en_US'], keyPath: 'title' });
+
+    const items = page.getByRole('menuitem');
+
+    await expect.poll(() => items.elements().length).toBe(1);
+    expect(items.elements().map((el) => el.textContent?.trim())).toEqual([
+      'Copy from \u2068en_US\u2069',
+    ]);
   });
 
   test('disables copying from a locale with the same or no value', async () => {
@@ -82,6 +111,31 @@ describe('CopyMenuItems', () => {
     await expect
       .element(page.getByRole('menuitem', { name: 'Copy from \u2068German\u2069' }))
       .toBeDisabled();
+  });
+
+  test('offers to copy a List field, whose value is stored under its items', async () => {
+    const draft = createMockDraft({
+      fields: [{ name: 'tags', widget: 'list', i18n: true }],
+      i18n,
+      values: {
+        en: { 'tags.0': 'apple', 'tags.1': 'banana' },
+        fr: { 'tags.0': 'apple', 'tags.1': 'banana' },
+        de: { 'tags.0': 'Apfel' },
+      },
+    });
+
+    await renderWithDraft(CopyMenuItems, {
+      draft,
+      props: { locale: 'de', otherLocales: ['en', 'fr'], keyPath: 'tags' },
+    });
+
+    await expect.poll(() => page.getByRole('menuitem').elements().length).toBe(2);
+    await expect
+      .element(page.getByRole('menuitem', { name: 'Copy from \u2068English\u2069' }))
+      .toBeEnabled();
+    await expect
+      .element(page.getByRole('menuitem', { name: 'Copy from \u2068French\u2069' }))
+      .toBeEnabled();
   });
 
   test('disables copying from or to a disabled locale', async () => {
@@ -113,6 +167,7 @@ describe('CopyMenuItems', () => {
     expect(copyFromLocale).toHaveBeenCalledWith({
       draft,
       options: { sourceLanguage: 'en', targetLanguage: 'de', keyPath: '', translate: true },
+      entryDraft: expect.objectContaining({ current: draft }),
     });
   });
 

@@ -1,15 +1,22 @@
-import { getPathInfo } from '@sveltia/utils/file';
 import { compare } from '@sveltia/utils/string';
 
 import { allAssetFolders, selectedAssetFolder } from '$lib/services/assets/folders';
+import { isCmsFolderName, isCmsFolderPath } from '$lib/services/assets/reserved';
+import { allAssets } from '$lib/services/assets/state';
 import { gitConfigFiles } from '$lib/services/backends/git/shared/config';
 import { slugify } from '$lib/services/common/slug';
 import { getDefaultMediaLibraryOptions } from '$lib/services/integrations/media-libraries/default';
-import { createPath, sanitizeFileName } from '$lib/services/utils/file';
+import { createPath, getDirName, sanitizeFileName } from '$lib/services/utils/file';
 import { createDerivedState, createRawState } from '$lib/services/utils/state.svelte';
 
 /**
- * @import { Asset, AssetFolderInfo, AssetSubfolder, UploadingAssets } from '$lib/types/private';
+ * @import {
+ * Asset,
+ * AssetFolderInfo,
+ * AssetSubfolder,
+ * BreadcrumbItem,
+ * UploadingAssets,
+ * } from '$lib/types/private';
  */
 
 /**
@@ -36,14 +43,6 @@ export const renamingSubfolder = createRawState();
  * @type {{ current: AssetSubfolder | undefined }}
  */
 export const deletingSubfolder = createRawState();
-
-/**
- * Get the directory part of a file path. Unlike `getPathInfo()`, which has no directory for a file
- * at the root, this is always a string, so a root file’s directory compares equal to the root path.
- * @param {string} path File path.
- * @returns {string} Directory path, which is an empty string for a file at the root.
- */
-export const getDirName = (path) => getPathInfo(path).dirname ?? '';
 
 /**
  * Check if the given asset folder can be browsed by subfolder, which takes a folder whose files all
@@ -145,6 +144,14 @@ export const browsedDirPath = createDerivedState(() => {
 });
 
 /**
+ * Whether the directory being browsed in the Asset Library is, or is below, a folder the CMS itself
+ * is usually served from, such as `admin`. Nothing can be uploaded or created there.
+ */
+export const browsingCmsFolder = createDerivedState(() =>
+  isCmsFolderPath(browsedDirPath.current ?? ''),
+);
+
+/**
  * List the immediate subfolders of a directory, read off the paths of the files below it. A folder
  * isn’t an object of its own in a Git repository or an object storage bucket, so this is how the
  * folders are found. A folder path ending with a slash stands for an empty folder kept by a
@@ -173,6 +180,86 @@ export const listSubfolders = ({ dirPath, paths }) => {
   });
 
   return [...names].sort(compare).map((name) => ({ name, path: createPath([dirPath, name]) }));
+};
+
+/**
+ * Get the names already taken in a directory, by a subfolder or a file, which a new or renamed
+ * subfolder can’t be given.
+ * @param {object} args Arguments.
+ * @param {AssetSubfolder[]} args.subfolders Subfolders of the directory.
+ * @param {string[]} args.fileNames Names of the files right in the directory.
+ * @param {string} [args.exclude] Name of the subfolder being renamed, which it can keep.
+ * @param {string} [args.dirPath] Path of the directory in the repository. When given, the names of
+ * the subfolders leading to another configured asset folder nested in it, e.g. `projects` in
+ * `static/uploads` for a collection’s `static/uploads/projects` folder, are taken too: such a
+ * folder isn’t listed as a subfolder, as it’s browsed as a folder of its own, but a subfolder
+ * renamed or created with its name would be merged into it.
+ * @returns {string[]} Names.
+ */
+export const getTakenNames = ({
+  subfolders,
+  fileNames,
+  exclude = undefined,
+  dirPath = undefined,
+}) => [
+  ...subfolders.map(({ name }) => name).filter((name) => name !== exclude),
+  ...fileNames,
+  ...(dirPath === undefined
+    ? []
+    : listSubfolders({
+        dirPath,
+        // A trailing slash makes `listSubfolders` read the folder itself as a subfolder path
+        paths: allAssetFolders.current
+          .filter(({ internalPath, hasTemplateTags }) => internalPath && !hasTemplateTags)
+          .map(({ internalPath }) => `${internalPath}/`),
+      }).map(({ name }) => name)),
+];
+
+/**
+ * Get the names of every folder right in a directory of the repository, which a file renamed in it
+ * can’t take: the folders holding assets or Git config files, whichever asset folder they belong
+ * to, and the ones leading to a configured asset folder nested in the directory.
+ * @param {string} dirPath Directory path. An empty string for the repository root.
+ * @returns {string[]} Names.
+ */
+export const getFolderNamesInDir = (dirPath) =>
+  getTakenNames({
+    subfolders: listSubfolders({
+      dirPath,
+      paths: [...allAssets.current, ...gitConfigFiles.current].map(({ path }) => path),
+    }),
+    fileNames: [],
+    dirPath,
+  });
+
+/**
+ * Get the breadcrumb trail of the subfolder being browsed, from the location root down. Each
+ * ancestor leads back to itself; the last item is the subfolder being browsed.
+ * @param {object} args Arguments.
+ * @param {string} args.rootLabel Label of the location root, e.g. the asset folder or the cloud
+ * storage service.
+ * @param {string[]} args.subfolderNames Names of the subfolders leading to the one being browsed,
+ * from the location root down. Empty at the root.
+ * @param {(ancestor: { depth: number, path: string }) => void} args.onBrowse Called when an
+ * ancestor is selected, with how many subfolder names to keep, `0` being the root, and its path
+ * relative to the root, which is an empty string for the root.
+ * @returns {BreadcrumbItem[]} Items. Empty at the root, where there is no trail to show.
+ */
+export const getFolderBreadcrumbItems = ({ rootLabel, subfolderNames, onBrowse }) => {
+  if (!subfolderNames.length) {
+    return [];
+  }
+
+  return [
+    ...[rootLabel, ...subfolderNames.slice(0, -1)].map((label, depth) => ({
+      label,
+      // eslint-disable-next-line jsdoc/require-jsdoc
+      onClick: () => {
+        onBrowse({ depth, path: subfolderNames.slice(0, depth).join('/') });
+      },
+    })),
+    { label: /** @type {string} */ (subfolderNames.at(-1)) },
+  ];
 };
 
 /**
@@ -209,6 +296,16 @@ export const getSubfolders = ({ dirPath, assets }) => {
 };
 
 /**
+ * Get the assets right in a directory, leaving out the ones in its subfolders.
+ * @param {object} args Arguments.
+ * @param {string} args.dirPath Directory path. An empty string for the repository root.
+ * @param {Asset[]} args.assets Assets below the directory, at any depth.
+ * @returns {Asset[]} Assets in the directory.
+ */
+export const getAssetsInDir = ({ dirPath, assets }) =>
+  assets.filter(({ path }) => getDirName(path) === dirPath);
+
+/**
  * Get the path of the directory that uploaded files are saved to, which is the target folder’s
  * `internalPath` joined with the subfolder path, if any.
  * @param {UploadingAssets} uploadingAssets Files to be uploaded and their target folder.
@@ -241,8 +338,8 @@ export const formatSubfolderName = (name) => {
  * @param {string[]} args.takenNames Names of the files and folders already in the parent
  * directory. A Git tree can’t hold a blob and a subtree under one name, so a file name is taken as
  * well.
- * @returns {'empty' | 'invalid' | 'duplicate' | undefined} What stops the name from being used, or
- * `undefined` if it can be used.
+ * @returns {'empty' | 'invalid' | 'reserved' | 'duplicate' | undefined} What stops the name from
+ * being used, or `undefined` if it can be used.
  */
 export const validateSubfolderName = ({ name, takenNames }) => {
   const trimmedName = name.trim();
@@ -257,6 +354,11 @@ export const validateSubfolderName = ({ name, takenNames }) => {
   // listings, and sanitization can leave nothing to name the folder with
   if (!folderName || trimmedName.includes('/') || folderName.startsWith('.')) {
     return 'invalid';
+  }
+
+  // The files in a folder the CMS itself is usually served from are read-only
+  if (isCmsFolderName(folderName)) {
+    return 'reserved';
   }
 
   const normalizedName = folderName.normalize().toLowerCase();

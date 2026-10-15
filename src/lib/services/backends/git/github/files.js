@@ -1,4 +1,3 @@
-import { getPathInfo } from '@sveltia/utils/file';
 import mime from 'mime';
 
 import { fetchLastCommit } from '$lib/services/backends/git/github/commits';
@@ -9,15 +8,19 @@ import {
 } from '$lib/services/backends/git/github/fork';
 import { fetchAliasedBatch } from '$lib/services/backends/git/github/graphql';
 import {
+  checkBranchAccess,
   checkRepositoryAccess,
   fetchDefaultBranchName,
   repository,
 } from '$lib/services/backends/git/github/repository';
-import { fetchAPI } from '$lib/services/backends/git/shared/api';
-import { runConcurrently } from '$lib/services/backends/git/shared/concurrency';
-import { fetchAndParseFiles } from '$lib/services/backends/git/shared/fetch';
+import { fetchAPI, fetchGraphQL } from '$lib/services/backends/git/shared/api';
+import { mapConcurrently, runConcurrently } from '$lib/services/backends/git/shared/concurrency';
+import { createLocalizedError } from '$lib/services/backends/git/shared/errors';
+import { fetchRepositoryFiles } from '$lib/services/backends/git/shared/files';
 import { startSimulatedProgress } from '$lib/services/backends/git/shared/progress';
-import { openAuthoringInitialized } from '$lib/services/workflow/open-authoring';
+import { toFileListItems } from '$lib/services/backends/git/shared/tree';
+import { getRootDir } from '$lib/services/backends/root-dir';
+import { encodePathSegments } from '$lib/services/utils/url';
 
 /**
  * @import {
@@ -30,21 +33,123 @@ import { openAuthoringInitialized } from '$lib/services/workflow/open-authoring'
  */
 
 /**
- * Fetch the repository’s complete file list, and return it in the canonical format.
+ * @typedef {{ type: string, path: string, sha: string, size: number }} GitTreeEntry
+ */
+
+/**
+ * Fetch a Git tree.
+ * @param {string} treeRef Commit SHA, branch name or tree SHA.
+ * @param {boolean} recursive Whether to list the subtrees as well.
+ * @returns {Promise<{ tree: GitTreeEntry[], truncated: boolean }>} Tree, and whether the response
+ * was truncated because the tree is too big.
+ * @see https://docs.github.com/en/rest/git/trees#get-a-tree
+ */
+const fetchTree = async (treeRef, recursive) => {
+  const { owner, repo } = repository;
+  const query = recursive ? '?recursive=1' : '';
+
+  return /** @type {{ tree: GitTreeEntry[], truncated: boolean }} */ (
+    await fetchAPI(`/repos/${owner}/${repo}/git/trees/${encodePathSegments(treeRef)}${query}`)
+  );
+};
+
+/**
+ * Fetch the repository’s complete file list, and return it in the canonical format. A tree too big
+ * to be listed recursively in one response, as in a huge repository, has its subtrees listed
+ * separately instead, as GitHub suggests. With the `root_dir` backend option, only the files in
+ * that directory are listed, which saves listing the whole of a big monorepo; the paths are still
+ * relative to the repository root.
  * @param {string} [lastHash] The last commit’s SHA-1 hash.
  * @returns {Promise<BaseFileListItemProps[]>} File list.
+ * @throws {Error} If a single directory has too many files to list, or if the root directory
+ * doesn’t exist.
  */
 export const fetchFileList = async (lastHash) => {
-  const { owner, repo, branch } = repository;
+  const ref = /** @type {string} */ (lastHash ?? repository.branch);
+  const rootDir = getRootDir();
+  /** @type {GitTreeEntry[]} */
+  const blobs = [];
 
-  const result =
-    /** @type {{ tree: { type: string, path: string, sha: string, size: number }[] }} */ (
-      await fetchAPI(`/repos/${owner}/${repo}/git/trees/${lastHash ?? branch}?recursive=1`)
+  /** @type {{ sha: string, prefix: string }[]} */
+  let pending = [
+    // A tree-ish expression addresses the directory’s tree without looking its SHA up first
+    rootDir ? { sha: `${ref}:${rootDir}`, prefix: `${rootDir}/` } : { sha: ref, prefix: '' },
+  ];
+
+  // One level at a time, so the requests in flight stay within the concurrency limit
+  while (pending.length) {
+    // eslint-disable-next-line no-await-in-loop
+    const results = await mapConcurrently(pending, async ({ sha, prefix }) => {
+      const { tree, truncated } = await fetchTree(sha, true).catch((ex) => {
+        if (rootDir && sha === `${ref}:${rootDir}` && ex?.cause?.status === 404) {
+          throw createLocalizedError('Failed to list the files.', 'root_dir_not_found', {
+            repo: `${repository.owner}/${repository.repo}`,
+            dir: rootDir,
+          });
+        }
+
+        throw ex;
+      });
+
+      if (!truncated) {
+        return { prefix, entries: tree, subtrees: [] };
+      }
+
+      // List this directory alone, and its subdirectories separately
+      const { tree: children, truncated: tooBig } = await fetchTree(sha, false);
+
+      if (tooBig) {
+        throw new Error(`The directory '${prefix || '/'}' has too many files to list.`);
+      }
+
+      return {
+        prefix,
+        entries: children,
+        subtrees: children.filter(({ type }) => type === 'tree'),
+      };
+    });
+
+    pending = results.flatMap(({ prefix, subtrees }) =>
+      subtrees.map(({ path, sha }) => ({ sha, prefix: `${prefix}${path}/` })),
     );
 
-  return result.tree
-    .filter(({ type }) => type === 'blob')
-    .map(({ path, sha, size }) => ({ path, sha, size, name: getPathInfo(path).basename }));
+    results.forEach(({ prefix, entries }) => {
+      entries.forEach((entry) => {
+        if (entry.type === 'blob') {
+          blobs.push({ ...entry, path: `${prefix}${entry.path}` });
+        }
+      });
+    });
+  }
+
+  return toFileListItems(blobs);
+};
+
+const FETCH_DIR_SHA_QUERY = `
+  query($owner: String!, $repo: String!, $expression: String!) {
+    repository(owner: $owner, name: $repo) {
+      object(expression: $expression) {
+        oid
+      }
+    }
+  }
+`;
+
+/**
+ * Find the tree SHA of a directory at the given commit.
+ * @param {string} ref Commit SHA or branch name.
+ * @param {string} dirPath Directory path relative to the repository root.
+ * @returns {Promise<string | undefined>} Tree SHA, or `undefined` if the directory doesn’t exist.
+ * @see https://docs.github.com/en/graphql/reference/objects#repository
+ */
+export const fetchDirSHA = async (ref, dirPath) => {
+  const { owner, repo } = repository;
+
+  const result = /** @type {{ repository?: { object?: { oid: string } | null } | null }} */ (
+    await fetchGraphQL(FETCH_DIR_SHA_QUERY, { owner, repo, expression: `${ref}:${dirPath}` })
+  );
+
+  return result.repository?.object?.oid;
 };
 
 /**
@@ -167,18 +272,29 @@ export const parseFileContents = async (fetchingFiles, results) => {
  */
 export const parseFileMetadata = (fetchingFiles, results) =>
   Object.fromEntries(
-    fetchingFiles.map(({ path }, index) => {
-      const {
-        author: { name, email, user: _user },
-        committedDate,
-      } = results[index].target.history.nodes[0];
+    fetchingFiles.flatMap(({ path }, index) => {
+      const commit = results[index]?.target?.history?.nodes?.[0];
+
+      // The file may have been deleted since the tree was fetched, leaving no commit to read. Skip
+      // it rather than losing the metadata of every other file; it’s fetched again next time
+      if (!commit) {
+        return [];
+      }
+
+      const { author, committedDate } = commit;
+      const user = author?.user;
 
       return [
-        path,
-        {
-          commitAuthor: { name, email, id: _user?.id, login: _user?.login },
-          commitDate: new Date(committedDate),
-        },
+        [
+          path,
+          {
+            // The author can be `null` when the commit has no valid author info
+            commitAuthor: author
+              ? { name: author.name, email: author.email, id: user?.id, login: user?.login }
+              : undefined,
+            commitDate: new Date(committedDate),
+          },
+        ],
       ];
     }),
   );
@@ -235,24 +351,20 @@ export const fetchFileMetadata = async (fetchingFiles) =>
 /**
  * Fetch file list from the backend service, download/parse all the entry files, then cache them in
  * the {@link allEntries} and {@link allAssets} stores.
+ * @param {object} [options] Options.
+ * @param {{ hash: string, message: string }} [options.lastCommit] Last commit on the branch, if the
+ * caller has just fetched it, so it isn’t fetched again.
  */
-export const fetchFiles = async () => {
-  // With Open Authoring, a user without write access is a contributor rather than a stranger, so
-  // they’re given a fork to work in instead of being turned away. Setting the fork up may involve
-  // the user, so it has to finish before the data is fetched, unlike a plain access check
-  const openAuthoring = isOpenAuthoringConfigured();
-
-  // Once only: a later call brings the stores up to date with the repository, and setting the fork
-  // up again would reset the fork state while a workflow commit may be relying on it
-  if (openAuthoring && !openAuthoringInitialized.current) {
-    await initOpenAuthoring();
-  }
-
-  await fetchAndParseFiles({
+export const fetchFiles = async ({ lastCommit } = {}) => {
+  await fetchRepositoryFiles({
+    isOpenAuthoringConfigured,
+    initOpenAuthoring,
     repository,
-    checkAccess: openAuthoring ? undefined : checkRepositoryAccess,
+    checkAccess: checkRepositoryAccess,
+    checkBranchAccess,
     fetchDefaultBranchName,
     fetchLastCommit,
+    lastCommit,
     fetchFileList,
     fetchFileContents,
     fetchFileMetadata,
@@ -273,6 +385,12 @@ export const fetchBlob = async (asset) => {
   const response = /** @type {Response} */ (
     await requestBlob({ owner, repo, sha, responseType: 'raw' })
   );
+
+  // A `raw` response skips the shared error handling, so an error body would otherwise be returned
+  // as the file content, and moving or renaming the asset would commit it in place of the file
+  if (!response.ok) {
+    throw new Error('Failed to fetch the blob', { cause: { status: response.status } });
+  }
 
   // Handle SVG and other non-binary files
   if (response.headers.get('Content-Type') !== 'application/octet-stream') {

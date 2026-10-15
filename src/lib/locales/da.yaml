@@ -477,13 +477,20 @@ entry_not_found: Dokumentet blev ikke fundet.
 # Entry creation restrictions: tooltip and advisory messages
 creating_entries_disabled_by_admin: Oprettelse af nye dokumenter i denne samling er deaktiveret af administratoren.
 # {$quota} is the collection’s maximum entry count
-creating_entries_disabled_by_quota: Du kan ikke tilføje nye dokumenter til denne samling da den har nået sin grænse på {$quota} dokumenter.
+creating_entries_disabled_by_quota: |
+  .input {$quota :integer}
+  .match $quota
+    one {{ Du kan ikke tilføje nye dokumenter til denne samling da den har nået sin grænse på {$quota} dokument. }}
+    *   {{ Du kan ikke tilføje nye dokumenter til denne samling da den har nået sin grænse på {$quota} dokumenter. }}
 # {$quota} is the collection limit and {$remaining} is the number of entries that can still be created
 creating_entries_nearing_quota: |
+  .input {$quota :integer}
   .input {$remaining :integer}
-  .match $remaining
-    one {{ Denne samling nærmer sig sin grænse på {$quota} dokumenter. Du kan kun oprette {$remaining} dokument mere. }}
-    *   {{ Denne samling nærmer sig sin grænse på {$quota} dokumenter. Du kan kun oprette {$remaining} dokumenter mere. }}
+  .match $quota $remaining
+    one one {{ Denne samling nærmer sig sin grænse på {$quota} dokument. Du kan kun oprette {$remaining} dokument mere. }}
+    one *   {{ Denne samling nærmer sig sin grænse på {$quota} dokument. Du kan kun oprette {$remaining} dokumenter mere. }}
+    *   one {{ Denne samling nærmer sig sin grænse på {$quota} dokumenter. Du kan kun oprette {$remaining} dokument mere. }}
+    *   *   {{ Denne samling nærmer sig sin grænse på {$quota} dokumenter. Du kan kun oprette {$remaining} dokumenter mere. }}
 
 # Navigation: back links and list labels
 back_to_collection: Tilbage til samlingen
@@ -1558,7 +1565,7 @@ config:
     oauth_implicit_flow: Den konfigurerede autentificeringsmetode (implicit flow) understøttes ikke i Sveltia CMS. Brug en anden <a>autentificeringsmetode</a> i stedet.
     github_pkce_unsupported: PKCE-autorisation understøttes endnu ikke på grund af begrænsninger hos GitHub. Brug en anden <a>autentificeringsmetode</a> i stedet.
     oauth_no_app_id: OAuth-applikationens id er ikke defineret.
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: Indstillingen `open_authoring` kræver udgivelsestilstanden `editorial_workflow`. Se <a>dokumentationen</a> for detaljer.
     # Don’t localize `auth_methods`
     no_auth_methods: Indstillingen `auth_methods` skal indeholde mindst én metode.
@@ -1680,8 +1687,6 @@ config:
   # Warning messages (logged to console)
   warning:
     oauth_no_app_id: OAuth-applikationens id er ikke defineret. Brugere skal angive et adgangstoken for at logge ind.
-    editorial_workflow_unsupported: Redaktionel arbejdsgang understøttes endnu ikke i Sveltia CMS.
-    open_authoring_unsupported_backend: Open Authoring understøttes i øjeblikket kun med GitHub-backend.
     # {$prop} is the unsupported option name that will be ignored
     unsupported_ignored_option: Indstillingen `{$prop}` understøttes ikke i Sveltia CMS. Den bliver ignoreret.
     # Don’t localize `picker_utc`, `input_timezone`, and `output_utc`
@@ -1821,8 +1826,6 @@ workflow:
     .match $count
       one {{ Et af dem er endnu ikke udgivet, så dine ikke-udgivne ændringer bliver kasseret. En eventuel udgivet version forbliver udgivet. }}
       *   {{ {$count} af dem er endnu ikke udgivet, så dine ikke-udgivne ændringer bliver kasseret. Eventuelle udgivne versioner forbliver udgivet. }}
-  # Confirmation dialog shown before merging the pull request. Keep the wording free of Git jargon.
-  confirm_publishing_entry: Er du sikker på at du vil udgive dette dokument? Dine ændringer træder i kraft med det samme.
   # Workflow page: toast notifications shown while an entry is being published from a card, and
   # once publishing has completed
   publishing_entry: Udgiver dokument…
@@ -1976,13 +1979,23 @@ prefs:
       description: Vis understregning af links i forhåndsvisningen af dokumenter og i brugerfladens tekster.
       switch_label: Understreg altid links
 
-  # Advanced panel
-  advanced:
-    title: Avanceret
-    beta:
-      title: Betafunktioner
-      description: Slå betafunktioner til. De kan være ustabile eller mangle oversættelse.
-      switch_label: Deltag i betaprogrammet
+  # Data Management panel
+  data:
+    clear_data:
+      title: Ryd data
+      # Clear File Cache button
+      file_cache:
+        description: Slet lokalt cachelagret filindhold og miniaturebilleder for at frigøre lagerplads eller løse problemer forårsaget af forældede data.
+        button_label: Ryd filcache
+        confirmation: Lokalt cachelagret filindhold og miniaturebilleder bliver slettet. Dine ikke-gemte kladder og indstillinger bevares, og slettede data bliver downloadet eller genereret igen efter behov. CMS’et genindlæses når det er færdigt.
+      # Erase All Data button
+      all_data:
+        description: Slet alt hvad CMS’et gemmer i denne browser, herunder cachelagrede filer, ikke-gemte kladder og indstillinger. Det der allerede er gemt i dit repositorium, bliver ikke påvirket.
+        button_label: Slet alle data
+        confirmation: Alle data der er gemt i denne browser, bliver slettet, herunder cachelagret filindhold, miniaturebilleder, ikke-gemte kladder, indstillinger og loginstatus. Dit repositorium bliver ikke påvirket, men alle ændringer du ikke har gemt, går tabt, og du skal logge ind igen. CMS’et genindlæses når det er færdigt.
+
+  # Developer panel
+  developer:
     developer_mode:
       title: Udviklertilstand
       description: Slå udviklerorienterede funktioner til, herunder detaljerede konsollogs og systemets egne kontekstmenuer.
@@ -2000,18 +2013,6 @@ prefs:
         field_label: Authorization-header (fx Bearer <token>) (valgfri)
         saved: Authorization-headeren er gemt.
         removed: Authorization-headeren er fjernet.
-    clear_data:
-      title: Ryd data
-      # Clear File Cache button
-      file_cache:
-        description: Slet lokalt cachelagret filindhold og miniaturebilleder for at frigøre lagerplads eller løse problemer forårsaget af forældede data.
-        button_label: Ryd filcache
-        confirmation: Lokalt cachelagret filindhold og miniaturebilleder bliver slettet. Dine ikke-gemte kladder og indstillinger bevares, og slettede data bliver downloadet eller genereret igen efter behov. CMS’et genindlæses når det er færdigt.
-      # Erase All Data button
-      all_data:
-        description: Slet alt hvad CMS’et gemmer i denne browser, herunder cachelagrede filer, ikke-gemte kladder og indstillinger. Det der allerede er gemt i dit repositorium, bliver ikke påvirket.
-        button_label: Slet alle data
-        confirmation: Alle data der er gemt i denne browser, bliver slettet, herunder cachelagret filindhold, miniaturebilleder, ikke-gemte kladder, indstillinger og loginstatus. Dit repositorium bliver ikke påvirket, men alle ændringer du ikke har gemt, går tabt, og du skal logge ind igen. CMS’et genindlæses når det er færdigt.
 
 # ==============================================================================
 # Keyboard Shortcuts

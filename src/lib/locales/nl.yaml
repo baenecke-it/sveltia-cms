@@ -477,13 +477,20 @@ entry_not_found: Item niet gevonden.
 # Entry creation restrictions: tooltip and advisory messages
 creating_entries_disabled_by_admin: Het aanmaken van nieuwe items in deze collectie is uitgeschakeld door de beheerder.
 # {$quota} is the collection’s maximum entry count
-creating_entries_disabled_by_quota: Je kunt geen nieuwe items toevoegen aan deze collectie, omdat de limiet van {$quota} items is bereikt.
+creating_entries_disabled_by_quota: |
+  .input {$quota :integer}
+  .match $quota
+    one {{ Je kunt geen nieuwe items toevoegen aan deze collectie, omdat de limiet van {$quota} item is bereikt. }}
+    *   {{ Je kunt geen nieuwe items toevoegen aan deze collectie, omdat de limiet van {$quota} items is bereikt. }}
 # {$quota} is the collection limit and {$remaining} is the number of entries that can still be created
 creating_entries_nearing_quota: |
+  .input {$quota :integer}
   .input {$remaining :integer}
-  .match $remaining
-    one {{ Deze collectie nadert de limiet van {$quota} items. Je kunt nog maar {$remaining} item aanmaken. }}
-    *   {{ Deze collectie nadert de limiet van {$quota} items. Je kunt nog maar {$remaining} items aanmaken. }}
+  .match $quota $remaining
+    one one {{ Deze collectie nadert de limiet van {$quota} item. Je kunt nog maar {$remaining} item aanmaken. }}
+    one *   {{ Deze collectie nadert de limiet van {$quota} item. Je kunt nog maar {$remaining} items aanmaken. }}
+    *   one {{ Deze collectie nadert de limiet van {$quota} items. Je kunt nog maar {$remaining} item aanmaken. }}
+    *   *   {{ Deze collectie nadert de limiet van {$quota} items. Je kunt nog maar {$remaining} items aanmaken. }}
 
 # Navigation: back links and list labels
 back_to_collection: Terug naar de collectie
@@ -1558,7 +1565,7 @@ config:
     oauth_implicit_flow: De geconfigureerde authenticatiemethode (implicit flow) wordt niet ondersteund in Sveltia CMS. Gebruik in plaats daarvan een andere <a>authenticatiemethode</a>.
     github_pkce_unsupported: PKCE-autorisatie wordt nog niet ondersteund vanwege beperkingen van GitHub. Gebruik in plaats daarvan een andere <a>authenticatiemethode</a>.
     oauth_no_app_id: De OAuth-applicatie-ID is niet gedefinieerd.
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: De optie `open_authoring` vereist de publicatiemodus `editorial_workflow`. Zie de <a>documentatie</a> voor details.
     # Don’t localize `auth_methods`
     no_auth_methods: De optie `auth_methods` moet minstens één methode bevatten.
@@ -1680,8 +1687,6 @@ config:
   # Warning messages (logged to console)
   warning:
     oauth_no_app_id: De OAuth-applicatie-ID is niet gedefinieerd. Gebruikers moeten een toegangstoken opgeven om in te loggen.
-    editorial_workflow_unsupported: De redactionele workflow wordt nog niet ondersteund in Sveltia CMS.
-    open_authoring_unsupported_backend: Open Authoring wordt momenteel alleen ondersteund met de GitHub-backend.
     # {$prop} is the unsupported option name that will be ignored
     unsupported_ignored_option: De optie `{$prop}` wordt niet ondersteund in Sveltia CMS. Deze wordt genegeerd.
     # Don’t localize `picker_utc`, `input_timezone`, and `output_utc`
@@ -1821,8 +1826,6 @@ workflow:
     .match $count
       one {{ Een ervan is nog niet gepubliceerd, dus je niet-gepubliceerde wijzigingen worden verworpen. Een eventueel gepubliceerde versie blijft gepubliceerd. }}
       *   {{ {$count} ervan zijn nog niet gepubliceerd, dus je niet-gepubliceerde wijzigingen worden verworpen. Eventueel gepubliceerde versies blijven gepubliceerd. }}
-  # Confirmation dialog shown before merging the pull request. Keep the wording free of Git jargon.
-  confirm_publishing_entry: Weet je zeker dat je dit item wilt publiceren? Je wijzigingen worden direct van kracht.
   # Workflow page: toast notifications shown while an entry is being published from a card, and
   # once publishing has completed
   publishing_entry: Item wordt gepubliceerd…
@@ -1976,13 +1979,23 @@ prefs:
       description: Links onderstrepen in het voorbeeld van het item en in labels van de gebruikersinterface.
       switch_label: Links altijd onderstrepen
 
-  # Advanced panel
-  advanced:
-    title: Geavanceerd
-    beta:
-      title: Bètafuncties
-      description: Schakel bètafuncties in die mogelijk instabiel of nog niet vertaald zijn.
-      switch_label: Deelnemen aan het bètaprogramma
+  # Data Management panel
+  data:
+    clear_data:
+      title: Gegevens wissen
+      # Clear File Cache button
+      file_cache:
+        description: Verwijder de lokaal gecachte bestandsinhoud en afbeeldingsminiaturen om opslagruimte vrij te maken of problemen door verouderde gegevens op te lossen.
+        button_label: Bestandscache wissen
+        confirmation: De lokaal gecachte bestandsinhoud en afbeeldingsminiaturen worden verwijderd. Je niet-opgeslagen concepten en instellingen blijven behouden, en verwijderde gegevens worden waar nodig opnieuw gedownload of gegenereerd. Het CMS wordt daarna opnieuw geladen.
+      # Erase All Data button
+      all_data:
+        description: Verwijder alles wat het CMS in deze browser bewaart, inclusief gecachte bestanden, niet-opgeslagen concepten en instellingen. Alles wat al in je repository is opgeslagen, blijft ongewijzigd.
+        button_label: Alle gegevens wissen
+        confirmation: Alle gegevens die in deze browser zijn opgeslagen, worden verwijderd, inclusief gecachte bestandsinhoud, afbeeldingsminiaturen, niet-opgeslagen concepten, instellingen en de inlogstatus. Je repository blijft ongewijzigd, maar wijzigingen die je niet hebt opgeslagen gaan verloren en je moet opnieuw inloggen. Het CMS wordt daarna opnieuw geladen.
+
+  # Developer panel
+  developer:
     developer_mode:
       title: Ontwikkelaarsmodus
       description: Schakel functies voor ontwikkelaars in, waaronder gedetailleerde consolelogs en native contextmenu’s.
@@ -2000,18 +2013,6 @@ prefs:
         field_label: Authorization-header (bijv. Bearer <token>) (optioneel)
         saved: Authorization-header opgeslagen.
         removed: Authorization-header verwijderd.
-    clear_data:
-      title: Gegevens wissen
-      # Clear File Cache button
-      file_cache:
-        description: Verwijder de lokaal gecachte bestandsinhoud en afbeeldingsminiaturen om opslagruimte vrij te maken of problemen door verouderde gegevens op te lossen.
-        button_label: Bestandscache wissen
-        confirmation: De lokaal gecachte bestandsinhoud en afbeeldingsminiaturen worden verwijderd. Je niet-opgeslagen concepten en instellingen blijven behouden, en verwijderde gegevens worden waar nodig opnieuw gedownload of gegenereerd. Het CMS wordt daarna opnieuw geladen.
-      # Erase All Data button
-      all_data:
-        description: Verwijder alles wat het CMS in deze browser bewaart, inclusief gecachte bestanden, niet-opgeslagen concepten en instellingen. Alles wat al in je repository is opgeslagen, blijft ongewijzigd.
-        button_label: Alle gegevens wissen
-        confirmation: Alle gegevens die in deze browser zijn opgeslagen, worden verwijderd, inclusief gecachte bestandsinhoud, afbeeldingsminiaturen, niet-opgeslagen concepten, instellingen en de inlogstatus. Je repository blijft ongewijzigd, maar wijzigingen die je niet hebt opgeslagen gaan verloren en je moet opnieuw inloggen. Het CMS wordt daarna opnieuw geladen.
 
 # ==============================================================================
 # Keyboard Shortcuts
