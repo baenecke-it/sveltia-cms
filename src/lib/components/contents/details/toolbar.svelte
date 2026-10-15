@@ -404,7 +404,9 @@
           {#if isNew}
             {title}
           {:else}
-            <bdi>{collectionLabel}</bdi> › <bdi>{entrySummary}</bdi>
+            <bdi>{collectionLabel}</bdi>
+            ›
+            <bdi>{entrySummary}</bdi>
           {/if}
         </TruncatedText>
       {/if}
@@ -421,7 +423,9 @@
         showSendNewsletterDialog = true;
       }}
     >
-      <Icon slot="start-icon" name="send" />
+      {#snippet endIcon()}
+        <Icon name="send" />
+      {/snippet}
     </Button>
   {/if}
   {#if !env.isSmallScreen}
