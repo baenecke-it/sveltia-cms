@@ -9,10 +9,15 @@ import {
   getMediaFieldAssetOptions,
   getRejectedFileNames,
   processResources,
+  resolveSelectionResult,
   toFieldValue,
 } from '$lib/services/contents/fields/file/resources';
 import { allCloudStorageServices } from '$lib/services/integrations/media-libraries/cloud';
 import { getDefaultMediaLibraryOptions } from '$lib/services/integrations/media-libraries/default';
+
+/**
+ * @import { ProcessResourceResult } from '$lib/services/contents/fields/file/process';
+ */
 
 vi.mock('$lib/services/contents/fields/file/helpers', () => ({
   getAssetLibraryFolderMap: vi.fn(),
@@ -98,11 +103,27 @@ describe('processResources', () => {
       { url: 'https://example.com/a.png' },
     ]);
 
-    const results = await processResources({ draft, resources, folder, libraryConfig });
+    const accept = 'image/png';
+    const locale = 'fr';
+
+    const results = await processResources({
+      draft,
+      resources,
+      folder,
+      libraryConfig,
+      accept,
+      locale,
+    });
 
     expect(resources.map((resource) => resource.folder)).toEqual([folder, ownFolder, undefined]);
     expect(processResource).toHaveBeenCalledTimes(3);
-    expect(processResource).toHaveBeenCalledWith({ draft, resource: resources[0], libraryConfig });
+    expect(processResource).toHaveBeenCalledWith({
+      draft,
+      resource: resources[0],
+      libraryConfig,
+      accept,
+      locale,
+    });
     expect(results.map(({ value }) => value)).toEqual([
       'blob:x',
       'blob:x',
@@ -112,14 +133,25 @@ describe('processResources', () => {
 });
 
 describe('getRejectedFileNames', () => {
-  test('collects the names of the oversized and invalid files', () => {
+  test('collects the names of the oversized, invalid and mismatched files', () => {
     expect(
       getRejectedFileNames([
         { value: 'a', credit: '', oversizedFileName: undefined, invalidFileName: undefined },
         { value: undefined, credit: '', oversizedFileName: 'b.png', invalidFileName: undefined },
         { value: undefined, credit: '', oversizedFileName: undefined, invalidFileName: 'c.png' },
+        {
+          value: undefined,
+          credit: '',
+          oversizedFileName: undefined,
+          invalidFileName: undefined,
+          mismatchedFileName: 'd.png',
+        },
       ]),
-    ).toEqual({ oversizedFileNames: ['b.png'], invalidFileNames: ['c.png'] });
+    ).toEqual({
+      oversizedFileNames: ['b.png'],
+      invalidFileNames: ['c.png'],
+      mismatchedFileNames: ['d.png'],
+    });
   });
 });
 
@@ -127,5 +159,76 @@ describe('toFieldValue', () => {
   test('encodes spaces only in a rich text editor component', () => {
     expect(toFieldValue('/images/my photo.png', true)).toBe('/images/my%20photo.png');
     expect(toFieldValue('/images/my photo.png', false)).toBe('/images/my photo.png');
+  });
+});
+
+describe('resolveSelectionResult', () => {
+  /**
+   * Create a processing result.
+   * @param {Partial<ProcessResourceResult>} [props] Properties.
+   * @returns {ProcessResourceResult} Result.
+   */
+  const result = (props = {}) => ({
+    value: undefined,
+    credit: '',
+    oversizedFileName: undefined,
+    invalidFileName: undefined,
+    ...props,
+  });
+
+  test('takes the last usable resource for a single-file field', () => {
+    expect(
+      resolveSelectionResult({
+        resources: [
+          result({ value: '/a.png', credit: 'Photo A' }),
+          result({ oversizedFileName: 'big.png' }),
+          result({ value: '/my b.png', credit: 'Photo B' }),
+        ],
+        multiple: false,
+        previousValue: '/old.png',
+        inEditorComponent: true,
+      }),
+    ).toEqual({
+      values: ['/a.png', '/my b.png'],
+      value: '/my%20b.png',
+      credit: 'Photo A\nPhoto B',
+      rejected: {
+        oversizedFileNames: ['big.png'],
+        invalidFileNames: [],
+        mismatchedFileNames: [],
+      },
+    });
+  });
+
+  test('restores the previous value of a single-file field without a usable resource', () => {
+    const resources = [result({ invalidFileName: 'bad.png' })];
+
+    expect(
+      resolveSelectionResult({
+        resources,
+        multiple: false,
+        previousValue: '/old.png',
+        inEditorComponent: false,
+      }),
+    ).toMatchObject({ values: [], value: '/old.png', credit: '' });
+    expect(
+      resolveSelectionResult({
+        resources,
+        multiple: false,
+        previousValue: undefined,
+        inEditorComponent: false,
+      }).value,
+    ).toBe('');
+  });
+
+  test('leaves the value of a multiple-file field to the caller', () => {
+    expect(
+      resolveSelectionResult({
+        resources: [result({ value: '/a.png' }), result({ value: '/b.png' })],
+        multiple: true,
+        previousValue: undefined,
+        inEditorComponent: false,
+      }),
+    ).toMatchObject({ values: ['/a.png', '/b.png'], value: undefined });
   });
 });

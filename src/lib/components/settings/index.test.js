@@ -9,13 +9,16 @@ import { panels } from '.';
 vi.mock('$lib/components/settings/panels/accessibility-panel.svelte', () => ({
   default: {},
 }));
-vi.mock('$lib/components/settings/panels/advanced-panel.svelte', () => ({
-  default: {},
-}));
 vi.mock('$lib/components/settings/panels/appearance-panel.svelte', () => ({
   default: {},
 }));
 vi.mock('$lib/components/settings/panels/contents-panel.svelte', () => ({
+  default: {},
+}));
+vi.mock('$lib/components/settings/panels/data-panel.svelte', () => ({
+  default: {},
+}));
+vi.mock('$lib/components/settings/panels/developer-panel.svelte', () => ({
   default: {},
 }));
 vi.mock('$lib/components/settings/panels/i18n-panel.svelte', () => ({
@@ -87,13 +90,21 @@ describe('Settings panels', () => {
     expect(accessibilityPanel?.component).toBeDefined();
   });
 
-  test('should have advanced panel', () => {
+  test('should have data management panel', () => {
     const panelList = panels.current;
-    const advancedPanel = panelList.find((panel) => panel.key === 'advanced');
+    const dataPanel = panelList.find((panel) => panel.key === 'data');
 
-    expect(advancedPanel).toBeDefined();
-    expect(advancedPanel?.icon).toBe('build');
-    expect(advancedPanel?.component).toBeDefined();
+    expect(dataPanel).toBeDefined();
+    expect(dataPanel?.icon).toBe('database');
+    expect(dataPanel?.component).toBeDefined();
+  });
+
+  test('should have developer panel', () => {
+    const developerPanel = panels.current.find((panel) => panel.key === 'developer');
+
+    expect(developerPanel).toBeDefined();
+    expect(developerPanel?.icon).toBe('code_xml');
+    expect(developerPanel?.component).toBeDefined();
   });
 
   test('should enable i18n panel when multiple locales configured', () => {

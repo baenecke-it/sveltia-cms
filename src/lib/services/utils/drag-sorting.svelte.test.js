@@ -98,6 +98,33 @@ describe('createDragSorter()', () => {
     expect(sorter.displayOrder).toEqual([0, 1, 2]);
   });
 
+  test('keeps the same display order while the item count is the same', () => {
+    // The items are rebuilt whenever a value in them changes, e.g. on every keystroke
+    const items = createRawState(['a', 'b', 'c']);
+
+    const itemSorter = createDragSorter({
+      /**
+       * Get the item count.
+       * @returns {number} Count.
+       */
+      getItemCount: () => items.current.length,
+      /**
+       * Get the list element.
+       * @returns {HTMLElement} Element.
+       */
+      getListElement: () => list.listElement,
+      onMove,
+    });
+
+    const order = itemSorter.displayOrder;
+
+    items.current = ['a', 'b', 'c!'];
+    expect(itemSorter.displayOrder).toBe(order);
+
+    items.current = ['a', 'b', 'c', 'd'];
+    expect(itemSorter.displayOrder).toEqual([0, 1, 2, 3]);
+  });
+
   test('tracks the grabbed item', () => {
     sorter.grab(1);
     expect(sorter.grabbedIndex).toBe(1);
@@ -135,6 +162,54 @@ describe('createDragSorter()', () => {
 
   test('ignores an event without `dataTransfer`', () => {
     expect(() => sorter.onDragStart(1, createEvent({ withDataTransfer: false }))).not.toThrow();
+  });
+
+  test('gives the props of a draggable item element', () => {
+    const event = createEvent();
+
+    expect(sorter.itemProps(1).draggable).toBe(false);
+    sorter.grab(1);
+    expect(sorter.itemProps(1).draggable).toBe(true);
+    expect(sorter.itemProps(0).draggable).toBe(false);
+
+    sorter.itemProps(1).ondragstart(event);
+    expect(sorter.dragIndex).toBe(1);
+    expect(event.dataTransfer.setData).toHaveBeenCalledWith('text/plain', '');
+
+    sorter.itemProps(1).ondragend(createEvent());
+    expect(sorter.dragIndex).toBeUndefined();
+    expect(sorter.grabbedIndex).toBeUndefined();
+  });
+
+  test('attaches the item data to a drag started on the item element', () => {
+    const event = createEvent();
+
+    const dataSorter = createDragSorter({
+      getItemCount: vi.fn(() => 3),
+      getListElement: vi.fn(() => list.listElement),
+      onMove,
+      getItemData: vi.fn((index) => `item ${index}`),
+    });
+
+    dataSorter.itemProps(2).ondragstart(event);
+    expect(event.dataTransfer.setData).toHaveBeenCalledWith('text/plain', 'item 2');
+  });
+
+  test('ignores the drag events bubbling up from a nested list if asked', () => {
+    const { ondragstart, ondragend } = sorter.itemProps(1, { ownEventsOnly: true });
+    const item = list.items[1];
+
+    ondragstart(/** @type {any} */ ({ ...createEvent(), target: null, currentTarget: item }));
+    expect(sorter.dragIndex).toBeUndefined();
+
+    ondragstart(/** @type {any} */ ({ ...createEvent(), target: item, currentTarget: item }));
+    expect(sorter.dragIndex).toBe(1);
+
+    ondragend(/** @type {any} */ ({ target: null, currentTarget: item }));
+    expect(sorter.dragIndex).toBe(1);
+
+    ondragend(/** @type {any} */ ({ target: item, currentTarget: item }));
+    expect(sorter.dragIndex).toBeUndefined();
   });
 
   test('passes `dragover` through while nothing is being dragged', () => {
@@ -245,6 +320,75 @@ describe('createDragSorter()', () => {
     expect(sorter.grabbedIndex).toBeUndefined();
     expect(sorter.dragIndex).toBeUndefined();
     expect(sorter.displayOrder).toEqual([0, 1, 2]);
+  });
+
+  /**
+   * Add reorder controls to each item of the list.
+   * @returns {HTMLButtonElement[][]} Buttons of each item: the drag handle and the Move Down one.
+   */
+  const addReorderControls = () =>
+    list.items.map((item) =>
+      ['reorder', 'move-down'].map((action) => {
+        const button = document.createElement('button');
+
+        button.dataset.action = action;
+        item.append(button);
+
+        return button;
+      }),
+    );
+
+  test('moves an item, then focuses its reorder control once it has been rendered', async () => {
+    const buttons = addReorderControls();
+
+    await sorter.move(0, 2);
+
+    expect(onMove).toHaveBeenCalledExactlyOnceWith(0, 2);
+    expect(document.activeElement).toBe(buttons[2][0]);
+  });
+
+  test('focuses the control that triggered the move', async () => {
+    const buttons = addReorderControls();
+
+    await sorter.move(0, 1, 'move-down');
+
+    expect(document.activeElement).toBe(buttons[1][1]);
+  });
+
+  test('waits with the given function before focusing the reorder control', async () => {
+    const buttons = addReorderControls();
+
+    const { promise: settled, resolve } = /** @type {PromiseWithResolvers<void>} */ (
+      Promise.withResolvers()
+    );
+
+    const settle = vi.fn(() => settled);
+
+    sorter = createDragSorter({
+      /**
+       * Get the item count.
+       * @returns {number} Count.
+       */
+      getItemCount: () => itemCount.current,
+      /**
+       * Get the list element.
+       * @returns {HTMLElement} Element.
+       */
+      getListElement: () => list.listElement,
+      onMove,
+      settle,
+    });
+
+    const promise = sorter.move(1, 0);
+
+    expect(onMove).toHaveBeenCalledExactlyOnceWith(1, 0);
+    expect(settle).toHaveBeenCalledOnce();
+    expect(document.activeElement).not.toBe(buttons[0][0]);
+
+    resolve();
+    await promise;
+
+    expect(document.activeElement).toBe(buttons[0][0]);
   });
 
   test('discards a stale preview once the list changes length', () => {

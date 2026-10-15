@@ -128,6 +128,11 @@ const yamlToJS = () => ({
  */
 const COMPONENT_TESTS = 'src/lib/components/**/*.svelte.test.js';
 /**
+ * Files Vitest doesn’t run: the worktrees, and the end-to-end tests, which Playwright runs against
+ * the built bundle. See `e2e/playwright.config.js`.
+ */
+const TEST_EXCLUDE = [...defaultExclude, '.claude/**', 'e2e/**'];
+/**
  * Number of browser tabs the component tests run in parallel. Vitest defaults to one tab per core,
  * and a tab holds on to the memory of every file it has run — the whole suite costs about 600 MB
  * per tab on top of a gigabyte of browser — so on a machine with many cores the run alone takes
@@ -330,8 +335,10 @@ const generateSchema = async () => {
   });
 
   const schemaString = JSON.stringify(schema)
-    // Remove unnecessary escaped line breaks in `markdownDescription` originally present in JSDoc
-    .replace(/\\n/g, ' ')
+    // Remove unnecessary escaped line breaks in `markdownDescription` originally present in JSDoc,
+    // leaving a literal `\n` written in the description alone: it’s encoded as an escaped backslash
+    // followed by `n`, which would otherwise lose the `n` and leave a bad escape sequence behind
+    .replace(/(?<!\\)((?:\\\\)*)\\n/g, '$1 ')
     // Use the proper boolean `deprecated` property instead of a string and append a separate
     // message property. `deprecationMessage` is a VS Code schema extension
     .replace(/"deprecated":"(.+?)"/g, '"deprecated":true,"deprecationMessage":"$1"');
@@ -346,6 +353,8 @@ const generateSchema = async () => {
  * files for what each chunk is for.
  */
 const CHUNKS = {
+  git: 'src/lib/chunks/git.js',
+  qrcode: 'src/lib/chunks/qrcode.js',
   'react-dom': 'src/lib/chunks/react-dom.js',
 };
 
@@ -368,6 +377,8 @@ const RESOLVED_REACT_SHIM_MODULE_ID = `\0${REACT_SHIM_MODULE_ID}`;
  */
 const shimReact = () => ({
   name: 'shim-react',
+  // Run before Vite’s own resolver, which would otherwise resolve the package to its files
+  enforce: 'pre',
   // eslint-disable-next-line jsdoc/require-jsdoc
   resolveId: (id) => (id === 'react' ? RESOLVED_REACT_SHIM_MODULE_ID : null),
   // eslint-disable-next-line jsdoc/require-jsdoc
@@ -571,7 +582,7 @@ export default defineConfig({
     exclude: ['@sveltia/ui'],
     // Pre-bundle the packages the component tests only get to late in a run, or Vite discovers
     // them mid-run and reloads the browser, failing whatever tests are loading at that moment
-    include: ['create-react-class'],
+    include: ['create-react-class', 'htm'],
   },
   define: {
     ...SHARED_DEFINE,
@@ -637,7 +648,7 @@ export default defineConfig({
     }),
   ],
   test: {
-    exclude: [...defaultExclude, '.claude/**'],
+    exclude: TEST_EXCLUDE,
     // Coverage is collected from the `unit` project only, see `test:unit:coverage` in
     // `package.json`. The component tests don’t add to it, and a module that both projects load
     // gets a different branch map from each, as Svelte compiles a `.svelte.js` file differently for
@@ -665,7 +676,7 @@ export default defineConfig({
         extends: true,
         test: {
           name: 'unit',
-          exclude: [...defaultExclude, '.claude/**', COMPONENT_TESTS],
+          exclude: [...TEST_EXCLUDE, COMPONENT_TESTS],
         },
       },
       {
@@ -674,6 +685,9 @@ export default defineConfig({
           name: 'browser',
           include: [COMPONENT_TESTS],
           maxWorkers: BROWSER_WORKERS,
+          // A group runs with a single `maxWorkers`, so the project needs its own when `unit` runs
+          // beside it with the default of one worker per core
+          sequence: { groupOrder: 1 },
           setupFiles: ['./vitest.browser.setup.js'],
           // `expect.element()` and `expect.poll()` retry for a second by default, which a shared
           // CI runner can’t always keep up with: a Sveltia UI dialog only reports its result once

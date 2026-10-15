@@ -1,5 +1,6 @@
 import { getField } from '$lib/services/contents/entry/fields';
 import { getKeysByPrefix } from '$lib/services/contents/entry/key-paths';
+import { escapeKeySegment, unescapeKeySegment } from '$lib/services/utils/object';
 
 /**
  * @import { FlattenedEntryContent, GetFieldArgs } from '$lib/types/private';
@@ -35,26 +36,30 @@ export const getKeyValueField = (args) => {
 };
 
 /**
- * Get key-value pairs from the given flattened content.
+ * Get key-value pairs from the given flattened content. A key is stored escaped, so a dot in it
+ * isn’t taken as a key path delimiter, and is unescaped here.
  * @param {FlattenedEntryContent} content Flattened content for a locale.
  * @param {FieldKeyPath} keyPath Field key path.
+ * @param {object} [options] Options.
+ * @param {boolean} [options.live] Whether the content may be mutated after this call, like the
+ * draft’s live map, which {@link setPairs} mutates in place. Its key paths are then read as they
+ * are right now, rather than from the index kept for a snapshot.
  * @returns {[string, string][]} Key-value pairs.
  */
-export const getPairsFromContent = (content, keyPath) => {
+export const getPairsFromContent = (content, keyPath, { live = true } = {}) => {
   const prefix = `${keyPath}.`;
 
   return /** @type {[string, string][]} */ (
-    // The content may be the draft’s live map, which {@link setPairs} mutates in place, so its key
-    // paths have to be read as they are right now
-    getKeysByPrefix(content, prefix, { live: true }).map((key) => [
-      key.slice(prefix.length),
+    getKeysByPrefix(content, prefix, { live }).map((key) => [
+      unescapeKeySegment(key.slice(prefix.length)),
       content[key],
     ])
   );
 };
 
 /**
- * Replace the key-value pairs stored in the given flattened content.
+ * Replace the key-value pairs stored in the given flattened content. A key is escaped, so a dot in
+ * it isn’t taken as a key path delimiter.
  * @param {FlattenedEntryContent} content Flattened content for a locale, modified in place.
  * @param {FieldKeyPath} keyPath Field key path.
  * @param {[string, string][]} pairs Key-value pairs.
@@ -77,6 +82,36 @@ export const setPairs = (content, keyPath, pairs) => {
   }
 
   pairs.forEach(([key, value]) => {
-    content[`${keyPath}.${key}`] = value;
+    content[`${keyPath}.${escapeKeySegment(key)}`] = value;
   });
+};
+
+/**
+ * Put the key-value pairs stored in the given flattened content in the same order as those in the
+ * reference content, e.g. the default locale’s. The pairs whose key the reference doesn’t hold go
+ * last, in their current order. Only the order changes: no pair is added, removed or given another
+ * value.
+ * @param {object} args Arguments.
+ * @param {FlattenedEntryContent} args.content Flattened content for a locale, modified in place.
+ * @param {FlattenedEntryContent} args.referenceContent Flattened content to take the order from.
+ * @param {FieldKeyPath} args.keyPath Field key path.
+ */
+export const alignPairOrder = ({ content, referenceContent, keyPath }) => {
+  const pairs = getPairsFromContent(content, keyPath);
+  const keys = pairs.map(([key]) => key);
+
+  const referenceKeys = getPairsFromContent(referenceContent, keyPath)
+    .map(([key]) => key)
+    .filter((key) => keys.includes(key));
+
+  const orderedKeys = [...referenceKeys, ...keys.filter((key) => !referenceKeys.includes(key))];
+
+  // Leave the content alone if the order is already right
+  if (orderedKeys.some((key, index) => key !== keys[index])) {
+    setPairs(
+      content,
+      keyPath,
+      orderedKeys.map((key) => /** @type {[string, string]} */ (pairs[keys.indexOf(key)])),
+    );
+  }
 };

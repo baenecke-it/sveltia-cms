@@ -1,15 +1,16 @@
-import { isURL } from '@sveltia/utils/string';
-
 import { customComponentRegistry } from '$lib/services/api/registries';
+import { warnDeprecation } from '$lib/services/config/deprecations';
 import { parseBackendConfig } from '$lib/services/config/parser/backend';
 import { parseCollections } from '$lib/services/config/parser/collections';
+import { parseEditorComponent } from '$lib/services/config/parser/editor-components';
 import { parseFields } from '$lib/services/config/parser/fields';
 import { parseI18nConfig } from '$lib/services/config/parser/i18n';
 import { parseMediaConfig } from '$lib/services/config/parser/media';
 import { parseMediaLibraries } from '$lib/services/config/parser/media-libraries';
+import { parsePublishMode } from '$lib/services/config/parser/publish-mode';
 import { parseSlugConfig } from '$lib/services/config/parser/slug';
 import { addMessage, checkUnsupportedOptions } from '$lib/services/config/parser/utils/validator';
-import { isWorkflowConfigured } from '$lib/services/workflow/config';
+import { isHttpURL, isNonEmptyString } from '$lib/services/utils/string';
 
 /**
  * @import { CmsConfig } from '$lib/types/public';
@@ -38,11 +39,6 @@ const UNSUPPORTED_OPTIONS = [
  * @type {(keyof CmsConfig)[]}
  */
 const URL_OPTIONS = ['site_url'];
-/**
- * Backend services that support Editorial Workflow.
- * @type {(string | undefined)[]}
- */
-const WORKFLOW_BACKENDS = ['github', 'gitlab'];
 
 /**
  * Parse and validate the CMS configuration.
@@ -55,23 +51,12 @@ const WORKFLOW_BACKENDS = ['github', 'gitlab'];
 export const parseCmsConfig = (cmsConfig, collectors) => {
   parseBackendConfig(cmsConfig, collectors);
 
-  // Editorial Workflow is not implemented for every backend yet. A collection can enable it on its
-  // own, so the site-level option isn’t the only place to look
-  if (isWorkflowConfigured(cmsConfig) && !WORKFLOW_BACKENDS.includes(cmsConfig.backend?.name)) {
-    addMessage({
-      type: 'warning',
-      strKey: 'editorial_workflow_unsupported',
-      context: { cmsConfig },
-      collectors,
-    });
-  }
-
   URL_OPTIONS.forEach((option) => {
     const url = cmsConfig[option];
 
     // An empty string is as good as none, and a value of another type is reported against the
     // JSON schema
-    if (typeof url === 'string' && url.trim() && !isURL(url.trim())) {
+    if (isNonEmptyString(url) && !isHttpURL(url)) {
       addMessage({
         strKey: 'invalid_url_option',
         values: { option, url },
@@ -81,6 +66,12 @@ export const parseCmsConfig = (cmsConfig, collectors) => {
     }
   });
 
+  // The option still works, but `logo.src` replaces it
+  if (cmsConfig.logo_url !== undefined) {
+    warnDeprecation('logo_url');
+  }
+
+  parsePublishMode({ value: cmsConfig.publish_mode, context: { cmsConfig }, collectors });
   parseMediaConfig(cmsConfig, collectors);
   parseMediaLibraries({ config: cmsConfig, context: { cmsConfig }, collectors });
   parseSlugConfig(cmsConfig, collectors);
@@ -96,7 +87,8 @@ export const parseCmsConfig = (cmsConfig, collectors) => {
 
   // Parse fields in custom editor components registered with `CMS.registerEditorComponent()`.
   // @todo Figure out how to handle lazy-loaded components, as they may not be parsed here.
-  customComponentRegistry.forEach(({ fields }, componentName) => {
-    parseFields(fields, { cmsConfig, componentName }, collectors);
+  customComponentRegistry.forEach((definition, componentName) => {
+    parseEditorComponent({ definition, componentName, cmsConfig, collectors });
+    parseFields(definition.fields, { cmsConfig, componentName }, collectors);
   });
 };

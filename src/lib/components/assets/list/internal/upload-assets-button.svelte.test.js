@@ -2,8 +2,10 @@ import { beforeAll, beforeEach, describe, expect, test } from 'vitest';
 import { page } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
-import { selectedAssetFolder } from '$lib/services/assets/folders';
+import { globalAssetFolder, selectedAssetFolder } from '$lib/services/assets/folders';
+import { selectedSubfolderPath } from '$lib/services/assets/subfolders';
 import { showUploadAssetsDialog } from '$lib/services/assets/view';
+import { lockedBranch } from '$lib/services/backends/branch-access';
 import { forkedRepository } from '$lib/services/workflow/open-authoring';
 import { initTestConfig } from '$lib/test/config';
 
@@ -17,7 +19,9 @@ describe('UploadAssetsButton', () => {
   beforeEach(() => {
     selectedAssetFolder.current = undefined;
     forkedRepository.current = undefined;
+    lockedBranch.current = undefined;
     showUploadAssetsDialog.current = false;
+    selectedSubfolderPath.current = '';
   });
 
   test('opens the upload dialog', async () => {
@@ -42,6 +46,21 @@ describe('UploadAssetsButton', () => {
 
   test('is disabled while contributing via a fork', async () => {
     forkedRepository.current = /** @type {any} */ ({ owner: 'me', repo: 'site' });
+
+    await render(UploadAssetsButton, { label: 'Upload' });
+    await expect.element(page.getByRole('button', { name: 'Upload New Assets' })).toBeDisabled();
+  });
+
+  test('is disabled when the user can’t push to the branch', async () => {
+    lockedBranch.current = 'main';
+
+    await render(UploadAssetsButton, { label: 'Upload' });
+    await expect.element(page.getByRole('button', { name: 'Upload New Assets' })).toBeDisabled();
+  });
+
+  test('is disabled within a folder the CMS is served from', async () => {
+    selectedAssetFolder.current = globalAssetFolder.current;
+    selectedSubfolderPath.current = 'cms';
 
     await render(UploadAssetsButton, { label: 'Upload' });
     await expect.element(page.getByRole('button', { name: 'Upload New Assets' })).toBeDisabled();

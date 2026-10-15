@@ -1,4 +1,5 @@
 import { _ } from '@sveltia/i18n';
+import { isObject } from '@sveltia/utils/object';
 import { compare } from '@sveltia/utils/string';
 import equal from 'fast-deep-equal';
 
@@ -131,24 +132,20 @@ export const getGroupLabel = (name) => (name === OTHER_GROUP_NAME ? _('other') :
  */
 export const buildGroupMap = (items, pattern, getValue) => {
   const regex = getRegex(pattern);
-  /** @type {Record<string, T[]>} */
-  const groups = {};
 
-  items.forEach((item) => {
+  // Grouped into a `Map` rather than a plain object, as a value like `constructor` or `__proto__`
+  // would otherwise hit an inherited property
+  const groups = Map.groupBy(items, (item) => {
     const value = getValue(item);
 
-    const key =
-      value === null || value === undefined
-        ? OTHER_GROUP_NAME
-        : regex
-          ? (String(value).match(regex)?.[0] ?? OTHER_GROUP_NAME)
-          : String(value);
-
-    if (!(key in groups)) groups[key] = [];
-    groups[key].push(item);
+    return value === null || value === undefined
+      ? OTHER_GROUP_NAME
+      : regex
+        ? (String(value).match(regex)?.[0] ?? OTHER_GROUP_NAME)
+        : String(value);
   });
 
-  return Object.entries(groups).sort(([a], [b]) => compare(getGroupLabel(a), getGroupLabel(b)));
+  return [...groups].sort(([a], [b]) => compare(getGroupLabel(a), getGroupLabel(b)));
 };
 
 /**
@@ -188,11 +185,13 @@ export const matchesFilter = (value, pattern, regex) => {
 };
 
 /**
- * Sort an array of items using a key function and apply ascending/descending order.
+ * Sort an array of items using a key function and apply ascending/descending order. An item whose
+ * key is `undefined` has no value to sort by, so it goes last in either order, keeping its place
+ * among the other such items.
  * @template T
  * @param {T[]} items Items to sort in place.
- * @param {(item: T) => string | number} getKey Returns the sort key for an item. Called once per
- * item.
+ * @param {(item: T) => string | number | undefined} getKey Returns the sort key for an item, or
+ * `undefined` if the item has no value. Called once per item.
  * @param {boolean} isStringType Whether keys should be compared as strings (locale-aware); if
  * `false`, numeric subtraction is used instead.
  * @param {string | undefined} [order] Sort order; reverses the array when `'descending'`.
@@ -200,20 +199,22 @@ export const matchesFilter = (value, pattern, regex) => {
  */
 export const sortItemsByKey = (items, getKey, isStringType, order) => {
   const keyedItems = items.map((item) => ({ item, key: getKey(item) }));
+  const valuedItems = keyedItems.filter(({ key }) => key !== undefined);
+  const emptyItems = keyedItems.filter(({ key }) => key === undefined);
 
-  keyedItems.sort(({ key: aKey }, { key: bKey }) =>
+  valuedItems.sort(({ key: aKey }, { key: bKey }) =>
     isStringType
       ? compare(/** @type {string} */ (aKey), /** @type {string} */ (bKey))
       : /** @type {number} */ (aKey) - /** @type {number} */ (bKey),
   );
 
   if (order === 'descending') {
-    keyedItems.reverse();
+    valuedItems.reverse();
   }
 
   // Write the order back in place. Spreading the list into `splice()` would pass every item as an
   // argument, which throws a `RangeError` once the list is large enough
-  keyedItems.forEach(({ item }, index) => {
+  [...valuedItems, ...emptyItems].forEach(({ item }, index) => {
     items[index] = item;
   });
 
@@ -324,12 +325,23 @@ export const initViewSettingsStorage = async (
   { defaults = {} } = {},
 ) => {
   const settingsDB = getRepositoryDatabase(repository, 'ui-settings');
-  const initial = { ...defaults, ...(await settingsDB?.get(storageKey)) };
+  /** @type {any} */
+  let saved;
+
+  // The saved settings are optional, so an IndexedDB failure mustn’t leave the view unset
+  try {
+    saved = await settingsDB?.get(storageKey);
+  } catch {
+    //
+  }
+
+  const initial = { ...defaults, ...(isObject(saved) ? saved : {}) };
 
   settingsState.current = initial;
 
   // Track the last persisted value in memory so we can skip redundant IndexedDB reads and writes
   // every time the state changes (list views update this state frequently as users sort/filter).
+  /** @type {Record<string, any> | undefined} */
   let lastSaved = initial;
 
   return createRootEffect(() => {

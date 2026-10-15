@@ -1464,7 +1464,7 @@ config:
     oauth_implicit_flow: 설정된 인증 방식(implicit flow)은 Sveltia CMS에서 지원되지 않습니다. 다른 <a>인증 방식</a>을 사용하십시오.
     github_pkce_unsupported: GitHub의 제약으로 인해 PKCE 인증은 아직 지원되지 않습니다. 다른 <a>인증 방식</a>을 사용하십시오.
     oauth_no_app_id: OAuth 애플리케이션 ID가 정의되지 않았습니다.
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: '`open_authoring` 옵션을 사용하려면 `editorial_workflow` 게시 모드가 필요합니다. 자세한 내용은 <a>문서</a>를 참조하십시오.'
     # Don’t localize `auth_methods`
     no_auth_methods: '`auth_methods` 옵션에는 최소 한 가지 방식이 포함되어야 합니다.'
@@ -1586,8 +1586,6 @@ config:
   # Warning messages (logged to console)
   warning:
     oauth_no_app_id: OAuth 애플리케이션 ID가 정의되지 않았습니다. 사용자는 로그인하려면 액세스 토큰을 제공해야 합니다.
-    editorial_workflow_unsupported: 에디토리얼 워크플로우는 Sveltia CMS에서 아직 지원되지 않습니다.
-    open_authoring_unsupported_backend: 오픈 오서링은 현재 GitHub 백엔드에서만 지원됩니다.
     # {$prop} is the unsupported option name that will be ignored
     unsupported_ignored_option: '`{$prop}` 옵션은 Sveltia CMS에서 지원되지 않습니다. 이 옵션은 무시됩니다.'
     # Don’t localize `picker_utc`, `input_timezone`, and `output_utc`
@@ -1727,8 +1725,6 @@ workflow:
     .match $count
       1   {{ 그중 1개는 아직 게시되지 않았으므로 게시되지 않은 변경 사항은 취소됩니다. 이미 게시된 버전은 그대로 유지됩니다. }}
       *   {{ 그중 {$count}개는 아직 게시되지 않았으므로 게시되지 않은 변경 사항은 취소됩니다. 이미 게시된 버전은 그대로 유지됩니다. }}
-  # Confirmation dialog shown before merging the pull request. Keep the wording free of Git jargon.
-  confirm_publishing_entry: 이 엔트리를 게시하시겠습니까? 변경 사항이 즉시 적용됩니다.
   # Workflow page: toast notifications shown while an entry is being published from a card, and
   # once publishing has completed
   publishing_entry: 엔트리 게시 중…
@@ -1882,13 +1878,23 @@ prefs:
       description: 엔트리 미리 보기와 사용자 인터페이스 레이블의 링크에 밑줄을 표시합니다.
       switch_label: 항상 링크에 밑줄 표시
 
-  # Advanced panel
-  advanced:
-    title: 고급
-    beta:
-      title: 베타 기능
-      description: 불안정하거나 현지화되지 않았을 수 있는 일부 베타 기능을 활성화합니다.
-      switch_label: 베타 프로그램 참여
+  # Data Management panel
+  data:
+    clear_data:
+      title: 데이터 지우기
+      # Clear File Cache button
+      file_cache:
+        description: 로컬에 캐시된 파일 내용과 이미지 썸네일을 삭제하여 저장 공간을 확보하거나 오래된 데이터로 인한 문제를 해결합니다.
+        button_label: 파일 캐시 지우기
+        confirmation: 로컬에 캐시된 파일 내용과 이미지 썸네일이 삭제됩니다. 저장하지 않은 초안과 설정은 유지되며, 삭제된 데이터는 필요할 때 다시 다운로드하거나 생성합니다. 완료되면 CMS가 다시 로드됩니다.
+      # Erase All Data button
+      all_data:
+        description: 캐시된 파일, 저장하지 않은 초안, 설정 등 CMS가 이 브라우저에 보관하는 모든 데이터를 삭제합니다. 저장소에 이미 저장된 내용은 영향을 받지 않습니다.
+        button_label: 모든 데이터 삭제
+        confirmation: 캐시된 파일 내용, 이미지 썸네일, 저장하지 않은 초안, 설정, 로그인 상태 등 이 브라우저에 저장된 모든 데이터가 삭제됩니다. 저장소는 영향을 받지 않지만, 저장하지 않은 변경 사항은 사라지며 다시 로그인해야 합니다. 완료되면 CMS가 다시 로드됩니다.
+
+  # Developer panel
+  developer:
     developer_mode:
       title: 개발자 모드
       description: 자세한 콘솔 로그와 네이티브 컨텍스트 메뉴 등 개발자용 기능을 활성화합니다.
@@ -1906,18 +1912,6 @@ prefs:
         field_label: 'Authorization 헤더(예: Bearer <token>)(선택 사항)'
         saved: Authorization 헤더가 저장되었습니다.
         removed: Authorization 헤더가 제거되었습니다.
-    clear_data:
-      title: 데이터 지우기
-      # Clear File Cache button
-      file_cache:
-        description: 로컬에 캐시된 파일 내용과 이미지 썸네일을 삭제하여 저장 공간을 확보하거나 오래된 데이터로 인한 문제를 해결합니다.
-        button_label: 파일 캐시 지우기
-        confirmation: 로컬에 캐시된 파일 내용과 이미지 썸네일이 삭제됩니다. 저장하지 않은 초안과 설정은 유지되며, 삭제된 데이터는 필요할 때 다시 다운로드하거나 생성합니다. 완료되면 CMS가 다시 로드됩니다.
-      # Erase All Data button
-      all_data:
-        description: 캐시된 파일, 저장하지 않은 초안, 설정 등 CMS가 이 브라우저에 보관하는 모든 데이터를 삭제합니다. 저장소에 이미 저장된 내용은 영향을 받지 않습니다.
-        button_label: 모든 데이터 삭제
-        confirmation: 캐시된 파일 내용, 이미지 썸네일, 저장하지 않은 초안, 설정, 로그인 상태 등 이 브라우저에 저장된 모든 데이터가 삭제됩니다. 저장소는 영향을 받지 않지만, 저장하지 않은 변경 사항은 사라지며 다시 로그인해야 합니다. 완료되면 CMS가 다시 로드됩니다.
 
 # ==============================================================================
 # Keyboard Shortcuts

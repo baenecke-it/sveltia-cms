@@ -55,4 +55,43 @@ describe('ObjectHeader', () => {
     expect(container.querySelector('.center')).toHaveTextContent('Summary');
     expect(container.querySelector('.end')).toHaveTextContent('Actions');
   });
+
+  test('shows the label without the expander button when not expandable', async () => {
+    const { container } = await render(ObjectHeader, {
+      label: 'Divider',
+      controlId: 'item-1',
+      expanded: true,
+      expandable: false,
+    });
+
+    expect(container.querySelector('.type')).toHaveTextContent('Divider');
+    expect(container.querySelector('button')).toBeNull();
+  });
+
+  test('shows the position of a list item before its label', async () => {
+    const { container } = await render(ObjectHeader, {
+      label: 'Hero',
+      position: 3,
+      controlId: 'item-1',
+      expanded: true,
+    });
+
+    const button = page.getByRole('button', { name: 'Collapse' });
+
+    await expect.element(button).toBeVisible();
+    expect(container.querySelector('button .position')).toHaveTextContent('3');
+    expect(container.querySelector('button .type')).toHaveTextContent('Hero');
+  });
+
+  test('shows the position without the expander button when not expandable', async () => {
+    const { container } = await render(ObjectHeader, {
+      position: 1,
+      controlId: 'item-1',
+      expanded: true,
+      expandable: false,
+    });
+
+    expect(container.querySelector('.label .position')).toHaveTextContent('1');
+    expect(container.querySelector('.type')).toBeNull();
+  });
 });

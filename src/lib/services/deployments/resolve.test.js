@@ -95,6 +95,17 @@ describe('Deployment resolution', () => {
       ]);
     });
 
+    test('skips an Open Authoring draft, which has no pull request to have built a preview', () => {
+      // Its head is on record so a save can tell whether the branch has moved, but asking for a
+      // deployment would be asking about a pull request that doesn’t exist yet
+      unpublishedEntries.current = [
+        createEntry({ number: undefined, headSHA: 'a' }),
+        createEntry({ number: 2, headSHA: 'b', branch: 'cms/posts/b' }),
+      ];
+
+      expect(getDeployTargets()).toEqual([{ sha: 'b', branch: 'cms/posts/b', kind: 'preview' }]);
+    });
+
     test('falls back to an empty branch without repository info', () => {
       backendService = {};
       /** @type {any} */ (backend).current = backendService;
@@ -536,6 +547,18 @@ describe('Deployment resolution', () => {
 
       expect(productionSHA.current).toBe('abc');
       expect(deployments.current.abc).toEqual({ state: 'ready', checkedTime: 1 });
+    });
+
+    test('takes the head the content has just been loaded from, without fetching it', async () => {
+      backendService.fetchDeployments.mockResolvedValue({
+        def: { state: 'building', checkedTime: 1 },
+      });
+
+      await initDeployments({ head: 'def' });
+
+      expect(backendService.fetchBranchHeadSHA).not.toHaveBeenCalled();
+      expect(productionSHA.current).toBe('def');
+      expect(deployments.current.def).toEqual({ state: 'building', checkedTime: 1 });
     });
   });
 });

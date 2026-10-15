@@ -1,33 +1,41 @@
 <script>
   import { _ } from '@sveltia/i18n';
-  import { Alert, Menu, MenuButton, MenuItem, Spacer } from '@sveltia/ui';
-  import { escapeRegExp } from '@sveltia/utils/string';
-  import equal from 'fast-deep-equal';
-  import { sanitize } from 'isomorphic-dompurify';
-  import { parseInline } from 'marked';
+  import { Alert, Menu, MenuButton, Spacer } from '@sveltia/ui';
   import { getContext, setContext } from 'svelte';
 
+  import ErrorBoundary from '$lib/components/common/error-boundary.svelte';
   import CopyMenuItems from '$lib/components/contents/details/editor/copy-menu-items.svelte';
   import FieldEditorGroup from '$lib/components/contents/details/editor/field-editor-group.svelte';
+  import ResetMenuItems from '$lib/components/contents/details/editor/reset-menu-items.svelte';
   import TranslateButton from '$lib/components/contents/details/editor/translate-button.svelte';
   import ValidationError from '$lib/components/contents/details/editor/validation-error.svelte';
   import { CustomEditor, editors } from '$lib/components/contents/details/fields';
   import { customFieldTypeRegistry } from '$lib/services/api/registries';
-  import { INTERNAL_PROP_REGEX } from '$lib/services/contents/draft';
+  import { isDraftReadonly } from '$lib/services/config/readonly';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
+  import { deferDraftWrite } from '$lib/services/contents/draft/update/deferred';
+  import { canResetField, resetField } from '$lib/services/contents/draft/update/reset';
+  import { isFieldChanged, revertChanges } from '$lib/services/contents/draft/update/revert';
+  import { getFieldValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
+  import { isInEditorComponent } from '$lib/services/contents/editor/field-context';
   import {
-    resolveOriginalKeyPath,
-    revertChanges,
-  } from '$lib/services/contents/draft/update/revert';
-  import { getValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
+    getEditorFieldConfig,
+    getFieldEditorFlags,
+    getFieldInputLabels,
+  } from '$lib/services/contents/editor/field-flags';
+  import { getFieldLocaleAccess } from '$lib/services/contents/editor/locale';
+  import { createResetMenuState } from '$lib/services/contents/editor/reset-menu.svelte';
   import {
     getCurrentValue,
     getFieldKind,
     isFieldMultiple,
     isFieldRequired,
   } from '$lib/services/contents/entry/fields';
-  import { DEFAULT_I18N_CONFIG } from '$lib/services/contents/i18n/config';
+  import { isAutoNowField } from '$lib/services/contents/fields/date-time/auto-now';
+  import { isAutoIncrementField } from '$lib/services/contents/fields/number/auto-increment';
+  import { getDraftI18nConfig } from '$lib/services/contents/i18n/config';
   import { createRawState } from '$lib/services/utils/state.svelte';
+  import { sanitizeInlineMarkdown } from '$lib/services/utils/string';
   import { isPendingDeletion } from '$lib/services/workflow';
 
   /**
@@ -41,12 +49,9 @@
    * TypedFieldKeyPath,
    * } from '$lib/types/private';
    * @import {
-   * BooleanField,
    * CustomField,
    * Field,
    * FieldKeyPath,
-   * NumberField,
-   * StringField,
    * VisibleField,
    * } from '$lib/types/public';
    */
@@ -63,17 +68,13 @@
    * @property {FieldContext} [context] Where the field is rendered.
    * @property {string} [componentName] Name of the parent rich text editor component, if any.
    * @property {DraftValueStoreKey} [valueStoreKey] Key to store the values in {@link EntryDraft}.
+   * @property {boolean} [inline] Whether to render only the field’s control, without the label,
+   * the hint or the validation message, to be placed within a line of text, as an editor component
+   * in the `inline` mode does. A Select or Relation field then always shows a dropdown list, as
+   * radio buttons wouldn’t fit.
    */
 
   const entryDraft = getEntryDraftContext();
-
-  /**
-   * Options for {@link sanitize}.
-   */
-  const SANITIZE_OPTIONS = {
-    ALLOWED_TAGS: ['strong', 'em', 'del', 'code', 'a', 'br'],
-    ALLOWED_ATTR: ['href'],
-  };
 
   /** @type {Props} */
   let {
@@ -85,27 +86,27 @@
     context: fieldContext = parent.fieldContext ?? undefined,
     componentName,
     valueStoreKey = parent.valueStoreKey ?? 'currentValues',
+    inline = false,
     /* eslint-enable prefer-const */
   } = $props();
 
   const fieldId = $props.id();
 
   /**
-   * Parse the given string as Markdown and sanitize the result to only allow certain tags.
+   * Parse the given string as Markdown and sanitize the result to only allow certain tags. A
+   * literal `\n` is turned into a line break.
    * @param {string} str Original string.
    * @returns {string} Sanitized string.
    */
   const _sanitize = (str) =>
-    sanitize(/** @type {string} */ (parseInline(str.replaceAll('\\n', '<br>'))), SANITIZE_OPTIONS);
+    sanitizeInlineMarkdown(str.replaceAll('\\n', '<br>'), {
+      allowedTags: ['strong', 'em', 'del', 'code', 'a', 'br'],
+    });
 
   /**
-   * Write a value coming from the widget editor back to the entry draft.
-   *
-   * The write is deferred to a microtask so that it happens outside Svelte’s update cycle. Widget
-   * editors sync their local state to this binding from an `$effect`, and Svelte can only memoize
-   * its dirty-marking traversal for writes made outside a running reaction. Without the deferral,
-   * marking re-walks the derived graph once per path that reaches it, which is exponential in the
-   * depth of the editor tree — tens of seconds per keystroke on a deeply nested entry.
+   * Write a value coming from the widget editor back to the entry draft. Widget editors sync their
+   * local state to this binding from an `$effect`, so the write is deferred; see
+   * {@link deferDraftWrite}.
    * @param {any} value New value.
    */
   const writeValue = (value) => {
@@ -121,7 +122,7 @@
     const _locale = locale;
     const _keyPath = keyPath;
 
-    queueMicrotask(() => {
+    deferDraftWrite(() => {
       /* v8 ignore next 3 -- the editor may have been closed in the meantime */
       if (draft) {
         draft[store][_locale][_keyPath] = value;
@@ -143,130 +144,114 @@
     }),
   );
 
-  const inEditorComponent = $derived(fieldContext === 'rich-text-editor-component');
-  const { name: fieldName, widget: fieldType = 'string', i18n = false } = $derived(fieldConfig);
-  const {
-    label = '',
-    comment = '',
-    hint = '',
-    readonly: readonlyOption = false,
-  } = $derived(/** @type {VisibleField} */ (fieldConfig));
+  const inEditorComponent = $derived(isInEditorComponent(valueStoreKey));
+  const { name: fieldName, widget: fieldType = 'string' } = $derived(fieldConfig);
+  const { label = '', hint = '' } = $derived(/** @type {VisibleField} */ (fieldConfig));
   const required = $derived(isFieldRequired({ fieldConfig, locale }));
   const multiple = $derived(isFieldMultiple(fieldConfig));
-  const allowPrefix = $derived(['string'].includes(fieldType));
-  const prefix = $derived(
-    allowPrefix ? /** @type {StringField} */ (fieldConfig).prefix : undefined,
+  const { prefix, suffix, beforeInputLabel, afterInputLabel, hasExtraLabels } = $derived(
+    getFieldInputLabels(fieldConfig),
   );
-  const suffix = $derived(
-    allowPrefix ? /** @type {StringField} */ (fieldConfig).suffix : undefined,
-  );
-  const allowExtraLabels = $derived(['boolean', 'number', 'string'].includes(fieldType));
-  const beforeInputLabel = $derived(
-    allowExtraLabels
-      ? /** @type {BooleanField | NumberField | StringField} */ (fieldConfig).before_input
-      : undefined,
-  );
-  const afterInputLabel = $derived(
-    allowExtraLabels
-      ? /** @type {BooleanField | NumberField | StringField} */ (fieldConfig).after_input
-      : undefined,
-  );
-  const hasExtraLabels = $derived(!!(prefix || suffix || beforeInputLabel || afterInputLabel));
   const isList = $derived(fieldType === 'list' || multiple);
-  const collection = $derived(entryDraft.current?.collection);
-  const collectionFile = $derived(entryDraft.current?.collectionFile);
   const originalValues = $derived(entryDraft.current?.originalValues);
-  /* v8 ignore start -- the editor is only rendered while the draft is there */
   const { i18nEnabled, allLocales, defaultLocale } = $derived(
-    (collectionFile ?? collection)?._i18n ?? DEFAULT_I18N_CONFIG,
+    getDraftI18nConfig(entryDraft.current),
   );
-  /* v8 ignore stop */
   const otherLocales = $derived(i18nEnabled ? allLocales.filter((l) => l !== locale) : []);
-  const canTranslate = $derived(i18nEnabled && (i18n === true || i18n === 'translate'));
-  const canDuplicate = $derived(i18nEnabled && i18n === 'duplicate');
-  // KeyValue field only: the keys are mirrored from the default locale, the values are editable
-  const canDuplicateKeys = $derived(i18nEnabled && i18n === 'duplicate_keys');
-  const canEdit = $derived(
-    inEditorComponent ||
-      locale === defaultLocale ||
-      canTranslate ||
-      canDuplicate ||
-      canDuplicateKeys,
+  // Only the field’s own values are depended on, so the editor isn’t updated whenever another
+  // field in the entry changes
+  const valueMap = $derived(
+    getFieldValueMapSnapshot(entryDraft.current, locale, keyPath, valueStoreKey),
+  );
+  // Whether the field is shown, and whether it follows the default locale, in this locale
+  const {
+    canTranslate,
+    isDuplicated,
+    areKeysDuplicated,
+    isShown: canEdit,
+  } = $derived(
+    getFieldLocaleAccess({
+      draft: entryDraft.current,
+      fieldConfig,
+      keyPath,
+      locale,
+      valueMap,
+      inEditorComponent,
+    }),
   );
   const canCopy = $derived(!inEditorComponent && canTranslate && otherLocales.length);
-  const canRevert = $derived(!inEditorComponent && !(canDuplicate && locale !== defaultLocale));
-  const keyPathRegex = $derived(new RegExp(`^${escapeRegExp(keyPath)}\\.\\d+$`));
-  const valueMap = $derived(getValueMapSnapshot(entryDraft.current, locale, valueStoreKey));
+  const canRevert = $derived(!inEditorComponent && !isDuplicated);
   const customFieldType = $derived(customFieldTypeRegistry.get(fieldType));
   const currentValue = $derived(
     getCurrentValue({ valueMap, keyPath, isList, isCustomFieldType: !!customFieldType }),
   );
-  const originalValue = $derived.by(() => {
-    if (isList) {
-      return Object.entries(originalValues?.[locale] ?? {})
-        .filter(([_keyPath]) => keyPathRegex.test(_keyPath))
-        .map(([, val]) => val)
-        .filter((val) => val !== undefined);
-    }
-
-    // For fields inside list items, use the original key path if the item was reordered
-    const originalKeyPath = resolveOriginalKeyPath(valueMap, keyPath)?.originalKeyPath ?? keyPath;
-    const originalMap = originalValues?.[locale] ?? {};
-
-    // A custom field type may hold an object, which is stored under its child key paths, so it has
-    // to be assembled the same way as the current value for the two to compare equal
-    if (customFieldType) {
-      return getCurrentValue({
-        valueMap: originalMap,
-        keyPath: originalKeyPath,
-        isList,
-        isCustomFieldType: true,
-      });
-    }
-
-    return originalMap[originalKeyPath];
-  });
-  const isRevertDisabled = $derived.by(() => {
-    if (fieldType === 'list') {
-      // For list fields, compare all flat entries under the keyPath prefix, because `currentValue`
-      // and `originalValue` may not capture complex (nested) list items correctly
-      const currentMap = valueMap;
-      const originalMap = originalValues?.[locale] ?? {};
-      const keyPathPrefix = `${keyPath}.`;
-
-      const currentEntries = Object.entries(currentMap)
-        .filter(([k]) => k.startsWith(keyPathPrefix) && !INTERNAL_PROP_REGEX.test(k))
-        .sort(([a], [b]) => a.localeCompare(b));
-
-      const originalEntries = Object.entries(originalMap)
-        .filter(([k]) => k.startsWith(keyPathPrefix) && !INTERNAL_PROP_REGEX.test(k))
-        .sort(([a], [b]) => a.localeCompare(b));
-
-      return equal(currentEntries, originalEntries);
-    }
-
-    return equal(currentValue, originalValue);
-  });
+  const isRevertDisabled = $derived(
+    !isFieldChanged({
+      currentValueMap: valueMap,
+      originalValueMap: originalValues?.[locale] ?? {},
+      keyPath,
+    }),
+  );
   const validity = $derived(entryDraft.current?.validities[locale][keyPath]);
   const fieldLabel = $derived(label || fieldName);
   // An entry awaiting deletion is shown for reference only. Unlike `readonly`, which is also set
   // for a duplicated locale, this hides the options that would change the content
   const pendingDeletion = $derived(isPendingDeletion(entryDraft.current?.originalEntry));
-  const readonly = $derived(
-    readonlyOption ||
-      pendingDeletion ||
-      (i18n === 'duplicate' && locale !== defaultLocale) ||
-      fieldType === 'compute' ||
-      fieldType === 'uuid',
+  // An entry in a read-only collection, or a read-only collection file, is shown for reference only
+  // as well
+  const draftReadonly = $derived(isDraftReadonly(entryDraft.current));
+  const locked = $derived(pendingDeletion || draftReadonly);
+  // A DateTime field with the `auto_now` option is set on save, so it can’t be edited, and it’s
+  // hidden while the entry is being created because it has no meaningful value until then. The
+  // option is ignored in a rich text editor component, whose values aren’t set on save
+  const autoNow = $derived(!inEditorComponent && isAutoNowField(fieldConfig));
+  // A Number field with the `auto_increment` option is numbered on save, the same way. It only
+  // applies to a field holding one value per entry of an entry collection
+  /* v8 ignore start -- The field is only rendered along with a draft, but the draft can be gone
+  while the editor is torn down */
+  const autoIncrement = $derived(
+    !!entryDraft.current &&
+      isAutoIncrementField({
+        fieldConfig,
+        collection: entryDraft.current.collection,
+        isIndexFile: entryDraft.current.isIndexFile,
+        keyPath,
+        inEditorComponent,
+      }),
   );
+  /* v8 ignore stop */
+  const autoSet = $derived(autoNow || autoIncrement);
+  const { hidden, readonly } = $derived(
+    getFieldEditorFlags({
+      fieldConfig,
+      autoSet,
+      locked,
+      isDuplicated,
+      isNew: !!entryDraft.current?.isNew,
+    }),
+  );
+  // A field can be restored to its default value or cleared, unless it can’t be edited or its keys
+  // follow the default locale, as with a KeyValue field using the `duplicate_keys` i18n strategy
+  const canReset = $derived(!inEditorComponent && !readonly && !areKeysDuplicated);
+  // The field’s reset actions are taken right away rather than confirmed in a dialog, so only the
+  // availability is used
+  const resetMenu = createResetMenuState(() => {
+    const args = { valueMap, fieldConfig, keyPath, locale, defaultLocale };
+
+    return {
+      restore: canResetField({ ...args, restore: true }),
+      clear: canResetField(args),
+    };
+  });
   const invalid = $derived(validity?.valid === false);
+  const editorFieldConfig = $derived(getEditorFieldConfig({ fieldConfig, inline }));
   const editorProps = $derived({
     locale,
     keyPath,
     typedKeyPath,
     fieldId,
     fieldLabel,
-    fieldConfig,
+    fieldConfig: editorFieldConfig,
     readonly,
     required,
     invalid,
@@ -291,13 +276,33 @@
   {/if}
 {/snippet}
 
-{#if entryDraft.current && canEdit && fieldType !== 'hidden'}
+{#if entryDraft.current && canEdit && fieldType !== 'hidden' && inline}
+  <!-- Only the field types with a compact control can be inline, which excludes a custom one; see
+  `isInlineComponentFieldList()` -->
+  {@const Editor = editors[fieldType]}
+  <span
+    role="none"
+    class="field inline"
+    data-field-type={fieldType}
+    data-key-path={keyPath}
+    data-typed-key-path={typedKeyPath}
+  >
+    <!-- The control is labelled with this, as it is with the heading otherwise -->
+    <span id="{fieldId}-label" hidden>{fieldLabel}</span>
+    <ErrorBoundary>
+      <Editor
+        {...editorProps}
+        bind:currentValue={() => currentValue, (value) => writeValue(value)}
+      />
+    </ErrorBoundary>
+  </span>
+{:else if entryDraft.current && canEdit && fieldType !== 'hidden'}
   <FieldEditorGroup
     aria-label={_('x_field', { values: { field: fieldLabel } })}
     data-field-type={fieldType}
     data-key-path={keyPath}
     data-typed-key-path={typedKeyPath}
-    hidden={fieldType === 'compute'}
+    {hidden}
   >
     <header role="none">
       <h4 role="none" id="{fieldId}-label">{fieldLabel}</h4>
@@ -305,10 +310,11 @@
         <span class="required" aria-hidden="true">*</span>
       {/if}
       <Spacer flex />
-      {#if canCopy && ['richtext', 'markdown', 'string', 'text', 'list', 'object'].includes(fieldType)}
+      {#if canCopy && !draftReadonly && ['richtext', 'markdown', 'string', 'text', 'list', 'object'].includes(fieldType)}
         <TranslateButton size="small" {locale} {otherLocales} {keyPath} />
       {/if}
-      {#if canCopy || canRevert}
+      <!-- Every option in the menu edits the content, which a read-only entry doesn’t allow -->
+      {#if !draftReadonly && (canCopy || canRevert || canReset)}
         <MenuButton
           variant="ghost"
           size="small"
@@ -316,6 +322,8 @@
           disabled={pendingDeletion}
           popupPosition="bottom-right"
           aria-label={_('show_field_options')}
+          onclick={resetMenu.update}
+          onkeydown={resetMenu.update}
         >
           {#snippet popup()}
             <Menu ariaLabel={_('field_options')}>
@@ -324,15 +332,27 @@
               {/if}
               <!-- A field that can be copied from another locale can be reverted as well, so the
               menu always offers it -->
-              <MenuItem
-                label={_('revert_changes')}
-                disabled={isRevertDisabled}
-                onclick={() => {
-                  revertChanges({
-                    draft: /** @type {EntryDraft} */ (entryDraft.current),
-                    locale,
-                    keyPath,
-                  });
+              <ResetMenuItems
+                scope="field"
+                separator={!!canCopy}
+                available={{
+                  revert: !isRevertDisabled,
+                  ...(canReset ? resetMenu.availability : {}),
+                }}
+                onSelect={(action) => {
+                  const draft = /** @type {EntryDraft} */ (entryDraft.current);
+
+                  if (action === 'revert') {
+                    revertChanges({ draft, locale, keyPath });
+                  } else {
+                    resetField({
+                      draft,
+                      fieldConfig,
+                      keyPath,
+                      locale,
+                      restore: action === 'restore',
+                    });
+                  }
                 }}
               />
             </Menu>
@@ -340,38 +360,35 @@
         </MenuButton>
       {/if}
     </header>
-    {#if !readonly && comment}
-      <div role="none" class="comment-wrapper">
-        <p class="comment">{@html _sanitize(comment)}</p>
-      </div>
-    {/if}
     {#if validity?.valid === false}
       <ValidationError id="{fieldId}-error">
         {entryDraft.current?.validationMessages[locale][keyPath]?.join(' ')}
       </ValidationError>
     {/if}
     <div role="none" class="field-wrapper" class:has-extra-labels={hasExtraLabels}>
-      {#if customFieldType}
-        {@render beforeInput()}
-        <CustomEditor
-          {...{ ...editorProps, fieldConfig: /** @type {CustomField} */ (fieldConfig) }}
-          control={customFieldType.control}
-          {currentValue}
-        />
-        {@render afterInput()}
-      {:else if getFieldKind(fieldConfig) === 'unknown'}
-        <Alert status="warning">
-          {_('unsupported_field_type_x', { values: { name: fieldType } })}
-        </Alert>
-      {:else}
-        {@const Editor = editors[fieldType]}
-        {@render beforeInput()}
-        <Editor
-          {...editorProps}
-          bind:currentValue={() => currentValue, (value) => writeValue(value)}
-        />
-        {@render afterInput()}
-      {/if}
+      <ErrorBoundary>
+        {#if customFieldType}
+          {@render beforeInput()}
+          <CustomEditor
+            {...{ ...editorProps, fieldConfig: /** @type {CustomField} */ (fieldConfig) }}
+            control={customFieldType.control}
+            {currentValue}
+          />
+          {@render afterInput()}
+        {:else if getFieldKind(fieldConfig) === 'unknown'}
+          <Alert status="warning">
+            {_('unsupported_field_type_x', { values: { name: fieldType } })}
+          </Alert>
+        {:else}
+          {@const Editor = editors[fieldType]}
+          {@render beforeInput()}
+          <Editor
+            {...editorProps}
+            bind:currentValue={() => currentValue, (value) => writeValue(value)}
+          />
+          {@render afterInput()}
+        {/if}
+      </ErrorBoundary>
     </div>
     {#if !readonly && (hint || extraHint.current)}
       {@const ExtraHint = extraHint.current}
@@ -399,7 +416,11 @@
         width: 100%;
       }
 
-      input:is([type='color'], [type='number']) {
+      /* A native color, date or time input is still styled for a custom field type that renders
+        one. The built-in editors use Sveltia UI components instead, which have the `sui` class and
+        styles of their own, so they’re left out */
+
+      input:is([type='color']:not(.sui), [type='number']) {
         border-width: 1px;
         border-color: var(--sui-primary-border-color);
         border-radius: var(--sui-control-medium-border-radius);
@@ -416,7 +437,7 @@
         color: inherit;
       }
 
-      input:is([type='date'], [type='datetime-local'], [type='time']) {
+      input:is([type='date'], [type='datetime-local'], [type='time']):not(.sui) {
         margin: var(--sui-focus-ring-width);
         border-width: var(--sui-textbox-border-width, 1px);
         border-color: var(--sui-primary-border-color);
@@ -440,7 +461,7 @@
           [type='date'],
           [type='datetime-local'],
           [type='time']
-        ) {
+        ):not(.sui) {
         border-color: var(--sui-error-border-color);
       }
 
@@ -461,20 +482,12 @@
     white-space: nowrap;
   }
 
-  .comment,
-  .hint {
-    margin-inline: var(--sui-focus-ring-width) !important;
-    font-size: var(--sui-font-size-small);
-    line-height: var(--sui-line-height-compact);
-  }
-
-  .comment {
-    margin-block: var(--sui-focus-ring-width) !important;
-  }
-
   .hint {
     flex: auto;
+    margin-inline: var(--sui-focus-ring-width) !important;
     margin-block: var(--sui-focus-ring-width) 0 !important;
+    font-size: var(--sui-font-size-small);
+    line-height: var(--sui-line-height-compact);
     color: var(--sui-tertiary-foreground-color);
   }
 

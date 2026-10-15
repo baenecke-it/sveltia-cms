@@ -1,8 +1,10 @@
 import { describe, expect, test, vi } from 'vitest';
 import { page } from 'vitest/browser';
 
+import { previews } from '$lib/components/contents/details/fields';
 import { customFieldTypeRegistry } from '$lib/services/api/registries';
 import { highlightEditorField } from '$lib/services/contents/editor/fields';
+import { initTestConfig } from '$lib/test/config';
 import { createMockDraft, renderWithDraft } from '$lib/test/draft';
 
 import FieldPreview from './field-preview.svelte';
@@ -51,7 +53,37 @@ const renderPreview = async ({
   return container;
 };
 
+/**
+ * Component that throws while it’s rendered, standing in for a field editor or preview with a bug.
+ * @throws {TypeError} Always.
+ */
+const BrokenComponent = () => {
+  throw new TypeError('boom');
+};
+
 describe('FieldPreview', () => {
+  test('shows a message in place of a preview that fails, keeping the label', async () => {
+    const { string } = previews;
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    previews.string = /** @type {any} */ (BrokenComponent);
+
+    try {
+      const container = await renderPreview({
+        fieldConfig: { name: 'title', widget: 'string', label: 'Title' },
+        values: { title: 'Hello' },
+      });
+
+      await expect
+        .element(page.getByRole('alert'))
+        .toMatchTextContent(/this field can’t be displayed\. .*boom/);
+      expect(container.querySelector('h4')).toHaveTextContent('Title');
+    } finally {
+      previews.string = string;
+      consoleErrorSpy.mockRestore();
+    }
+  });
+
   test('renders the preview for the field type under its label', async () => {
     const container = await renderPreview({
       fieldConfig: { name: 'title', widget: 'string', label: 'Title' },
@@ -101,6 +133,23 @@ describe('FieldPreview', () => {
     ).toHaveLength(0);
   });
 
+  test('renders nothing without a field configuration', async () => {
+    const { container } = await renderWithDraft(FieldPreview, {
+      draft: createMockDraft({
+        fields: [{ name: 'title', widget: 'string' }],
+        values: { en: { title: 'Hello' } },
+      }),
+      props: {
+        locale: 'en',
+        keyPath: 'missing',
+        typedKeyPath: 'missing',
+        fieldConfig: /** @type {any} */ (undefined),
+      },
+    });
+
+    expect(container.querySelector('section')).toBeNull();
+  });
+
   test('renders a non-translatable field in the default locale only', async () => {
     /** @type {Field} */
     const fieldConfig = { name: 'title', widget: 'string', i18n: false };
@@ -120,6 +169,48 @@ describe('FieldPreview', () => {
         })
       ).children,
     ).toHaveLength(1);
+  });
+
+  test('renders a subfield duplicated along with its ancestor in another locale', async () => {
+    /** @type {Field} */
+    const venueField = {
+      name: 'venue',
+      widget: 'object',
+      i18n: 'duplicate',
+      fields: [{ name: 'name', widget: 'string', label: 'Name' }],
+    };
+
+    // The ancestors of a subfield are looked up in the configuration
+    await initTestConfig({
+      i18n: { structure: 'multiple_files', locales: ['en', 'ja'], default_locale: 'en' },
+      collections: [
+        {
+          name: 'posts',
+          label: 'Posts',
+          folder: 'content/posts',
+          i18n: true,
+          fields: [venueField],
+        },
+      ],
+    });
+
+    const { container } = await renderWithDraft(FieldPreview, {
+      draft: createMockDraft({
+        fields: [venueField],
+        i18n: { i18nEnabled: true, defaultLocale: 'en', allLocales: ['en', 'ja'] },
+        values: { en: { 'venue.name': 'Hall' }, ja: { 'venue.name': 'Hall' } },
+      }),
+      props: {
+        locale: 'ja',
+        keyPath: 'venue.name',
+        typedKeyPath: 'venue.name',
+        fieldConfig: /** @type {any} */ (venueField).fields[0],
+      },
+    });
+
+    // Like the editor, which shows it read-only, rather than leaving the Object field empty
+    expect(container.children).toHaveLength(1);
+    await expect.element(page.getByText('Hall')).toBeVisible();
   });
 
   test('highlights the editor field when activated', async () => {
@@ -162,7 +253,7 @@ describe('FieldPreview', () => {
         values: { stars: 5 },
       });
 
-      await vi.waitFor(() => expect(container).toHaveTextContent('stars Custom: 5'));
+      await expect.poll(() => container.textContent?.trim()).toMatch(/^stars\s*Custom: 5$/);
 
       // A custom field type without a preview shows nothing
       customFieldTypeRegistry.set('rating', /** @type {any} */ ({}));

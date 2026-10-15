@@ -1,16 +1,25 @@
 import { toRaw } from '@sveltia/utils/object';
 
 import { suspendAutoDuplication } from '$lib/services/contents/draft';
-import { createProxy } from '$lib/services/contents/draft/create/proxy.svelte';
+import { createProxy, isDuplicatedField } from '$lib/services/contents/draft/create/proxy.svelte';
 import { getDefaultValues } from '$lib/services/contents/draft/defaults';
-import { getField } from '$lib/services/contents/entry/fields';
+import { getDraftFieldArgs, getField } from '$lib/services/contents/entry/fields';
 import { isKeyPathWithin } from '$lib/services/contents/entry/key-paths';
+import { TEXT_FIELD_TYPES } from '$lib/services/contents/fields';
+import { hasUuidTag } from '$lib/services/contents/fields/compute/helpers';
 import { getDuplicateKeysFieldKeyPaths } from '$lib/services/contents/fields/key-value/duplicate-keys';
 import { getPairsFromContent, setPairs } from '$lib/services/contents/fields/key-value/pairs';
+import { getInitialValue as getInitialUuidValue } from '$lib/services/contents/fields/uuid/helpers';
+import { getDraftI18nConfig } from '$lib/services/contents/i18n/config';
+import {
+  isFieldI18nDisabled,
+  isFieldLocalized,
+  isFieldTranslatable,
+} from '$lib/services/contents/i18n/fields';
 
 /**
  * @import { EntryDraft, FlattenedEntryContent, InternalLocaleCode } from '$lib/types/private';
- * @import { Field, FieldKeyPath, HiddenField } from '$lib/types/public';
+ * @import { ComputeField, Field, FieldKeyPath, HiddenField, UuidField } from '$lib/types/public';
  */
 
 /**
@@ -22,18 +31,53 @@ import { getPairsFromContent, setPairs } from '$lib/services/contents/fields/key
  * The draft proxy duplicates a `duplicate` field on its own whenever a value is assigned, which
  * would write every value twice here, so the callback runs with that suspended. Suspensions nest,
  * so a caller whose operation is wider than this loop can still suspend around the whole thing.
+ *
+ * A field nested in a List or Object field with the `duplicate` strategy is duplicated along with
+ * it, even without the strategy of its own. Pass the draft and the key path to have that taken into
+ * account, so that a list item or object added to such a field reaches every locale.
  * @param {object} args Arguments.
  * @param {Record<InternalLocaleCode, FlattenedEntryContent> | undefined} args.valueStore Value
  * store to update, e.g. `draft.currentValues`, keyed by locale.
  * @param {InternalLocaleCode} args.locale Locale being edited.
  * @param {Field['i18n']} args.i18n Field i18n configuration.
+ * @param {EntryDraft} [args.draft] Entry draft the value store belongs to.
+ * @param {FieldKeyPath} [args.keyPath] Key path of the field being updated.
  * @param {(valueMap: FlattenedEntryContent, locale: InternalLocaleCode) => void} callback Function
  * to run for each target locale, taking that locale’s content and the locale code.
  */
-export const forEachTargetLocale = ({ valueStore, locale, i18n }, callback) => {
+export const forEachTargetLocale = ({ valueStore, locale, i18n, draft, keyPath }, callback) => {
+  /**
+   * Check if the field is nested in a duplicated List or Object field.
+   * @param {EntryDraft} _draft Entry draft.
+   * @param {FieldKeyPath} _keyPath Key path of the field.
+   * @returns {boolean} Result.
+   */
+  const isNestedInDuplicatedField = (_draft, _keyPath) => {
+    const getFieldArgs = getDraftFieldArgs(_draft, {
+      keyPath: _keyPath,
+      valueMap: valueStore?.[locale],
+    });
+
+    // Look up the configuration rather than relying on the given `i18n`, which the caller may have
+    // defaulted to `false` for a field without the option, which would hide the ancestor’s strategy
+    return isDuplicatedField({
+      fieldConfig: getField(getFieldArgs) ?? /** @type {Field} */ ({ i18n }),
+      getFieldArgs,
+    });
+  };
+
+  const duplicated =
+    i18n === 'duplicate' ||
+    // The field configuration can only be looked up for the entry’s own values, not for those of a
+    // rich text editor component, which live in another value store
+    (!!draft &&
+      !!keyPath &&
+      valueStore === draft.currentValues &&
+      isNestedInDuplicatedField(draft, keyPath));
+
   suspendAutoDuplication(() => {
     Object.entries(valueStore ?? {}).forEach(([_locale, valueMap]) => {
-      if (_locale === locale || i18n === 'duplicate') {
+      if (_locale === locale || duplicated) {
         callback(valueMap, _locale);
       }
     });
@@ -54,14 +98,12 @@ export const forEachTargetLocale = ({ valueStore, locale, i18n }, callback) => {
  * @returns {FlattenedEntryContent} Updated content.
  */
 export const copyDefaultLocaleValues = ({ draft, content, targetLanguage, keyPathPrefix }) => {
-  const { collectionName, fileName, collection, collectionFile, currentValues, isIndexFile } =
-    draft;
-
-  const { defaultLocale } = (collectionFile ?? collection)._i18n;
+  const { currentValues } = draft;
+  const { defaultLocale } = getDraftI18nConfig(draft);
   /** @type {FlattenedEntryContent} */
   const defaultLocaleContent = toRaw(currentValues[defaultLocale]);
   const newContent = { ...toRaw(content), ...defaultLocaleContent };
-  const getFieldArgs = { collectionName, fileName, valueMap: newContent, isIndexFile };
+  const getFieldArgs = getDraftFieldArgs(draft, { valueMap: newContent });
   /** @type {string[]} */
   const noI18nFieldKeys = [];
 
@@ -73,21 +115,40 @@ export const copyDefaultLocaleValues = ({ draft, content, targetLanguage, keyPat
       return;
     }
 
-    const { widget: fieldType = 'text', i18n = false } = field;
+    const { widget: fieldType = 'text' } = field;
+
+    // A field without an `i18n` option of its own is duplicated along with a List or Object field
+    // using the `duplicate` strategy, so it has to be kept rather than removed as non-i18n
+    const i18n =
+      field.i18n ??
+      (isDuplicatedField({ fieldConfig: field, getFieldArgs: { ...getFieldArgs, keyPath } })
+        ? 'duplicate'
+        : false);
 
     // Reset the field value to the default value or an empty string if the field is a text-like
     // field type and i18n is enabled, because the content would likely be translated by the user.
     // Otherwise, the content would be copied from the default locale.
-    if (
-      ['text', 'string', 'richtext', 'markdown'].includes(fieldType) &&
-      [true, 'translate'].includes(i18n)
-    ) {
+    if (TEXT_FIELD_TYPES.includes(fieldType) && isFieldTranslatable(i18n)) {
       newContent[keyPath] = content[keyPath] ?? '';
+    }
+
+    // A translatable UUID field gets a UUID of its own rather than the default locale’s, just like
+    // each locale of a new draft does (see `fillUuidValues()`). A Compute field generating UUIDs is
+    // cleared for the same reason, as it keeps the UUIDs found in its value when resolved again
+    if (isFieldTranslatable(i18n)) {
+      if (fieldType === 'uuid') {
+        newContent[keyPath] =
+          content[keyPath] || getInitialUuidValue(/** @type {UuidField} */ (field));
+      }
+
+      if (fieldType === 'compute' && hasUuidTag(/** @type {ComputeField} */ (field).value)) {
+        newContent[keyPath] = '';
+      }
     }
 
     // Support special case for the Hidden field with `default` value set to `{{locale}}`: if the
     // field value is `{{locale}}`, replace it with the target locale
-    if (fieldType === 'hidden' && [true, 'translate'].includes(i18n)) {
+    if (fieldType === 'hidden' && isFieldTranslatable(i18n)) {
       const { default: defaultValue } = /** @type {HiddenField} */ (field);
 
       if (defaultValue === '{{locale}}') {
@@ -99,17 +160,14 @@ export const copyDefaultLocaleValues = ({ draft, content, targetLanguage, keyPat
     // default locale, otherwise the subfields will not be saved in the current locale
     if (
       fieldType === 'object' &&
-      [true, 'translate', 'duplicate'].includes(i18n) &&
+      isFieldLocalized(i18n) &&
       defaultLocaleContent[keyPath] !== null
     ) {
       delete newContent[keyPath];
     }
 
     // Remove the field if i18n is disabled
-    if (
-      [false, 'none'].includes(i18n) ||
-      noI18nFieldKeys.some((key) => isKeyPathWithin(keyPath, key))
-    ) {
+    if (isFieldI18nDisabled(i18n) || noI18nFieldKeys.some((key) => isKeyPathWithin(keyPath, key))) {
       delete newContent[keyPath];
       noI18nFieldKeys.push(keyPath);
     }

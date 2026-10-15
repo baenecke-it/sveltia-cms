@@ -43,12 +43,16 @@ export const parseSelectFieldConfig = ({ config, context, collectors }) => {
     });
   });
 
-  if (defaultValue === undefined) {
+  // An empty `default:` line in YAML is `null`, which means no default unless `null` is an option
+  if (defaultValue === undefined || (defaultValue === null && !values.includes(null))) {
     return;
   }
 
+  // A default can be given as an option object, whose `value` is what gets saved
   /** @type {any[]} */ (Array.isArray(defaultValue) ? defaultValue : [defaultValue]).forEach(
-    (value) => {
+    (option) => {
+      const value = isObject(option) ? option.value : option;
+
       if (!values.includes(value)) {
         addMessage({
           strKey: 'select_field_invalid_default',

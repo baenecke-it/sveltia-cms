@@ -1,9 +1,10 @@
+import { flushSync } from 'svelte';
 import { beforeAll, beforeEach, describe, expect, test } from 'vitest';
 import { page } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
 import { getCollection, selectedCollection } from '$lib/services/contents/collection';
-import { setReorderMode } from '$lib/services/contents/collection/view';
+import { setBulkEditMode, setReorderMode } from '$lib/services/contents/collection/view';
 import { currentView } from '$lib/services/contents/collection/view/settings';
 import { env } from '$lib/services/user/env.svelte';
 import { forkedRepository } from '$lib/services/workflow/open-authoring';
@@ -29,6 +30,17 @@ describe('SecondaryToolbar', () => {
           view_groups: [{ label: 'Draft', field: 'draft' }],
         },
         {
+          name: 'notes',
+          folder: 'content/notes',
+          fields: [{ name: 'title', widget: 'string' }],
+          table_columns: ['title'],
+        },
+        {
+          name: 'pages',
+          folder: 'content/pages',
+          fields: [{ name: 'title', widget: 'string' }],
+        },
+        {
           name: 'settings',
           files: [{ name: 'general', file: 'data/general.yml', fields: [{ name: 'x' }] }],
         },
@@ -42,6 +54,7 @@ describe('SecondaryToolbar', () => {
     env.isLargeScreen = true;
     forkedRepository.current = undefined;
     setReorderMode(false);
+    setBulkEditMode(false);
     setEntries([
       createMockEntry({ slug: 'a', content: { _default: { title: 'A', draft: true } } }),
       createMockEntry({ slug: 'b', content: { _default: { title: 'B', draft: false } } }),
@@ -96,5 +109,69 @@ describe('SecondaryToolbar', () => {
     await expect.element(page.getByRole('toolbar')).toBeVisible();
     setReorderMode(true);
     await expect.poll(() => reorder.container.querySelector('[role="toolbar"]')).toBeNull();
+  });
+
+  test('is hidden while bulk editing', async () => {
+    const { container } = await render(SecondaryToolbar, {});
+
+    await expect.element(page.getByRole('toolbar')).toBeVisible();
+    setBulkEditMode(true);
+    await expect.poll(() => container.querySelector('[role="toolbar"]')).toBeNull();
+    setBulkEditMode(false);
+    await expect.element(page.getByRole('toolbar')).toBeVisible();
+  });
+
+  test('offers the table view only with columns and the grid view only with thumbnails', async () => {
+    /**
+     * Get the names of the view buttons.
+     * @returns {(string | null)[]} Names.
+     */
+    const getViewNames = () =>
+      page
+        .getByRole('radiogroup', { name: 'Switch View' })
+        .getByRole('radio')
+        .elements()
+        .map((el) => el.getAttribute('aria-label'));
+
+    /**
+     * Select a collection with an entry, and render the toolbar for it.
+     * @param {string} name Collection name.
+     * @returns {Promise<any>} Rendered component.
+     */
+    const renderFor = async (name) => {
+      setEntries([
+        createMockEntry({
+          slug: 'a',
+          folder: `content/${name}`,
+          content: { _default: { title: 'A' } },
+        }),
+      ]);
+      selectedCollection.current = getCollection(name);
+      flushSync();
+      currentView.current = {};
+
+      return render(SecondaryToolbar, {});
+    };
+
+    // The posts have thumbnails but no columns: the list view is the default
+    const posts = await renderFor('posts');
+
+    await expect.poll(getViewNames).toEqual(['List View', 'Grid View']);
+    await expect.element(page.getByRole('radio', { name: 'List View' })).toBeChecked();
+    await posts.unmount();
+
+    // The notes have columns but no thumbnails: the table view is the default
+    const notes = await renderFor('notes');
+
+    await expect.poll(getViewNames).toEqual(['Table View', 'List View']);
+    await expect.element(page.getByRole('radio', { name: 'Table View' })).toBeChecked();
+    await notes.unmount();
+
+    // The pages have neither, so there is no view to switch to
+    const { container } = await renderFor('pages');
+
+    await expect.element(page.getByRole('toolbar')).toBeVisible();
+    expect(page.getByRole('radiogroup', { name: 'Switch View' }).elements()).toHaveLength(0);
+    expect(container.querySelector('.wrapper')).not.toBeNull();
   });
 });

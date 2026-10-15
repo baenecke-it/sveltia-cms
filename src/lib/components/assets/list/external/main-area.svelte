@@ -6,7 +6,7 @@
 -->
 <script>
   import { _ } from '@sveltia/i18n';
-  import { Alert, Toast } from '@sveltia/ui';
+  import { Alert, Infobar, Toast } from '@sveltia/ui';
   import { untrack } from 'svelte';
 
   import AssetList from '$lib/components/assets/list/external/asset-list.svelte';
@@ -24,6 +24,7 @@
   import {
     externalAssets,
     externalAssetSearchTerms,
+    externalAssetsTruncated,
     focusedExternalAsset,
     hasFolderSupport,
     selectedCloudService,
@@ -52,11 +53,8 @@
   const maxSize = $derived(getSharedMediaLibraryOptions().max_file_size ?? Infinity);
   /* v8 ignore stop */
 
-  /** @type {string[]} */
-  let oversizedFileNames = $state([]);
-  /** @type {string[]} */
-  let invalidFileNames = $state([]);
-  let showRejectedFilesAlert = $state(false);
+  /** @type {RejectedFilesAlertDialog | undefined} */
+  let rejectedFilesAlert = $state();
 
   // Upload the files dropped on the list, picked with the Upload button or chosen to replace an
   // existing asset
@@ -70,14 +68,7 @@
     untrack(async () => {
       uploadingExternalAssets.current = { files: [] };
 
-      const rejected = await uploadExternalAssets(files, { originalAsset });
-
-      oversizedFileNames = rejected.oversizedFileNames;
-      invalidFileNames = rejected.invalidFileNames;
-
-      if (oversizedFileNames.length || invalidFileNames.length) {
-        showRejectedFilesAlert = true;
-      }
+      rejectedFilesAlert?.report(await uploadExternalAssets(files, { originalAsset }));
     });
   });
 </script>
@@ -108,6 +99,17 @@
     {/if}
   {/snippet}
   {#snippet mainContent()}
+    {#if externalAssetsTruncated.current}
+      <!-- The service holds more files than are listed at once, so some of them are left out -->
+      <Infobar
+        status="warning"
+        dismissible={false}
+        --sui-infobar-border-width="0 0 1px"
+        --sui-infobar-message-justify-content="center"
+      >
+        {_('external_assets_truncated')}
+      </Infobar>
+    {/if}
     <AssetList />
   {/snippet}
   {#snippet secondarySidebar()}
@@ -136,9 +138,4 @@
   </Alert>
 </Toast>
 
-<RejectedFilesAlertDialog
-  bind:open={showRejectedFilesAlert}
-  {oversizedFileNames}
-  {invalidFileNames}
-  {maxSize}
-/>
+<RejectedFilesAlertDialog bind:this={rejectedFilesAlert} {maxSize} />

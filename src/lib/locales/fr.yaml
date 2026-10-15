@@ -477,13 +477,20 @@ entry_not_found: Entrée introuvable.
 # Entry creation restrictions: tooltip and advisory messages
 creating_entries_disabled_by_admin: La création d’entrées dans cette collection est désactivée par l’administrateur.
 # {$quota} is the collection’s maximum entry count
-creating_entries_disabled_by_quota: Vous ne pouvez pas ajouter d’entrées à cette collection, car elle a atteint sa limite de {$quota} entrées.
+creating_entries_disabled_by_quota: |
+  .input {$quota :integer}
+  .match $quota
+    one {{ Vous ne pouvez pas ajouter d’entrées à cette collection, car elle a atteint sa limite de {$quota} entrée. }}
+    *   {{ Vous ne pouvez pas ajouter d’entrées à cette collection, car elle a atteint sa limite de {$quota} entrées. }}
 # {$quota} is the collection limit and {$remaining} is the number of entries that can still be created
 creating_entries_nearing_quota: |
+  .input {$quota :integer}
   .input {$remaining :integer}
-  .match $remaining
-    one {{ Cette collection approche de sa limite de {$quota} entrées. Vous ne pouvez plus créer que {$remaining} entrée supplémentaire. }}
-    *   {{ Cette collection approche de sa limite de {$quota} entrées. Vous ne pouvez plus créer que {$remaining} entrées supplémentaires. }}
+  .match $quota $remaining
+    one one {{ Cette collection approche de sa limite de {$quota} entrée. Vous ne pouvez plus créer que {$remaining} entrée supplémentaire. }}
+    one *   {{ Cette collection approche de sa limite de {$quota} entrée. Vous ne pouvez plus créer que {$remaining} entrées supplémentaires. }}
+    *   one {{ Cette collection approche de sa limite de {$quota} entrées. Vous ne pouvez plus créer que {$remaining} entrée supplémentaire. }}
+    *   *   {{ Cette collection approche de sa limite de {$quota} entrées. Vous ne pouvez plus créer que {$remaining} entrées supplémentaires. }}
 
 # Navigation: back links and list labels
 back_to_collection: Retour à la collection
@@ -1558,7 +1565,7 @@ config:
     oauth_implicit_flow: La méthode d’authentification configurée (flux implicite) n’est pas prise en charge dans Sveltia CMS. Utilisez plutôt une autre <a>méthode d’authentification</a>.
     github_pkce_unsupported: L’autorisation PKCE n’est pas encore prise en charge en raison des limitations de GitHub. Utilisez plutôt une autre <a>méthode d’authentification</a>.
     oauth_no_app_id: L’identifiant de l’application OAuth n’est pas défini.
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: L’option `open_authoring` nécessite le mode de publication `editorial_workflow`. Consultez la <a>documentation</a> pour plus de détails.
     # Don’t localize `auth_methods`
     no_auth_methods: L’option `auth_methods` doit contenir au moins une méthode.
@@ -1680,8 +1687,6 @@ config:
   # Warning messages (logged to console)
   warning:
     oauth_no_app_id: L’identifiant de l’application OAuth n’est pas défini. Les utilisateurs doivent fournir un jeton d’accès pour se connecter.
-    editorial_workflow_unsupported: Le flux éditorial n’est pas encore pris en charge dans Sveltia CMS.
-    open_authoring_unsupported_backend: L’Open Authoring n’est actuellement pris en charge qu’avec le backend GitHub.
     # {$prop} is the unsupported option name that will be ignored
     unsupported_ignored_option: L’option `{$prop}` n’est pas prise en charge dans Sveltia CMS. Elle sera ignorée.
     # Don’t localize `picker_utc`, `input_timezone`, and `output_utc`
@@ -1821,8 +1826,6 @@ workflow:
     .match $count
       one {{ L’une d’elles n’a pas encore été publiée, vos modifications non publiées seront donc abandonnées. Toute version déjà publiée restera publiée. }}
       *   {{ {$count} d’entre elles n’ont pas encore été publiées, vos modifications non publiées seront donc abandonnées. Toute version déjà publiée restera publiée. }}
-  # Confirmation dialog shown before merging the pull request. Keep the wording free of Git jargon.
-  confirm_publishing_entry: Voulez-vous vraiment publier cette entrée ? Vos modifications prendront effet immédiatement.
   # Workflow page: toast notifications shown while an entry is being published from a card, and
   # once publishing has completed
   publishing_entry: Publication de l’entrée…
@@ -1976,13 +1979,23 @@ prefs:
       description: Afficher un soulignement pour les liens dans l’aperçu de l’entrée et les libellés de l’interface utilisateur.
       switch_label: Toujours souligner les liens
 
-  # Advanced panel
-  advanced:
-    title: Avancé
-    beta:
-      title: Fonctionnalités bêta
-      description: Activer certaines fonctionnalités bêta susceptibles d’être instables ou non localisées.
-      switch_label: Rejoindre le programme bêta
+  # Data Management panel
+  data:
+    clear_data:
+      title: Effacer les données
+      # Clear File Cache button
+      file_cache:
+        description: Supprimer le contenu des fichiers et les miniatures d’images mis en cache localement pour libérer de l’espace de stockage ou résoudre les problèmes causés par des données obsolètes.
+        button_label: Vider le cache des fichiers
+        confirmation: Le contenu des fichiers et les miniatures d’images mis en cache localement seront supprimés. Vos brouillons non enregistrés et vos paramètres seront conservés, et les données supprimées seront téléchargées ou générées à nouveau si nécessaire. Le CMS sera rechargé une fois l’opération terminée.
+      # Erase All Data button
+      all_data:
+        description: Supprimer tout ce que le CMS conserve dans ce navigateur, y compris les fichiers en cache, les brouillons non enregistrés et les paramètres. Tout ce qui est déjà enregistré dans votre dépôt ne sera pas affecté.
+        button_label: Effacer toutes les données
+        confirmation: Toutes les données stockées dans ce navigateur seront supprimées, y compris le contenu des fichiers en cache, les miniatures d’images, les brouillons non enregistrés, les paramètres et l’état de connexion. Votre dépôt ne sera pas affecté, mais toute modification non enregistrée sera perdue et vous devrez vous reconnecter. Le CMS sera rechargé une fois l’opération terminée.
+
+  # Developer panel
+  developer:
     developer_mode:
       title: Mode développeur
       description: Activer certaines fonctionnalités destinées aux développeurs, notamment des journaux de console détaillés et des menus contextuels natifs.
@@ -2000,18 +2013,6 @@ prefs:
         field_label: En-tête d’autorisation (par exemple, Bearer <token>) (facultatif)
         saved: En-tête d’autorisation enregistré.
         removed: En-tête d’autorisation supprimé.
-    clear_data:
-      title: Effacer les données
-      # Clear File Cache button
-      file_cache:
-        description: Supprimer le contenu des fichiers et les miniatures d’images mis en cache localement pour libérer de l’espace de stockage ou résoudre les problèmes causés par des données obsolètes.
-        button_label: Vider le cache des fichiers
-        confirmation: Le contenu des fichiers et les miniatures d’images mis en cache localement seront supprimés. Vos brouillons non enregistrés et vos paramètres seront conservés, et les données supprimées seront téléchargées ou générées à nouveau si nécessaire. Le CMS sera rechargé une fois l’opération terminée.
-      # Erase All Data button
-      all_data:
-        description: Supprimer tout ce que le CMS conserve dans ce navigateur, y compris les fichiers en cache, les brouillons non enregistrés et les paramètres. Tout ce qui est déjà enregistré dans votre dépôt ne sera pas affecté.
-        button_label: Effacer toutes les données
-        confirmation: Toutes les données stockées dans ce navigateur seront supprimées, y compris le contenu des fichiers en cache, les miniatures d’images, les brouillons non enregistrés, les paramètres et l’état de connexion. Votre dépôt ne sera pas affecté, mais toute modification non enregistrée sera perdue et vous devrez vous reconnecter. Le CMS sera rechargé une fois l’opération terminée.
 
 # ==============================================================================
 # Keyboard Shortcuts

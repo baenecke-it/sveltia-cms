@@ -12,6 +12,7 @@
   import { planAssetDeletion } from '$lib/services/assets/data/cascade';
   import { deleteSubfolder, getSubfolderAssets } from '$lib/services/assets/data/subfolder';
   import { deletingSubfolder } from '$lib/services/assets/subfolders';
+  import { isCommitCancelled } from '$lib/services/backends/commit-prompt';
 
   /**
    * @import { CascadeDeletePlan } from '$lib/types/private';
@@ -45,15 +46,18 @@
     try {
       await deleteSubfolder(subfolder.path);
     } catch (/** @type {any} */ ex) {
-      deletionFailed = true;
-      // eslint-disable-next-line no-console
-      console.error(ex);
+      // The user has cancelled the commit at the commit message prompt, which isn’t a failure
+      if (!isCommitCancelled(ex)) {
+        deletionFailed = true;
+        // eslint-disable-next-line no-console
+        console.error(ex);
+      }
     }
   };
 
-  // Work out the plan whenever the dialog opens. The lookup is asynchronous — an asset without a
-  // public path is matched by its blob URL, which may have to be created first — so the dialog
-  // starts without a plan, and the Delete button waits for it
+  // Work out the plan whenever the dialog opens. The lookup is asynchronous, so the dialog starts
+  // without a plan, and the Delete button waits for it. The deletion then reuses the plan, unless
+  // the entries have changed in the meantime
   $effect(() => {
     if (!subfolder) {
       return;

@@ -1,4 +1,5 @@
 import { locale as appLocale, locales as appLocales, dictionary, waitLocale } from '@sveltia/i18n';
+import { isObject } from '@sveltia/utils/object';
 import { LocalStorage } from '@sveltia/utils/storage';
 import equal from 'fast-deep-equal';
 import { untrack } from 'svelte';
@@ -49,15 +50,17 @@ $effect.root(() => {
     prefsError.current = undefined;
 
     try {
-      const _prefs = (await LocalStorage.get(PREFS_STORAGE_KEY)) ?? {};
+      const stored = await LocalStorage.get(PREFS_STORAGE_KEY);
+      // Corrupt or foreign data under the key is as good as none
+      const _prefs = isObject(stored) ? stored : {};
 
       _prefs.apiKeys ??= {};
       _prefs.useDraftBackup ??= true;
       _prefs.closeOnSave ??= true;
       _prefs.closeWithEscape ??= true;
       _prefs.underlineLinks ??= true;
-      _prefs.beta ??= false;
       _prefs.devModeEnabled ??= false;
+      _prefs.localGitCommits ??= false;
       _prefs.defaultTranslationService ??= 'google';
       _prefs.locale ??= AUTO_PREF_VALUE;
 
@@ -66,6 +69,9 @@ $effect.root(() => {
       if (_prefs.locale === 'en') {
         _prefs.locale = AUTO_PREF_VALUE;
       }
+
+      // Drop the legacy `beta` value, which was used by the removed Beta Features setting
+      delete _prefs.beta;
 
       Object.assign(prefs, _prefs);
     } catch {
@@ -90,7 +96,7 @@ $effect.root(() => {
       }
     })();
 
-    const { theme, underlineLinks = true, beta = false, devModeEnabled: devMode = false } = prefs;
+    const { theme, underlineLinks = true, devModeEnabled: devMode = false } = prefs;
     const autoTheming = !theme || theme === AUTO_PREF_VALUE;
     const autoTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 
@@ -98,7 +104,6 @@ $effect.root(() => {
       theme: autoTheming ? autoTheme : theme,
       autoTheming,
       underlineLinks,
-      beta,
       devMode,
     });
   });

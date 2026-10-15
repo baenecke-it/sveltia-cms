@@ -1,8 +1,10 @@
 <script>
   import { AppShell } from '@sveltia/ui';
-  import { onMount, untrack } from 'svelte';
+  import { onMount } from 'svelte';
 
+  import ErrorBoundary from '$lib/components/common/error-boundary.svelte';
   import EntrancePage from '$lib/components/entrance/entrance-page.svelte';
+  import CommitMessageDialog from '$lib/components/global/commit-message-dialog.svelte';
   import BackendStatusIndicator from '$lib/components/global/infobars/backend-status-indicator.svelte';
   import UpdateNotification from '$lib/components/global/infobars/update-notification.svelte';
   import LocaleLoadErrorToast from '$lib/components/global/locale-load-error-toast.svelte';
@@ -16,7 +18,9 @@
     appManifestURL,
     appTitle,
   } from '$lib/services/app/branding';
+  import { missingBrowserFeatures } from '$lib/services/app/browser-support';
   import { initAppLocale } from '$lib/services/app/i18n';
+  import { initAppInstallDetection } from '$lib/services/app/install';
   import {
     announcedPageStatus,
     mainAreaTitle,
@@ -24,7 +28,8 @@
     startViewTransition,
   } from '$lib/services/app/navigation';
   import { backend } from '$lib/services/backends';
-  import { cmsConfigLoaded, DEV_SITE_URL, initCmsConfig } from '$lib/services/config';
+  import { cmsConfigLoaded, DEV_SITE_URL } from '$lib/services/config';
+  import { initCmsConfig } from '$lib/services/config/init';
   import { dataLoaded } from '$lib/services/contents';
   import { user } from '$lib/services/user/account.svelte';
   import { initUserEnvDetection } from '$lib/services/user/env.svelte';
@@ -53,11 +58,22 @@
     initUserEnvDetection();
   });
 
-  $effect(() => {
-    untrack(() => {
-      initCmsConfig(config);
-    });
+  onMount(() => {
+    // An outdated browser would fail while loading the configuration; the entrance page asks the
+    // user to update it instead
+    if (missingBrowserFeatures.current.length) {
+      // eslint-disable-next-line no-console
+      console.error('Unsupported browser. Missing features:', missingBrowserFeatures.current);
+
+      return;
+    }
+
+    initCmsConfig(config);
   });
+
+  // Listen from the start: the browser offers to install the app only once, shortly after the
+  // page loads, when the account menu holding the Install as App item is usually closed
+  onMount(() => initAppInstallDetection());
 
   // Fix the position of the custom mount element if needed
   // @see https://decapcms.org/docs/custom-mounting/
@@ -122,8 +138,10 @@
 
 <svelte:body
   onmousedown={(event) => {
-    if (/** @type {HTMLElement | null} */ (event.target)?.matches('a')) {
-      const link = /** @type {HTMLAnchorElement} */ (event.target);
+    // The press can land on an element within the link, e.g. `<strong>` in a Markdown field hint
+    const link = /** @type {HTMLElement | null} */ (event.target)?.closest('a');
+
+    if (link) {
       const { origin, pathname } = link;
 
       // Open external links and links to different paths in a new tab
@@ -137,22 +155,29 @@
 
 <AppShell>
   <div role="none" class="outer">
-    <LocaleLoadErrorToast />
-    <UpdateNotification />
-    <ForkPermissionDialog />
-    {#if backend.current}
-      <BackendStatusIndicator />
-    {/if}
-    {#if user.account && dataLoaded.current}
-      <OpenAuthoringIndicator />
-    {/if}
-    <div role="none" class="main">
-      {#if user.account && dataLoaded.current && transitioned}
-        <MainRouter />
-      {:else}
-        <EntrancePage />
+    <!-- The page has a boundary of its own, so a failing page leaves the infobars and dialogs
+    around it working; this one catches a failure in those -->
+    <ErrorBoundary scope="page">
+      <LocaleLoadErrorToast />
+      <UpdateNotification />
+      <ForkPermissionDialog />
+      <CommitMessageDialog />
+      {#if backend.current}
+        <BackendStatusIndicator />
       {/if}
-    </div>
+      {#if user.account && dataLoaded.current}
+        <OpenAuthoringIndicator />
+      {/if}
+      <div role="none" class="main">
+        <ErrorBoundary scope="page">
+          {#if user.account && dataLoaded.current && transitioned}
+            <MainRouter />
+          {:else}
+            <EntrancePage />
+          {/if}
+        </ErrorBoundary>
+      </div>
+    </ErrorBoundary>
   </div>
   <div role="status">{announcedPageStatus.current}</div>
 </AppShell>

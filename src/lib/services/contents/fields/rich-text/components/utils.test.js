@@ -1,6 +1,18 @@
+// @vitest-environment happy-dom
+/* eslint-disable jsdoc/require-jsdoc */
+
 import { describe, expect, it } from 'vitest';
 
-import { isMultiLinePattern, normalizeProps, replaceQuotes } from './utils.js';
+import {
+  escapeTitle,
+  getParentComponentNames,
+  getSelectorTagNames,
+  isMultiLinePattern,
+  isValidSelector,
+  normalizeProps,
+  supportsHTML,
+  unescapeTitle,
+} from './utils.js';
 
 describe('utils', () => {
   describe('isMultiLinePattern', () => {
@@ -69,6 +81,12 @@ describe('utils', () => {
   });
 
   describe('normalizeProps', () => {
+    it('should keep the keys with a dot as they are', () => {
+      expect(normalizeProps({ kv: { 'example.com': 'a' }, __sc_component_name: 'x' })).toEqual({
+        kv: { 'example.com': 'a' },
+      });
+    });
+
     it('should remove properties starting with __sc_', () => {
       const props = {
         title: 'Test Title',
@@ -163,54 +181,110 @@ describe('utils', () => {
     });
   });
 
-  describe('replaceQuotes', () => {
-    it('should replace double quotes with single quotes', () => {
-      const input = 'Hello "world" and "everyone"';
-      const result = replaceQuotes(input);
-
-      expect(result).toBe("Hello 'world' and 'everyone'");
+  describe('unescapeTitle', () => {
+    it('should unescape the ASCII punctuation characters', () => {
+      expect(unescapeTitle('T \\"q\\" \\\\ \\* \\(x\\)')).toBe('T "q" \\ * (x)');
     });
 
-    it('should handle strings without quotes', () => {
-      const input = 'Hello world';
-      const result = replaceQuotes(input);
-
-      expect(result).toBe('Hello world');
+    it('should keep a backslash before any other character', () => {
+      expect(unescapeTitle('C:\\Users\\me é\\é')).toBe('C:\\Users\\me é\\é');
     });
 
-    it('should handle strings with only single quotes', () => {
-      const input = "Hello 'world'";
-      const result = replaceQuotes(input);
+    it('should handle a title without escapes', () => {
+      expect(unescapeTitle('')).toBe('');
+      expect(unescapeTitle("It's a title")).toBe("It's a title");
+    });
+  });
 
-      expect(result).toBe("Hello 'world'");
+  describe('escapeTitle', () => {
+    it('should escape double quotes', () => {
+      expect(escapeTitle('Hello "world"')).toBe('Hello \\"world\\"');
     });
 
-    it('should handle empty strings', () => {
-      const input = '';
-      const result = replaceQuotes(input);
-
-      expect(result).toBe('');
+    it('should escape a backslash before a punctuation character or at the end', () => {
+      expect(escapeTitle('a\\" b\\* c\\')).toBe('a\\\\\\" b\\\\* c\\\\');
     });
 
-    it('should handle strings with mixed quotes', () => {
-      const input = 'Hello "world" and \'everyone\'';
-      const result = replaceQuotes(input);
-
-      expect(result).toBe("Hello 'world' and 'everyone'");
+    it('should keep a backslash before any other character as is', () => {
+      expect(escapeTitle('C:\\Users\\me')).toBe('C:\\Users\\me');
     });
 
-    it('should handle multiple consecutive double quotes', () => {
-      const input = 'Test ""double"" quotes';
-      const result = replaceQuotes(input);
-
-      expect(result).toBe("Test ''double'' quotes");
+    it('should handle a title without quotes or backslashes', () => {
+      expect(escapeTitle('')).toBe('');
+      expect(escapeTitle("It's a title")).toBe("It's a title");
     });
 
-    it('should handle strings that are just quotes', () => {
-      const input = '"""';
-      const result = replaceQuotes(input);
-
-      expect(result).toBe("'''");
+    it('should be the counterpart of unescapeTitle', () => {
+      ['T "q"', 'a\\"b', 'end\\', 'C:\\Users', '\\\\"', '"""'].forEach((title) => {
+        expect(unescapeTitle(escapeTitle(title))).toBe(title);
+      });
     });
+  });
+});
+
+describe('getSelectorTagNames', () => {
+  it('should get the element type of each selector in a list, without duplicates', () => {
+    expect(getSelectorTagNames('a:has(> img:only-child), IMG, img.wide')).toEqual(['a', 'img']);
+  });
+
+  it('should get the element type the last compound selector matches', () => {
+    expect(getSelectorTagNames('figure > img.wide')).toEqual(['img']);
+    expect(getSelectorTagNames('section aside ~ p')).toEqual(['p']);
+    expect(getSelectorTagNames(' aside.note ')).toEqual(['aside']);
+    expect(getSelectorTagNames('my-element[data-x]')).toEqual(['my-element']);
+  });
+
+  it('should ignore commas, spaces and combinators in brackets, parentheses and quotes', () => {
+    expect(getSelectorTagNames('div[title="a, b > c"]')).toEqual(['div']);
+    expect(getSelectorTagNames("[title='x ~ y'] > span")).toEqual(['span']);
+    expect(getSelectorTagNames('a:not(.x, .y) , b')).toEqual(['a', 'b']);
+  });
+
+  it('should return undefined if a selector doesn’t name its element type', () => {
+    expect(getSelectorTagNames('.note')).toBeUndefined();
+    expect(getSelectorTagNames('img, .note')).toBeUndefined();
+    expect(getSelectorTagNames(':is(aside, div)')).toBeUndefined();
+    expect(getSelectorTagNames('*')).toBeUndefined();
+  });
+});
+
+describe('isValidSelector', () => {
+  it('should tell a valid selector from an invalid one', () => {
+    expect(isValidSelector('a:has(> img), img')).toBe(true);
+    expect(isValidSelector('a:has(')).toBe(false);
+    expect(isValidSelector('')).toBe(false);
+  });
+});
+
+describe('supportsHTML', () => {
+  it('should require htmlSelector, fromBlockHTML and toBlockHTML', () => {
+    /** @type {import('$lib/types/public').EditorComponentDefinition} */
+    const def = { id: 'b', fields: [], pattern: /b/, toBlock: () => '' };
+    const htmlOptions = { htmlSelector: 'b', fromBlockHTML: () => ({}), toBlockHTML: () => '' };
+
+    expect(supportsHTML({ ...def, ...htmlOptions })).toBe(true);
+    expect(supportsHTML({ ...def, ...htmlOptions, htmlSelector: undefined })).toBe(false);
+    expect(supportsHTML({ ...def, ...htmlOptions, fromBlockHTML: undefined })).toBe(false);
+    expect(supportsHTML({ ...def, ...htmlOptions, toBlockHTML: undefined })).toBe(false);
+  });
+});
+
+describe('getParentComponentNames', () => {
+  it('should read the names from the closest component’s fields, but not its own', () => {
+    // A YouTube component in a Details component, in a Callout component in a dialog: the dialog is
+    // rendered elsewhere, so only the elements holding the fields tell where a component is
+    document.body.innerHTML =
+      '<div data-component-path=\'["x-callout"]\'>' +
+      '<div data-component-path=\'["x-callout","x-details"]\'>' +
+      '<p><span id="youtube" data-component-path=\'["x-callout","x-details","x-youtube"]\'>' +
+      '</span></p></div></div>' +
+      '<span id="top" data-component-path=\'["x-image"]\'></span>';
+
+    expect(getParentComponentNames(document.querySelector('#youtube') ?? undefined)).toEqual([
+      'x-callout',
+      'x-details',
+    ]);
+    expect(getParentComponentNames(document.querySelector('#top') ?? undefined)).toEqual([]);
+    expect(getParentComponentNames(undefined)).toEqual([]);
   });
 });

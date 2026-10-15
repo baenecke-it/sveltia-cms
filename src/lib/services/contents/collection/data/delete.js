@@ -1,7 +1,4 @@
-import { unique } from '@sveltia/utils/array';
-
-import { allAssets } from '$lib/services/assets';
-import { backend } from '$lib/services/backends';
+import { allAssets } from '$lib/services/assets/state';
 import { saveChanges } from '$lib/services/backends/save';
 import { allEntries } from '$lib/services/contents';
 import { selectedCollection } from '$lib/services/contents/collection';
@@ -10,12 +7,13 @@ import {
   UPDATE_TOAST_DEFAULT_STATE,
 } from '$lib/services/contents/collection/data';
 import { buildRenumberChanges } from '$lib/services/contents/collection/entries/reorder';
-import { getPreviousSha } from '$lib/services/contents/draft/save/changes';
+import { getArrayItemTarget } from '$lib/services/contents/draft/save/changes';
+import { getPreviousSha, resolveCacheDB } from '$lib/services/contents/draft/save/file-changes';
+import { getEntryPaths } from '$lib/services/contents/entry/paths';
 import {
   buildCascadeDeleteChanges,
-  planCascadeDelete,
+  planCascadeDeleteOrThrow,
 } from '$lib/services/contents/entry/relations/cascade/delete';
-import { getRepositoryDatabase } from '$lib/services/utils/database';
 
 /**
  * @import { Asset, Entry, FileChange, InternalEntryCollection } from '$lib/types/private';
@@ -59,28 +57,29 @@ export const deleteEntries = async (entries, assets = []) => {
     selectedCollection.current
   );
 
-  const { targets, blockers } = collection
-    ? planCascadeDelete({ collection, entries })
-    : { targets: [], blockers: [] };
+  const targets = collection
+    ? planCascadeDeleteOrThrow(
+        { collection, entries },
+        'Cannot delete entries that other entries require',
+      )
+    : [];
 
-  if (blockers.length) {
-    throw new Error('Cannot delete entries that other entries require', { cause: blockers });
-  }
-
-  const cacheDB = getRepositoryDatabase(backend.current?.repository, 'file-cache');
+  const cacheDB = resolveCacheDB();
   const changes = /** @type {FileChange[]} */ ([]);
   const action = 'delete';
 
   const ids = await Promise.all(
-    entries.map(async ({ id, locales, slug }) => {
-      // Remove duplicate paths for single file i18n
-      const paths = /** @type {string[]} */ (unique(Object.values(locales).map((l) => l.path)));
+    entries.map(async (entry) => {
+      const { id, slug } = entry;
+      // A single-file i18n entry lists its file once
+      const paths = getEntryPaths(entry);
 
       await Promise.all(
         paths.map(async (path) => {
           const previousSha = await getPreviousSha({ cacheDB, previousPath: path });
 
-          changes.push({ action, slug, path, previousSha });
+          // An entry stored in a file with the other entries is removed from the array instead
+          changes.push({ action, slug, path, previousSha, ...getArrayItemTarget(entry) });
         }),
       );
 

@@ -1,12 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-/**
- * @import { ConfigParserCollectors } from '$lib/types/private';
- */
+import { createCollectors } from '$lib/test/config-parser';
+
+import { parseCmsConfig } from '.';
 
 // Mock @sveltia/i18n
-/** @type {Record<string, string>} */
-const mockI18nStrings = {
+const mockI18nStrings = vi.hoisted(() => ({
   'config.error.missing_backend': 'Missing backend configuration',
   'config.error.missing_backend_name': 'Backend name is required',
   'config.error.unsupported_backend': 'Unsupported backend: {name}',
@@ -20,37 +19,18 @@ const mockI18nStrings = {
   'config.error.invalid_sanitize_replacement': 'Unsafe replacement: {replacement}',
   'config.error.invalid_url_option': 'Invalid URL in {option}: {url}',
   'config.error.i18n_invalid_default_locale': 'Unknown default locale: {locale}',
-  'config.warning.editorial_workflow_unsupported': 'Editorial workflow is not supported',
   'config.error_locator.collection': 'Collection: {collection}',
   'config.error_locator.file': 'File: {file}',
   'config.error_locator.field': 'Field: {field}',
-};
-
-/**
- * Mock translation function.
- * @param {string} key Message key.
- * @param {object & { values?: Record<string, string> }} [options] Options.
- * @returns {string} Translated string.
- */
-function mockTranslate(key, options) {
-  let message = mockI18nStrings[key] || key;
-
-  if (options?.values) {
-    Object.entries(options.values).forEach(([k, v]) => {
-      message = message.replace(`{${k}}`, v);
-    });
-  }
-
-  return message;
-}
-
-vi.mock('@sveltia/i18n', () => ({
-  _: mockTranslate,
-  locale: { current: 'en-US', set: vi.fn() },
+  'config.error_locator.component': 'Component: {component}',
+  'config.error.invalid_inline_component_fields': 'Invalid inline fields',
 }));
 
-const mockGetStore = vi.fn();
-const mockIsObject = vi.fn();
+vi.mock('@sveltia/i18n', async () =>
+  (await import('$lib/test/i18n')).createI18nMock({ strings: mockI18nStrings, locale: 'en-US' }),
+);
+
+const mockIsObject = vi.hoisted(() => vi.fn());
 
 vi.mock('@sveltia/utils/object', () => ({
   isObject: mockIsObject,
@@ -68,11 +48,6 @@ vi.mock('$lib/services/contents/i18n', () => ({
 }));
 
 vi.mock('$lib/services/backends', () => ({
-  gitBackendServices: {
-    github: { name: 'github' },
-    gitlab: { name: 'gitlab' },
-    gitea: { name: 'gitea' },
-  },
   validBackendNames: ['github', 'gitlab', 'gitea', 'local'],
   unsupportedBackends: {
     azure: { label: 'Azure DevOps' },
@@ -81,17 +56,27 @@ vi.mock('$lib/services/backends', () => ({
   },
 }));
 
-vi.mock('$lib/services/config/deprecations', () => ({
-  warnDeprecation: vi.fn(),
+vi.mock('$lib/services/backends/git/services', () => ({
+  gitBackendServices: {
+    github: { name: 'github' },
+    gitlab: { name: 'gitlab' },
+    gitea: { name: 'gitea' },
+  },
 }));
 
-const mockParseFields = vi.fn();
+const mockWarnDeprecation = vi.hoisted(() => vi.fn());
+
+vi.mock('$lib/services/config/deprecations', () => ({
+  warnDeprecation: mockWarnDeprecation,
+}));
+
+const mockParseFields = vi.hoisted(() => vi.fn());
 
 vi.mock('$lib/services/config/parser/fields', () => ({
   parseFields: mockParseFields,
 }));
 
-const mockCustomComponentRegistry = new Map();
+const mockCustomComponentRegistry = vi.hoisted(() => new Map());
 
 vi.mock('$lib/services/api/registries', () => ({
   customComponentRegistry: mockCustomComponentRegistry,
@@ -101,26 +86,11 @@ vi.mock('$lib/services/integrations/media-libraries/cloud', () => ({
   CLOUD_MEDIA_LIBRARY_NAMES: [],
 }));
 
-/**
- * Create a fresh collectors object for testing.
- * @returns {ConfigParserCollectors} Collectors instance.
- */
-function createCollectors() {
-  return {
-    errors: new Set(),
-    warnings: new Set(),
-    mediaFields: new Set(),
-    relationFields: new Set(),
-  };
-}
-
 describe('Config Parser', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockCustomComponentRegistry.clear();
     mockParseFields.mockReset();
-
-    mockGetStore.mockImplementation((store) => store);
 
     mockIsObject.mockImplementation(
       /**
@@ -133,8 +103,7 @@ describe('Config Parser', () => {
   });
 
   describe('parseCmsConfig', () => {
-    it('should parse a minimal valid config', async () => {
-      const { parseCmsConfig } = await import('.');
+    it('should parse a minimal valid config', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -156,8 +125,7 @@ describe('Config Parser', () => {
       expect(collectors.errors.size).toBe(0);
     });
 
-    it('should collect errors for an unsafe slug replacement', async () => {
-      const { parseCmsConfig } = await import('.');
+    it('should collect errors for an unsafe slug replacement', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -180,8 +148,7 @@ describe('Config Parser', () => {
       expect([...collectors.errors]).toEqual(['Unsafe replacement: /']);
     });
 
-    it('should collect errors for a site URL that is not a URL', async () => {
-      const { parseCmsConfig } = await import('.');
+    it('should collect errors for a site URL that is not a URL', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -204,10 +171,38 @@ describe('Config Parser', () => {
 
       // A relative `display_url` opens fine in a new tab, so only `site_url` is checked
       expect([...collectors.errors]).toEqual(['Invalid URL in site_url: example.com']);
+
+      // A host with a port parses as a URL with the host as its scheme, which isn’t one either
+      const moreCollectors = createCollectors();
+
+      parseCmsConfig({ ...config, site_url: 'localhost:4321' }, moreCollectors);
+
+      expect([...moreCollectors.errors]).toEqual(['Invalid URL in site_url: localhost:4321']);
     });
 
-    it('should accept site URLs that are URLs, or empty', async () => {
-      const { parseCmsConfig } = await import('.');
+    it('should warn about the deprecated `logo_url` option', () => {
+      /** @type {any} */
+      const config = {
+        backend: { name: 'github', repo: 'owner/repo' },
+        media_folder: '/media',
+        collections: [
+          {
+            name: 'posts',
+            label: 'Posts',
+            folder: 'content/posts',
+            fields: [{ name: 'title', widget: 'string' }],
+          },
+        ],
+      };
+
+      parseCmsConfig(config, createCollectors());
+      expect(mockWarnDeprecation).not.toHaveBeenCalledWith('logo_url');
+
+      parseCmsConfig({ ...config, logo_url: '/logo.svg' }, createCollectors());
+      expect(mockWarnDeprecation).toHaveBeenCalledWith('logo_url');
+    });
+
+    it('should accept site URLs that are URLs, or empty', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -231,8 +226,7 @@ describe('Config Parser', () => {
       expect(collectors.errors.size).toBe(0);
     });
 
-    it('should collect errors for a default locale that is not listed', async () => {
-      const { parseCmsConfig } = await import('.');
+    it('should collect errors for a default locale that is not listed', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -245,7 +239,8 @@ describe('Config Parser', () => {
             name: 'posts',
             label: 'Posts',
             folder: 'content/posts',
-            fields: [{ name: 'title', widget: 'string' }],
+            i18n: true,
+            fields: [{ name: 'title', widget: 'string', i18n: true }],
           },
         ],
       };
@@ -255,8 +250,7 @@ describe('Config Parser', () => {
       expect([...collectors.errors]).toEqual(['Unknown default locale: de']);
     });
 
-    it('should parse fields for registered custom editor components', async () => {
-      const { parseCmsConfig } = await import('.');
+    it('should parse fields for registered custom editor components', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -286,8 +280,36 @@ describe('Config Parser', () => {
       );
     });
 
-    it('should collect errors for missing backend', async () => {
-      const { parseCmsConfig } = await import('.');
+    it('should check the options of custom editor components', () => {
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        backend: { name: 'github', repo: 'user/repo' },
+        media_folder: '/media',
+        collections: [
+          {
+            name: 'posts',
+            label: 'Posts',
+            folder: 'content/posts',
+            fields: [{ name: 'title', widget: 'string' }],
+          },
+        ],
+      };
+
+      mockCustomComponentRegistry.set('inline-component', {
+        mode: 'inline',
+        fields: [{ name: 'body', widget: 'text' }],
+      });
+
+      parseCmsConfig(config, collectors);
+
+      expect([...collectors.errors]).toEqual([
+        'Component: inline-component: Invalid inline fields',
+      ]);
+    });
+
+    it('should collect errors for missing backend', () => {
       const collectors = createCollectors();
 
       /** @type {any} */
@@ -307,86 +329,7 @@ describe('Config Parser', () => {
       expect(collectors.errors.size).toBeGreaterThan(0);
     });
 
-    it('should collect warnings for editorial_workflow on unsupported backends', async () => {
-      const { parseCmsConfig } = await import('.');
-      const collectors = createCollectors();
-
-      /** @type {any} */
-      const config = {
-        backend: { name: 'gitea', repo: 'owner/repo' },
-        media_folder: '/media',
-        publish_mode: 'editorial_workflow',
-        collections: [
-          {
-            name: 'posts',
-            label: 'Posts',
-            folder: 'content/posts',
-            fields: [{ name: 'title', widget: 'string' }],
-          },
-        ],
-      };
-
-      parseCmsConfig(config, collectors);
-
-      const warningArray = Array.from(collectors.warnings);
-
-      expect(warningArray.some((w) => w.includes('Editorial workflow'))).toBe(true);
-    });
-
-    it('should collect warnings for collection-level editorial_workflow on unsupported backends', async () => {
-      const { parseCmsConfig } = await import('.');
-      const collectors = createCollectors();
-
-      /** @type {any} */
-      const config = {
-        backend: { name: 'gitea', repo: 'owner/repo' },
-        media_folder: '/media',
-        collections: [
-          {
-            name: 'posts',
-            label: 'Posts',
-            folder: 'content/posts',
-            publish_mode: 'editorial_workflow',
-            fields: [{ name: 'title', widget: 'string' }],
-          },
-        ],
-      };
-
-      parseCmsConfig(config, collectors);
-
-      const warningArray = Array.from(collectors.warnings);
-
-      expect(warningArray.some((w) => w.includes('Editorial workflow'))).toBe(true);
-    });
-
-    it('should not warn about editorial_workflow when no collection uses it', async () => {
-      const { parseCmsConfig } = await import('.');
-      const collectors = createCollectors();
-
-      /** @type {any} */
-      const config = {
-        backend: { name: 'gitea', repo: 'owner/repo' },
-        media_folder: '/media',
-        collections: [
-          {
-            name: 'posts',
-            label: 'Posts',
-            folder: 'content/posts',
-            publish_mode: 'simple',
-            fields: [{ name: 'title', widget: 'string' }],
-          },
-        ],
-      };
-
-      parseCmsConfig(config, collectors);
-
-      const warningArray = Array.from(collectors.warnings);
-
-      expect(warningArray.some((w) => w.includes('Editorial workflow'))).toBe(false);
-    });
-
-    it('should collect errors for no collections', async () => {
-      const { parseCmsConfig } = await import('.');
+    it('should collect errors for no collections', () => {
       const collectors = createCollectors();
 
       /** @type {any} */

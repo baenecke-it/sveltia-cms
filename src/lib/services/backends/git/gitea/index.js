@@ -13,14 +13,16 @@ import {
   DEFAULT_AUTH_PATH,
   DEFAULT_AUTH_ROOT,
 } from '$lib/services/backends/git/gitea/constants';
-import { fetchBlob, fetchFiles } from '$lib/services/backends/git/gitea/files';
+import { fetchBranchHeadSHA, fetchDeployments } from '$lib/services/backends/git/gitea/deployment';
+import { fetchBlob, fetchDirSHA, fetchFiles } from '$lib/services/backends/git/gitea/files';
 import { getBaseURLs, repository } from '$lib/services/backends/git/gitea/repository';
-import { apiConfig } from '$lib/services/backends/git/shared/api';
-import { initRepositoryInfo } from '$lib/services/backends/git/shared/repository';
+import workflow from '$lib/services/backends/git/gitea/workflow';
+import { initGitBackend } from '$lib/services/backends/git/shared/init';
 import { cmsConfig } from '$lib/services/config';
+import { isWorkflowConfigured } from '$lib/services/workflow/config';
 
 /**
- * @import { ApiEndpointConfig, BackendService, RepositoryInfo } from '$lib/types/private';
+ * @import { BackendService, RepositoryInfo } from '$lib/types/private';
  */
 
 /**
@@ -47,9 +49,8 @@ export const init = () => {
   } = backend;
 
   const [owner, repo] = /** @type {string} */ (projectPath).split('/');
-  const authURL = `${stripSlashes(authRoot)}/${stripSlashes(authPath)}`;
 
-  initRepositoryInfo(repository, {
+  initGitBackend(repository, {
     service: BACKEND_NAME,
     label: BACKEND_LABEL,
     owner,
@@ -59,19 +60,25 @@ export const init = () => {
     defaultApiRoot: DEFAULT_API_ROOT,
     getTokenPageURL,
     getBaseURLs,
-  });
-
-  Object.assign(
-    apiConfig,
-    /** @type {ApiEndpointConfig} */ ({
+    authRoot,
+    authPath,
+    tokenPath: '/access_token',
+    api: {
       clientId,
-      authScope: 'read:repository,write:repository,read:user',
-      authURL,
-      tokenURL: authURL.replace('/authorize', '/access_token'),
+      // Editorial Workflow stores the status of an unpublished entry as a label on the pull
+      // request, and labels live under the issue scope. It’s only requested when the feature is
+      // enabled — which a single collection can do on its own — so a regular setup doesn’t have to
+      // ask for more than it uses
+      authScope: [
+        'read:repository',
+        'write:repository',
+        ...(isWorkflowConfigured(cmsConfig.current) ? ['read:issue', 'write:issue'] : []),
+        'read:user',
+      ].join(','),
       restBaseURL: stripSlashes(restApiRoot),
       includeCredentials,
-    }),
-  );
+    },
+  });
 
   return repository;
 };
@@ -90,6 +97,10 @@ export default {
   fetchFiles,
   fetchLastCommit,
   fetchBlob,
+  fetchDirSHA,
   commitChanges,
   fetchFileCommits,
+  fetchBranchHeadSHA,
+  fetchDeployments,
+  workflow,
 };

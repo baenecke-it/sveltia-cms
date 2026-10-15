@@ -7,6 +7,7 @@
   import { goto } from '$lib/services/app/navigation';
   import { selectedCollection } from '$lib/services/contents/collection';
   import { isDescendantPath, nestedFilterPath } from '$lib/services/contents/collection/nested';
+  import { encodePathSegments } from '$lib/services/utils/url';
 
   /**
    * @import { NestedTreeNode } from '$lib/services/contents/collection/nested/tree';
@@ -58,7 +59,9 @@
   bind:expanded
   items={children.length ? childItems : undefined}
   onSelect={() => {
-    goto(`/collections/${collectionName}/filter/${path}`, { transitionType: 'forwards' });
+    goto(encodePathSegments(`/collections/${collectionName}/filter/${path}`), {
+      transitionType: 'forwards',
+    });
   }}
 >
   {#snippet startIcon()}

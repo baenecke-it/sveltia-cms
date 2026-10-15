@@ -1,11 +1,15 @@
 import { sleep } from '@sveltia/utils/misc';
+import { TerraDraw } from 'terra-draw';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { page } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
-import { searchLocations } from '$lib/services/contents/fields/map/geocoding';
-
 import MapEditor from './map-editor.svelte';
+
+// Create the mock up front rather than importing the mocked module, so the test always holds the
+// mock function. Browser mode occasionally leaves a module mock unapplied on a loaded CI runner,
+// which handed the test the real function, failing every test before the map was even rendered
+const { searchLocations } = vi.hoisted(() => ({ searchLocations: vi.fn() }));
 
 vi.mock('$lib/services/app/dependencies', () => ({
   getUnpkgURL: vi.fn((name) => `https://unpkg.com/${name}`),
@@ -26,14 +30,15 @@ vi.mock('$lib/services/app/dependencies', () => ({
   getChunkURLs: vi.fn(() => []),
   loadChunk: vi.fn(),
 }));
-vi.mock('$lib/services/contents/fields/map/geocoding', () => ({ searchLocations: vi.fn() }));
+vi.mock('$lib/services/contents/fields/map/geocoding', () => ({ searchLocations }));
 
 /**
  * Render the editor.
  * @param {Record<string, any>} [config] Field options.
  * @param {string} [currentValue] Field value.
  * @param {Record<string, any>} [props] Props to override.
- * @returns {Promise<{ props: any, container: HTMLElement }>} Props and container.
+ * @returns {Promise<{ props: any, container: HTMLElement, unmount: () => void }>} Props,
+ * container and a function to unmount the editor.
  */
 const renderEditor = async (config = {}, currentValue = '', props = {}) => {
   const _props = $state({
@@ -42,9 +47,9 @@ const renderEditor = async (config = {}, currentValue = '', props = {}) => {
     ...props,
   });
 
-  const { container } = await render(MapEditor, /** @type {any} */ (_props));
+  const { container, unmount } = await render(MapEditor, /** @type {any} */ (_props));
 
-  return { props: _props, container };
+  return { props: _props, container, unmount };
 };
 
 /**
@@ -82,6 +87,8 @@ describe('MapEditor', () => {
     await clear.click();
     expect(props.currentValue).toBe('');
     await expect.element(clear).toBeDisabled();
+    // The disabled button can’t keep the focus, so the search box takes it
+    await expect.element(page.getByRole('searchbox', { name: 'Find a Place' })).toHaveFocus();
   });
 
   test('places a point at a searched location', async () => {
@@ -104,7 +111,6 @@ describe('MapEditor', () => {
     await expect.element(listbox.getByRole('option', { name: 'Tokyo, Japan' })).toBeInTheDocument();
     expect(searchLocations).toHaveBeenCalledWith('Tokyo');
 
-    await sleep(150);
     await listbox.getByRole('option', { name: 'Tokyo, Japan' }).click();
 
     await expect
@@ -118,6 +124,89 @@ describe('MapEditor', () => {
     await waitForMap(container);
     await page.getByRole('searchbox').fill('Nowhere');
     await expect.element(page.getByRole('alert')).toHaveTextContent('No results found.');
+  });
+
+  test('shows the results for the latest query only, even if an earlier one finishes last', async () => {
+    /** @type {Record<string, (results: any[]) => void>} */
+    const resolvers = {};
+
+    vi.mocked(searchLocations).mockImplementation(
+      (query) =>
+        new Promise((resolve) => {
+          resolvers[query] = resolve;
+        }),
+    );
+
+    const { container } = await renderEditor();
+    const searchBox = page.getByRole('searchbox');
+    const listbox = page.getByRole('listbox', { name: 'Search Results' });
+
+    await waitForMap(container);
+    await searchBox.fill('Par');
+    await expect.poll(() => resolvers.Par).toBeDefined();
+    await searchBox.fill('Paris');
+    await expect.poll(() => resolvers.Paris).toBeDefined();
+
+    // The earlier query finishes first: the latest one is still being searched
+    resolvers.Par([{ place_id: 1, display_name: 'Parma, Italy', lat: '44.8', lon: '10.3' }]);
+    await sleep(100);
+    await expect.element(page.getByRole('alert')).toHaveTextContent('Searching…');
+    await expect.element(listbox).not.toBeInTheDocument();
+
+    resolvers.Paris([{ place_id: 2, display_name: 'Paris, France', lat: '48.9', lon: '2.4' }]);
+    await expect
+      .element(listbox.getByRole('option', { name: 'Paris, France' }))
+      .toBeInTheDocument();
+    await expect.element(page.getByRole('alert')).not.toBeInTheDocument();
+  });
+
+  test('ignores the results of an earlier query that finishes last', async () => {
+    /** @type {Record<string, (results: any[]) => void>} */
+    const resolvers = {};
+
+    vi.mocked(searchLocations).mockImplementation(
+      (query) =>
+        new Promise((resolve) => {
+          resolvers[query] = resolve;
+        }),
+    );
+
+    const { container } = await renderEditor();
+    const searchBox = page.getByRole('searchbox');
+    const listbox = page.getByRole('listbox', { name: 'Search Results' });
+
+    await waitForMap(container);
+    await searchBox.fill('Par');
+    await expect.poll(() => resolvers.Par).toBeDefined();
+    await searchBox.fill('Paris');
+    await expect.poll(() => resolvers.Paris).toBeDefined();
+
+    resolvers.Paris([{ place_id: 2, display_name: 'Paris, France', lat: '48.9', lon: '2.4' }]);
+    await expect
+      .element(listbox.getByRole('option', { name: 'Paris, France' }))
+      .toBeInTheDocument();
+
+    resolvers.Par([{ place_id: 1, display_name: 'Parma, Italy', lat: '44.8', lon: '10.3' }]);
+    await sleep(100);
+    await expect
+      .element(listbox.getByRole('option', { name: 'Paris, France' }))
+      .toBeInTheDocument();
+    await expect
+      .element(listbox.getByRole('option', { name: 'Parma, Italy' }))
+      .not.toBeInTheDocument();
+  });
+
+  test('stops searching once the query is cleared', async () => {
+    vi.mocked(searchLocations).mockImplementation(() => new Promise(() => {}));
+
+    const { container } = await renderEditor();
+    const searchBox = page.getByRole('searchbox');
+
+    await waitForMap(container);
+    await searchBox.fill('Par');
+    await expect.element(page.getByRole('alert')).toHaveTextContent('Searching…');
+    await searchBox.fill('');
+    await expect.element(page.getByRole('alert')).not.toBeInTheDocument();
   });
 
   test('uses the current location', async () => {
@@ -213,6 +302,39 @@ describe('MapEditor', () => {
     expect(container.querySelectorAll('.leaflet-30-pane path')).toHaveLength(1);
   });
 
+  test('saves a line drawn on the map once it’s finished', async () => {
+    const { props, container } = await renderEditor({ type: 'LineString' }, '');
+
+    const map = page.elementLocator(
+      /** @type {HTMLElement} */ (
+        await vi.waitUntil(() => container.querySelector('.leaflet-container'))
+      ),
+    );
+
+    // The drawing tools are ready once the map shows the crosshair cursor
+    await expect.element(map).toHaveStyle({ cursor: 'crosshair' });
+
+    // The points placed while drawing don’t make a value yet
+    await map.click({ position: { x: 100, y: 100 } });
+    await map.click({ position: { x: 200, y: 150 } });
+    await sleep(100);
+    expect(props.currentValue).toBe('');
+
+    // Clicking the last point again finishes the line
+    await map.click({ position: { x: 200, y: 150 } });
+    await expect.poll(() => JSON.parse(props.currentValue || '{}').type).toBe('LineString');
+    expect(JSON.parse(/** @type {string} */ (props.currentValue)).coordinates).toHaveLength(2);
+  });
+
+  test('doesn’t round or reformat a stored point', async () => {
+    const value = '{"type": "Point", "coordinates": [139.69171, 35.68951]}';
+    const { props, container } = await renderEditor({ decimals: 2 }, value);
+
+    await waitForMap(container);
+    await expect.poll(() => container.querySelectorAll('.leaflet-30-pane path').length).toBe(1);
+    expect(props.currentValue).toBe(value);
+  });
+
   test('fits the map to a line, which a searched location can’t replace', async () => {
     vi.mocked(searchLocations).mockResolvedValue([
       /** @type {any} */ ({ place_id: 1, display_name: 'Tokyo, Japan', lat: '35.7', lon: '139.7' }),
@@ -237,7 +359,6 @@ describe('MapEditor', () => {
     const listbox = page.getByRole('listbox', { name: 'Search Results' });
 
     await expect.element(listbox.getByRole('option', { name: 'Tokyo, Japan' })).toBeInTheDocument();
-    await sleep(150);
     await listbox.getByRole('option', { name: 'Tokyo, Japan' }).click();
     await sleep(100);
     expect(props.currentValue).toBe(value);
@@ -285,6 +406,53 @@ describe('MapEditor', () => {
     await expect
       .poll(() => container.querySelector('.leaflet-tile')?.getAttribute('src'))
       .toMatch(/\/2\/\d+\/\d+\.png$/);
+  });
+
+  test('stops the drawing tools when destroyed', async () => {
+    const stop = vi.spyOn(TerraDraw.prototype, 'stop');
+    const { container, unmount } = await renderEditor();
+
+    await waitForMap(container);
+    unmount();
+
+    expect(stop).toHaveBeenCalledOnce();
+    stop.mockRestore();
+  });
+
+  test('doesn’t start the drawing tools once destroyed while they are loading', async () => {
+    const { loadModule } = await import('$lib/services/app/dependencies');
+    const start = vi.spyOn(TerraDraw.prototype, 'start');
+    /**
+     * Resolve the pending import of Terra Draw.
+     * @type {(value: any) => void}
+     */
+    let resolve = () => {};
+
+    const loadAll = /** @type {(...args: any[]) => any} */ (
+      vi.mocked(loadModule).getMockImplementation()
+    );
+
+    vi.mocked(loadModule).mockImplementation((library, ...args) =>
+      library === 'terra-draw'
+        ? new Promise((r) => {
+            resolve = r;
+          })
+        : loadAll(library, ...args),
+    );
+
+    try {
+      const { container, unmount } = await renderEditor();
+
+      await expect.poll(() => container.querySelector('.leaflet-container')).not.toBeNull();
+      unmount();
+      resolve(await import('terra-draw'));
+      await sleep(100);
+
+      expect(start).not.toHaveBeenCalled();
+    } finally {
+      start.mockRestore();
+      vi.mocked(loadModule).mockImplementation(loadAll);
+    }
   });
 
   test('is read-only', async () => {

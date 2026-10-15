@@ -1,6 +1,7 @@
-import { focusedAsset } from '$lib/services/assets';
 import { assetUpdatesToast } from '$lib/services/assets/data';
 import { planAssetDeletion } from '$lib/services/assets/data/cascade';
+import { assertOutsideCmsFolders } from '$lib/services/assets/reserved';
+import { focusedAsset } from '$lib/services/assets/state';
 import { saveChanges } from '$lib/services/backends/save';
 import { UPDATE_TOAST_DEFAULT_STATE } from '$lib/services/contents/collection/data';
 import { buildTargetChanges } from '$lib/services/contents/entry/cascade';
@@ -44,6 +45,8 @@ export const updateStores = ({ assets, notify = true }) => {
  * only a safeguard.
  */
 export const deleteAssets = async (assets, { extraChanges = [], notify = true } = {}) => {
+  assertOutsideCmsFolders([...assets, ...extraChanges].map(({ path }) => path));
+
   const { targets, blockers } = await planAssetDeletion(assets);
 
   if (blockers.length) {

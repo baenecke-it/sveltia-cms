@@ -8,6 +8,7 @@
   import { getAssetDetails } from '$lib/services/assets/details';
   import { getAssetBlob } from '$lib/services/assets/info';
   import { canCopyFileData, copyFileData } from '$lib/services/utils/clipboard';
+  import { watchAsync } from '$lib/services/utils/state.svelte';
 
   /**
    * @import { Asset, AssetDetails } from '$lib/types/private';
@@ -37,24 +38,6 @@
 
   /** @type {Blob | undefined} */
   let assetBlob = undefined;
-
-  /**
-   * Check if the file data can be copied to clipboard. Since OSes usually support only one item,
-   * enable the menu only when one file is selected.
-   * @returns {Promise<boolean>} Result.
-   */
-  const checkCanCopyFileData = async () => {
-    assetBlob = undefined;
-
-    if (assets.length !== 1) {
-      return false;
-    }
-
-    assetBlob = await getAssetBlob(assets[0]);
-
-    return canCopyFileData(assetBlob.type);
-  };
-
   const items = $derived([
     {
       label: _('public_urls', { values: { count: assets.length } }),
@@ -90,12 +73,37 @@
     },
   ]);
 
-  $effect(() => {
-    (async () => {
-      assetsDetailList = await Promise.all(assets.map(getAssetDetails));
-      canCopyData = await checkCanCopyFileData();
-    })();
-  });
+  // The menu stays mounted while the focus moves from one asset to another, so a slow lookup for an
+  // asset focused earlier must not overwrite the details of the one focused now, which `watchAsync`
+  // takes care of
+  watchAsync(
+    () => {
+      const _assets = assets;
+
+      // Don’t copy the URLs or data of the assets selected before while the new ones are being
+      // looked up
+      assetsDetailList = [];
+      assetBlob = undefined;
+      canCopyData = false;
+
+      return Promise.all([
+        Promise.all(_assets.map(getAssetDetails)),
+        // Since OSes usually support only one item, the data can be copied only when one file is
+        // selected. The data may not be available, e.g. for a file that can’t be downloaded
+        _assets.length === 1 ? getAssetBlob(_assets[0]).catch(() => undefined) : undefined,
+      ]);
+    },
+    ([detailList, blob]) => {
+      assetsDetailList = detailList;
+      assetBlob = blob;
+      canCopyData = !!blob && canCopyFileData(blob.type);
+    },
+    (ex) => {
+      // The details couldn’t be retrieved, so the public URLs are unknown
+      // eslint-disable-next-line no-console
+      console.error(ex);
+    },
+  );
 </script>
 
 <CopyMenu {items} count={assets.length} {useButton} />

@@ -2,8 +2,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { getEntriesByCollection } from '$lib/services/contents/collection/entries';
 import { getOrderFieldKey } from '$lib/services/contents/collection/entries/reorder/config';
+import { getUnpublishedEntriesByCollection } from '$lib/services/workflow';
 
-import { assignManualSortOrder } from './sort-order';
+import { assignManualSortOrder, getMaxEntryNumber } from './sort-order';
 
 vi.mock('$lib/services/contents/collection/entries', () => ({
   getEntriesByCollection: vi.fn(() => []),
@@ -11,6 +12,10 @@ vi.mock('$lib/services/contents/collection/entries', () => ({
 
 vi.mock('$lib/services/contents/collection/entries/reorder/config', () => ({
   getOrderFieldKey: vi.fn(() => undefined),
+}));
+
+vi.mock('$lib/services/workflow', () => ({
+  getUnpublishedEntriesByCollection: vi.fn(() => []),
 }));
 
 /**
@@ -27,6 +32,7 @@ describe('assignManualSortOrder', () => {
   beforeEach(() => {
     vi.mocked(getOrderFieldKey).mockReturnValue('order');
     vi.mocked(getEntriesByCollection).mockReturnValue([]);
+    vi.mocked(getUnpublishedEntriesByCollection).mockReturnValue([]);
   });
 
   it('leaves the values alone when the collection has no order field', () => {
@@ -70,5 +76,57 @@ describe('assignManualSortOrder', () => {
 
     assignManualSortOrder(draft, 2);
     expect(draft.currentValues.en.order).toBe(8);
+  });
+
+  it('counts the orders of the entries still in a pull request', () => {
+    vi.mocked(getEntriesByCollection).mockReturnValue(
+      /** @type {any} */ ([{ locales: { en: { content: { order: 2 } } } }]),
+    );
+    // A new entry saved with Editorial Workflow has taken the next order in its pull request
+    vi.mocked(getUnpublishedEntriesByCollection).mockReturnValue(
+      /** @type {any} */ ([{ locales: { en: { content: { order: 3 } } } }]),
+    );
+
+    const draft = createDraft({ en: {} });
+
+    assignManualSortOrder(draft);
+    expect(draft.currentValues.en.order).toBe(4);
+    expect(getUnpublishedEntriesByCollection).toHaveBeenCalledWith('tags');
+  });
+});
+
+describe('getMaxEntryNumber', () => {
+  beforeEach(() => {
+    vi.mocked(getEntriesByCollection).mockReturnValue([]);
+    vi.mocked(getUnpublishedEntriesByCollection).mockReturnValue([]);
+  });
+
+  it('returns 0 when no entry has a positive number', () => {
+    vi.mocked(getEntriesByCollection).mockReturnValue(
+      /** @type {any} */ ([{ locales: { en: { content: { id: -3 } } } }]),
+    );
+
+    expect(getMaxEntryNumber({ collectionName: 'tags', keyPath: 'id', locale: 'en' })).toBe(0);
+  });
+
+  it('returns the highest number in the given locale, including the unpublished entries', () => {
+    vi.mocked(getEntriesByCollection).mockReturnValue(
+      /** @type {any} */ ([
+        { locales: { en: { content: { id: '4' } }, fr: { content: { id: 99 } } } },
+        { locales: { en: { content: { id: 'abc' } } } },
+        { locales: { en: { content: { 'meta.id': 50 } } } },
+      ]),
+    );
+    vi.mocked(getUnpublishedEntriesByCollection).mockReturnValue(
+      /** @type {any} */ ([{ locales: { en: { content: { id: 6 } } } }]),
+    );
+
+    expect(getMaxEntryNumber({ collectionName: 'tags', keyPath: 'id', locale: 'en' })).toBe(6);
+    expect(getMaxEntryNumber({ collectionName: 'tags', keyPath: 'id', locale: 'fr' })).toBe(99);
+    expect(getMaxEntryNumber({ collectionName: 'tags', keyPath: 'meta.id', locale: 'en' })).toBe(
+      50,
+    );
+    expect(getEntriesByCollection).toHaveBeenCalledWith('tags');
+    expect(getUnpublishedEntriesByCollection).toHaveBeenCalledWith('tags');
   });
 });

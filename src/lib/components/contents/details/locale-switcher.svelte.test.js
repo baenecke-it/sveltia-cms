@@ -2,6 +2,7 @@ import { sleep } from '@sveltia/utils/misc';
 import { beforeEach, describe, expect, test } from 'vitest';
 import { page } from 'vitest/browser';
 
+import { trackPendingFieldUpdate } from '$lib/services/contents/editor/pending';
 import { entryEditorSettings } from '$lib/services/contents/editor/settings';
 import { env } from '$lib/services/user/env.svelte';
 import { createRawState } from '$lib/services/utils/state.svelte';
@@ -64,11 +65,31 @@ describe('LocaleSwitcher', () => {
     ).toEqual(['English', 'French', 'German']);
     await expect.element(group.getByRole('radio', { name: 'English' })).toBeChecked();
 
-    await sleep(150);
     await group.getByRole('radio', { name: 'French' }).click();
     expect(thisPane.current).toEqual({ mode: 'edit', locale: 'fr' });
     // The preview pane follows
     expect(thatPane.current).toEqual({ mode: 'preview', locale: 'fr' });
+  });
+
+  test('waits for a field update in flight before switching', async () => {
+    const { thisPane } = await renderSwitcher();
+    /** @type {any} */
+    let settle;
+
+    // A rich text editor converting what was just typed in English
+    trackPendingFieldUpdate(
+      new Promise((resolve) => {
+        settle = resolve;
+      }),
+    );
+
+    await page.getByRole('radio', { name: 'French' }).click();
+    // The update would otherwise be written to the French content the pane now shows
+    await sleep(50);
+    expect(thisPane.current).toEqual({ mode: 'edit', locale: 'en' });
+
+    settle();
+    await expect.poll(() => thisPane.current).toEqual({ mode: 'edit', locale: 'fr' });
   });
 
   test('leaves out the locale edited in the other pane, offering the preview instead', async () => {
@@ -86,7 +107,6 @@ describe('LocaleSwitcher', () => {
         .map((el) => el.textContent?.trim()),
     ).toEqual(['French', 'German', 'Preview']);
 
-    await sleep(150);
     await group.getByRole('radio', { name: 'Preview' }).click();
     expect(thisPane.current).toEqual({ mode: 'preview', locale: 'en' });
   });
@@ -107,6 +127,24 @@ describe('LocaleSwitcher', () => {
     await expect.element(group.getByRole('radio', { name: 'German (error)' })).toHaveClass('error');
   });
 
+  test('lists a locale without content once the entry has been validated', async () => {
+    // Validation only covers the locales with content, so a disabled locale that has never had any
+    // has no validity
+    await renderSwitcher({
+      draftProps: {
+        currentLocales: { en: true, fr: true, de: false },
+        validities: { en: {}, fr: { title: { valid: false } } },
+      },
+    });
+
+    const group = page.getByRole('radiogroup');
+
+    await expect
+      .element(group.getByRole('radio', { name: 'German (disabled)' }))
+      .toBeInTheDocument();
+    await expect.element(group.getByRole('radio', { name: 'French (error)' })).toHaveClass('error');
+  });
+
   test('uses a drop-down on a small screen', async () => {
     env.isSmallScreen = true;
 
@@ -121,7 +159,6 @@ describe('LocaleSwitcher', () => {
     expect(select.element().closest('.sui.select')).toHaveClass('error');
 
     await select.click();
-    await sleep(150);
 
     // Every locale is listed, as the other pane is hidden on a small screen
     const options = page.getByRole('option');

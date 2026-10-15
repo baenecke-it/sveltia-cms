@@ -38,13 +38,17 @@ describe('PrefSwitch', () => {
 
     await render(PrefSwitch, { key: 'closeOnSave', label: 'Close on save' });
     await expect.element(page.getByRole('switch')).toBeChecked();
-    // The default is written back to the preferences
-    await vi.waitFor(() => expect(prefs.closeOnSave).toBe(true));
+    // The default isn’t written to the preferences, which are filled with the defaults on load
+    expect(prefs.closeOnSave).toBeUndefined();
 
     resetPrefs();
 
-    await render(PrefSwitch, { key: 'beta', label: 'Beta', defaultValue: false });
-    await expect.element(page.getByRole('switch', { name: 'Beta' })).not.toBeChecked();
+    await render(PrefSwitch, {
+      key: 'devModeEnabled',
+      label: 'Developer mode',
+      defaultValue: false,
+    });
+    await expect.element(page.getByRole('switch', { name: 'Developer mode' })).not.toBeChecked();
   });
 
   test('updates the preference when toggled', async () => {

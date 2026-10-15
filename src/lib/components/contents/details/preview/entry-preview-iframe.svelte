@@ -8,14 +8,17 @@
   import { _ } from '@sveltia/i18n';
   import { Placeholder } from '@sveltia/ui';
   import { createElement } from 'react';
-  import { mount } from 'svelte';
+  import { mount, unmount } from 'svelte';
 
+  import { assetURLUpdates } from '$lib/services/api/asset-proxy';
   import { loadReactDom } from '$lib/services/api/react-dom';
   import {
     createEntryDraftMountContext,
     getEntryDraftContext,
   } from '$lib/services/contents/draft/state.svelte';
-  import { escapeAttr } from '$lib/services/utils/string';
+  import { highlightPreviewTemplateField } from '$lib/services/contents/editor/fields';
+  import { buildPreviewFrameHTML } from '$lib/services/contents/editor/preview-frame';
+  import { getCanonicalLocale, getDirection } from '$lib/services/contents/i18n';
 
   /**
    * @import { ComponentType } from 'react';
@@ -35,6 +38,8 @@
    * @property {Omit<CustomPreviewTemplateProps, 'document' | 'window'>} [reactProps] Props for the
    * React component, except for the `document` and `window` props, which will be automatically
    * provided by the iframe.
+   * @property {(iframe: HTMLIFrameElement) => void} [onLoad] Function called with the iframe once
+   * its content has been loaded and mounted.
    */
 
   const entryDraft = getEntryDraftContext();
@@ -47,6 +52,7 @@
     children,
     reactComponent,
     reactProps,
+    onLoad,
     /* eslint-enable prefer-const */
   } = $props();
 
@@ -65,22 +71,21 @@
    * @type {Root | undefined}
    */
   let reactRoot = $state();
-
   /**
-   * Generate the HTML content for the iframe.
-   * @returns {string} The HTML string.
+   * Svelte placeholder mounted inside the iframe. It’s outside the component tree, so it has to be
+   * unmounted explicitly, or its effects would keep running after the iframe is gone.
+   * @type {Record<string, any> | undefined}
    */
-  const generateHTML = () => `
-    <!DOCTYPE html>
-    <html lang="${escapeAttr(locale)}">
-    <head>
-      <meta charset="UTF-8">
-      <base href="${escapeAttr(window.location.origin)}" target="_blank">
-      ${styleURLs.map((url) => `<link rel="stylesheet" href="${escapeAttr(url)}">`).join('\n')}
-    </head>
-    <body></body>
-    </html>
-  `;
+  let placeholder;
+
+  /** Language of the frame’s document, unless the locale isn’t a valid language tag. */
+  const lang = $derived(getCanonicalLocale(locale));
+  /**
+   * Text direction of the frame’s document. Without i18n, the locale doesn’t tell the language, so
+   * the direction is left to the template rather than set to `auto`, which would turn the whole
+   * document right-to-left whenever its first text is in a right-to-left script.
+   */
+  const dir = $derived(locale === '_default' ? undefined : getDirection(locale));
 
   /**
    * Mount the Svelte placeholder component into the iframe’s body. This way, the iframe content
@@ -96,7 +101,7 @@
       return;
     }
 
-    mount(Placeholder, {
+    placeholder = mount(Placeholder, {
       target,
       context: createEntryDraftMountContext(entryDraft),
       props: { children },
@@ -135,12 +140,25 @@
     // Loaded on demand, as only a custom preview template renders React here. It’s normally on
     // its way already, as `CMS.registerPreviewTemplate()` starts loading it
     const { createRoot } = await loadReactDom();
-    const target = iframe?.contentDocument?.body;
+    const contentDocument = iframe?.contentDocument;
+    const target = contentDocument?.body;
 
     /* v8 ignore next 3 -- the frame may have been removed while the library was loading */
-    if (!target) {
+    if (!contentDocument || !target) {
       return;
     }
+
+    /**
+     * Highlight the Edit Pane field corresponding to an element the template has marked with the
+     * `data-key-path` attribute. The listeners go away with the frame’s document.
+     * @param {MouseEvent | KeyboardEvent} event `click` or `keydown` event.
+     */
+    const listener = (event) => {
+      highlightPreviewTemplateField({ event, locale });
+    };
+
+    contentDocument.addEventListener('click', listener);
+    contentDocument.addEventListener('keydown', listener);
 
     // Create React root in the iframe; the update $effect will handle the first render
     reactRoot = createRoot(target);
@@ -167,7 +185,8 @@
     }
 
     const mountComponent = reactComponent ? mountReactComponent : mountPlaceholder;
-    const blobURL = URL.createObjectURL(new Blob([generateHTML()], { type: 'text/html' }));
+    const html = buildPreviewFrameHTML({ lang, dir, styleURLs, origin: window.location.origin });
+    const blobURL = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
 
     /**
      * Callback function to be called when the iframe has loaded its content. It mounts either the
@@ -184,6 +203,7 @@
 
       URL.revokeObjectURL(blobURL);
       initialized = true;
+      onLoad?.(/** @type {HTMLIFrameElement} */ (iframe));
     };
 
     iframe.addEventListener('load', listener, { once: true });
@@ -197,8 +217,33 @@
     }
   });
 
+  // Update the language and direction once the pane shows another locale, which doesn’t load the
+  // frame again
+  $effect(() => {
+    const root = initialized ? iframe?.contentDocument?.documentElement : undefined;
+
+    if (!root) {
+      return;
+    }
+
+    if (lang) {
+      root.lang = lang;
+    } else {
+      root.removeAttribute('lang');
+    }
+
+    if (dir) {
+      root.dir = dir;
+    } else {
+      root.removeAttribute('dir');
+    }
+  });
+
   // Update React component when reactProps changes
   $effect(() => {
+    // Render again once an asset the component got with `getAsset()` has a blob URL
+    void assetURLUpdates.current;
+
     // Only update if we have a React root and the iframe is initialized
     if (initialized && reactRoot && reactComponent && reactProps) {
       renderReactComponent();
@@ -208,6 +253,10 @@
   // Cleanup on unmount
   $effect(() => () => {
     reactRoot?.unmount();
+
+    if (placeholder) {
+      unmount(placeholder);
+    }
   });
 </script>
 

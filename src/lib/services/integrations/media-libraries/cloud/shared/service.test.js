@@ -22,6 +22,7 @@ describe('integrations/media-libraries/cloud/shared/service', () => {
   const operations = {
     list: vi.fn(async () => []),
     browse: vi.fn(async () => ({ assets: [], folders: [] })),
+    listFolder: vi.fn(async () => ({ assets: [], folders: [] })),
     search: vi.fn(async () => []),
     upload: vi.fn(async () => []),
     delete: vi.fn(async () => undefined),
@@ -96,6 +97,27 @@ describe('integrations/media-libraries/cloud/shared/service', () => {
     expect(isEnabled()).toBe(false);
   });
 
+  it('should merge the field-level options over the site-level ones', async () => {
+    const { isEnabled, list } = service;
+
+    const fieldConfig = /** @type {any} */ ({
+      widget: 'image',
+      media_libraries: { azure_blob_storage: { container: 'field' } },
+    });
+
+    cmsConfig.current = /** @type {any} */ ({
+      media_libraries: { azure_blob_storage: { account_name: 'account' } },
+    });
+    expect(isEnabled()).toBe(false);
+    expect(isEnabled(fieldConfig)).toBe(true);
+
+    await list({ ...fetchOptions, fieldConfig });
+    expect(operations.list).toHaveBeenCalledWith(
+      { account_name: 'account', container: 'field' },
+      { ...fetchOptions, fieldConfig },
+    );
+  });
+
   it('should pass the library options through the config resolver', () => {
     const resolveConfig = vi.fn((options) => ({ ...options, endpoint: 'https://test' }));
     const custom = new ObjectStorageService({ ...service, resolveConfig });
@@ -115,13 +137,25 @@ describe('integrations/media-libraries/cloud/shared/service', () => {
   });
 
   it('should call the operations with the resolved config', async () => {
-    const { list, browse, search, upload, rename, replace, move, createFolder, deleteFolder } =
-      service;
+    const {
+      list,
+      browse,
+      listFolder,
+      search,
+      upload,
+      rename,
+      replace,
+      move,
+      createFolder,
+      deleteFolder,
+    } = service;
 
     await list(fetchOptions);
     expect(operations.list).toHaveBeenCalledWith(libOptions, fetchOptions);
     await browse(fetchOptions);
     expect(operations.browse).toHaveBeenCalledWith(libOptions, fetchOptions);
+    await listFolder('2024', fetchOptions);
+    expect(operations.listFolder).toHaveBeenCalledWith('2024', libOptions, fetchOptions);
     await search('photo', fetchOptions);
     expect(operations.search).toHaveBeenCalledWith('photo', libOptions, fetchOptions);
     await upload([file], fetchOptions);

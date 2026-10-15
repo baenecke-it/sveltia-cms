@@ -4,20 +4,21 @@ import { escapeRegExp, stripSlashes } from '@sveltia/utils/string';
 import { customFileFormatRegistry } from '$lib/services/api/registries';
 import { ESCAPED_PLACEHOLDER_REGEX } from '$lib/services/common/template/constants';
 import { warnDeprecation } from '$lib/services/config/deprecations';
-import { isEntryCollection } from '$lib/services/contents/collection';
 import { getIndexFile } from '$lib/services/contents/collection/entries/index-file';
 import { getNestedConfig } from '$lib/services/contents/collection/nested';
+import { isEntryCollection } from '$lib/services/contents/collection/predicates';
 import {
   EXTENSION_FORMAT_MAP,
   FORMAT_EXTENSION_MAP,
   FRONTMATTER_DELIMITER_MAP,
   MARKDOWN_EXTENSIONS,
-} from '$lib/services/contents/file';
+} from '$lib/services/contents/file/constants';
 import { getLocalePath } from '$lib/services/contents/i18n';
 import {
   getLocaleFolderPattern,
   hasLocalePlaceholder,
 } from '$lib/services/contents/i18n/placeholder';
+import { isNonEmptyString } from '$lib/services/utils/string';
 
 /**
  * @import {
@@ -202,8 +203,16 @@ export const getEntryPathRegEx = ({
     structureMap: { i18nMultiFile, i18nMultiFolder, i18nMultiRootFolder },
   } = _i18n;
 
-  const localeMatcher = `(?<locale>${allLocales.join('|')})`;
-  const joinedNonDefaultLocales = allLocales.filter((locale) => locale !== defaultLocale).join('|');
+  // Locale codes aren’t validated, so one with a character special to regular expressions, like
+  // `zh+`, mustn’t break the pattern
+  const joinedLocales = allLocales.map(escapeRegExp).join('|');
+
+  const joinedNonDefaultLocales = allLocales
+    .filter((locale) => locale !== defaultLocale)
+    .map(escapeRegExp)
+    .join('|');
+
+  const localeMatcher = `(?<locale>${joinedLocales})`;
 
   const localeFolderMatcher = omitDefaultLocaleFromFilePath
     ? `(?:(?<locale>${joinedNonDefaultLocales})\\/)?`
@@ -242,7 +251,7 @@ export const getEntryPathRegEx = ({
   const getSuffixMatcher = (ext) => {
     const localeMatcherCopy = omitDefaultLocaleFromFilePath
       ? `(?:\\.(?:${joinedNonDefaultLocales}))?`
-      : `\\.(?:${allLocales.join('|')})`;
+      : `\\.(?:${joinedLocales})`;
 
     return `(?=${i18nMultiFile ? localeMatcherCopy : ''}\\.${escapeRegExp(ext)}$)`;
   };
@@ -281,7 +290,7 @@ export const getEntryPathRegEx = ({
  * @see https://sveltiacms.app/en/docs/collections/entries/formats#front-matter-delimiter
  */
 export const getFrontMatterDelimiters = ({ format, delimiter }) => {
-  if (typeof delimiter === 'string' && delimiter.trim()) {
+  if (isNonEmptyString(delimiter)) {
     return [delimiter, delimiter];
   }
 
@@ -339,6 +348,8 @@ export const getFileConfig = ({ rawCollection, file, _i18n }) => {
     // @ts-ignore
     folder,
     // @ts-ignore
+    file: dataFile,
+    // @ts-ignore
     path: subPath,
     // @ts-ignore
     extension: _extension,
@@ -349,16 +360,25 @@ export const getFileConfig = ({ rawCollection, file, _i18n }) => {
   } = rawCollection;
 
   const _isEntryCollection = isEntryCollection(rawCollection);
-  const filePath = file?.file ? stripSlashes(file.file) : undefined;
+  // An entry collection can store all the entries in one file instead of a folder
+  const arrayFile = _isEntryCollection && typeof dataFile === 'string';
+
+  const filePath = file?.file
+    ? stripSlashes(file.file)
+    : arrayFile
+      ? stripSlashes(dataFile)
+      : undefined;
+
   const __extension = filePath ? getPathInfo(filePath).extension : _extension;
   const __format = file?.format ?? _format;
   const extension = detectFileExtension({ format: __format, extension: __extension });
   const format = detectFileFormat({ format: __format, extension });
   const delimiter = file?.frontmatter_delimiter ?? _delimiter;
-  const basePath = _isEntryCollection ? stripSlashes(/** @type {string} */ (folder)) : undefined;
-  const indexFile = _isEntryCollection ? getIndexFile(rawCollection) : undefined;
+  const _isFolderCollection = _isEntryCollection && !arrayFile;
+  const basePath = _isFolderCollection ? stripSlashes(/** @type {string} */ (folder)) : undefined;
+  const indexFile = _isFolderCollection ? getIndexFile(rawCollection) : undefined;
   const indexFileName = indexFile?.name;
-  const nestedDepth = _isEntryCollection ? getNestedConfig(rawCollection)?.depth : undefined;
+  const nestedDepth = _isFolderCollection ? getNestedConfig(rawCollection)?.depth : undefined;
 
   const indexFileFormat = getIndexFileFormat({
     indexFile,
@@ -376,7 +396,7 @@ export const getFileConfig = ({ rawCollection, file, _i18n }) => {
     extension,
     format,
     basePath,
-    subPath: _isEntryCollection ? subPath : undefined,
+    subPath: _isFolderCollection ? subPath : undefined,
     fullPathRegEx:
       basePath !== undefined
         ? getEntryPathRegEx({
@@ -397,6 +417,10 @@ export const getFileConfig = ({ rawCollection, file, _i18n }) => {
     bodyField: file?.body_field ?? bodyField,
     yamlQuote: !!yamlQuote,
   };
+
+  if (arrayFile) {
+    config.arrayFile = true;
+  }
 
   if (indexFileFormat) {
     // The index file shares the rest of the configuration with the entries, including the path

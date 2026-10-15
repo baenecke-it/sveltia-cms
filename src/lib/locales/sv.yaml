@@ -477,13 +477,20 @@ entry_not_found: Posten hittades inte.
 # Entry creation restrictions: tooltip and advisory messages
 creating_entries_disabled_by_admin: Skapande av nya poster är inaktiverat av administratören.
 # {$quota} is the collection’s maximum entry count
-creating_entries_disabled_by_quota: Du kan inte lägga till nya poster i denna samling eftersom den har nått sin gräns på {$quota} poster.
+creating_entries_disabled_by_quota: |
+  .input {$quota :integer}
+  .match $quota
+    one {{ Du kan inte lägga till nya poster i denna samling eftersom den har nått sin gräns på {$quota} post. }}
+    *   {{ Du kan inte lägga till nya poster i denna samling eftersom den har nått sin gräns på {$quota} poster. }}
 # {$quota} is the collection limit and {$remaining} is the number of entries that can still be created
 creating_entries_nearing_quota: |
+  .input {$quota :integer}
   .input {$remaining :integer}
-  .match $remaining
-    one {{ Denna samling närmar sig sin gräns på {$quota} poster. Du kan bara skapa {$remaining} fler post. }}
-    *   {{ Denna samling närmar sig sin gräns på {$quota} poster. Du kan bara skapa {$remaining} fler poster. }}
+  .match $quota $remaining
+    one one {{ Denna samling närmar sig sin gräns på {$quota} post. Du kan bara skapa {$remaining} fler post. }}
+    one *   {{ Denna samling närmar sig sin gräns på {$quota} post. Du kan bara skapa {$remaining} fler poster. }}
+    *   one {{ Denna samling närmar sig sin gräns på {$quota} poster. Du kan bara skapa {$remaining} fler post. }}
+    *   *   {{ Denna samling närmar sig sin gräns på {$quota} poster. Du kan bara skapa {$remaining} fler poster. }}
 
 # Navigation: back links and list labels
 back_to_collection: Tillbaka till samling
@@ -1558,7 +1565,7 @@ config:
     oauth_implicit_flow: Den konfigurerade autentiseringsmetoden (implicit flow) stöds inte i Sveltia CMS. Använd en annan <a>autentiseringsmetod</a> istället.
     github_pkce_unsupported: PKCE-auktorisering stöds ännu inte på grund av GitHubs begränsningar. Använd en annan <a>autentiseringsmetod</a> istället.
     oauth_no_app_id: OAuth-applikations-ID är inte definierat.
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: '`open_authoring`-alternativet kräver publiceringsläget `editorial_workflow`. Se <a>dokumentationen</a> för mer information.'
     # Don’t localize `auth_methods`
     no_auth_methods: '`auth_methods`-alternativet måste innehålla minst en metod.'
@@ -1680,8 +1687,6 @@ config:
   # Warning messages (logged to console)
   warning:
     oauth_no_app_id: OAuth-applikations-ID är inte definierad. Användare måste tillhandahålla en åtkomsttoken för att logga in.
-    editorial_workflow_unsupported: Redaktionellt arbetsflöde stöds ännu inte i Sveltia CMS.
-    open_authoring_unsupported_backend: Open Authoring stöds för närvarande endast med GitHub-backend.
     # {$prop} is the unsupported option name that will be ignored
     unsupported_ignored_option: '`{$prop}`-alternativet stöds inte i Sveltia CMS. Det kommer att ignoreras.'
     # Don’t localize `picker_utc`, `input_timezone`, and `output_utc`
@@ -1821,8 +1826,6 @@ workflow:
     .match $count
       one {{ En av dem har inte publicerats än, så dina opublicerade ändringar förkastas. En eventuell publicerad version förblir publicerad. }}
       *   {{ {$count} av dem har inte publicerats än, så dina opublicerade ändringar förkastas. Eventuella publicerade versioner förblir publicerade. }}
-  # Confirmation dialog shown before merging the pull request. Keep the wording free of Git jargon.
-  confirm_publishing_entry: Är du säker på att du vill publicera denna post? Dina ändringar träder i kraft omedelbart.
   # Workflow page: toast notifications shown while an entry is being published from a card, and
   # once publishing has completed
   publishing_entry: Publicerar post…
@@ -1976,13 +1979,23 @@ prefs:
       description: Visa understrykning för länkar i förhandsgranskningen av inlägg och användargränssnittets etiketter.
       switch_label: Understryk alltid länkar
 
-  # Advanced panel
-  advanced:
-    title: Avancerat
-    beta:
-      title: Beta-funktioner
-      description: Aktivera vissa beta-funktioner som kan vara instabila eller oöversatta.
-      switch_label: Gå med i beta-programmet
+  # Data Management panel
+  data:
+    clear_data:
+      title: Rensa data
+      # Clear File Cache button
+      file_cache:
+        description: Radera lokalt cachelagrat filinnehåll och miniatyrbilder för att frigöra lagringsutrymme eller lösa problem som orsakas av inaktuella data.
+        button_label: Rensa filcache
+        confirmation: Lokalt cachelagrat filinnehåll och miniatyrbilder raderas. Dina osparade utkast och inställningar behålls, och raderade data laddas ned eller genereras igen vid behov. CMS:et laddas om när det är klart.
+      # Erase All Data button
+      all_data:
+        description: Radera allt som CMS:et lagrar i den här webbläsaren, inklusive cachelagrade filer, osparade utkast och inställningar. Det som redan sparats i ditt repo påverkas inte.
+        button_label: Radera alla data
+        confirmation: Alla data som lagras i den här webbläsaren raderas, inklusive cachelagrat filinnehåll, miniatyrbilder, osparade utkast, inställningar och inloggningsstatus. Ditt repo påverkas inte, men alla ändringar som du inte har sparat går förlorade, och du måste logga in igen. CMS:et laddas om när det är klart.
+
+  # Developer panel
+  developer:
     developer_mode:
       title: Utvecklarläge
       description: Aktivera vissa utvecklarinriktade funktioner, inklusive detaljerade konsolloggar och inbyggda kontextmenyer.
@@ -2000,18 +2013,6 @@ prefs:
         field_label: Auktoriseringshuvud (t.ex. Bearer <token>) (valfritt)
         saved: Auktoriseringshuvud sparat.
         removed: Auktoriseringshuvud borttaget.
-    clear_data:
-      title: Rensa data
-      # Clear File Cache button
-      file_cache:
-        description: Radera lokalt cachelagrat filinnehåll och miniatyrbilder för att frigöra lagringsutrymme eller lösa problem som orsakas av inaktuella data.
-        button_label: Rensa filcache
-        confirmation: Lokalt cachelagrat filinnehåll och miniatyrbilder raderas. Dina osparade utkast och inställningar behålls, och raderade data laddas ned eller genereras igen vid behov. CMS:et laddas om när det är klart.
-      # Erase All Data button
-      all_data:
-        description: Radera allt som CMS:et lagrar i den här webbläsaren, inklusive cachelagrade filer, osparade utkast och inställningar. Det som redan sparats i ditt repo påverkas inte.
-        button_label: Radera alla data
-        confirmation: Alla data som lagras i den här webbläsaren raderas, inklusive cachelagrat filinnehåll, miniatyrbilder, osparade utkast, inställningar och inloggningsstatus. Ditt repo påverkas inte, men alla ändringar som du inte har sparat går förlorade, och du måste logga in igen. CMS:et laddas om när det är klart.
 
 # ==============================================================================
 # Keyboard Shortcuts

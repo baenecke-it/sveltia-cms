@@ -119,6 +119,7 @@ welcome_message: Welcome to {$name}
 powered_by: Powered by {$name}
 
 # Shown during initial configuration and data loading
+unsupported_browser_error: Your browser is not supported. Please update it to the latest version or use another browser.
 loading_cms_config: Loading CMS Configuration…
 loading_site_data: Loading Site Data…
 loading_site_data_error: There was an error while loading site data.
@@ -151,6 +152,8 @@ work_with_local_repo_description: Once prompted, select the root directory of th
 work_with_local_repo_description_no_repo: Once prompted, select the root directory of your Git repository.
 # Button label for demo/test repository
 work_with_test_repo: Work with Test Repository
+# Button label for the test repository when sample content is seeded, e.g. on a demo site
+start_demo: Start Demo
 
 # Authentication errors
 # Error messages shown during sign-in failures
@@ -179,10 +182,22 @@ repository_not_found: The “{$repo}” repository doesn’t exist.
 repository_empty: The “{$repo}” repository has no branches.
 # {$repo} is the repository identifier, and {$branch} is the configured branch name
 branch_not_found: The “{$repo}” repository doesn’t have the “{$branch}” branch.
+# {$repo} is the repository identifier, and {$dir} is the configured root directory
+root_dir_not_found: The root directory “{$dir}” doesn’t exist in the “{$repo}” repository.
 
 # General errors
 # Fallback error dialog title for unexpected errors
 unexpected_error: Unexpected Error
+# Shown in place of the page when an unexpected error stops it from being displayed
+# {$message} is the error message
+page_crashed: Something went wrong, and this page can’t be displayed. {$message}
+# Shown in place of a field editor or preview when an unexpected error stops it from being displayed
+# {$message} is the error message
+field_crashed: Something went wrong, and this field can’t be displayed. {$message}
+# Button label for displaying a part of the page again after an unexpected error
+try_again: Try Again
+# Button label for reloading the CMS after an unexpected error
+reload_cms: Reload CMS
 
 # Entry file parsing errors
 # Toast notification when entry files fail to parse on initial load
@@ -222,6 +237,7 @@ sign_in_with_link_confirmation: This link signs you in as {$account} on {$servic
 signed_in_as_x: Signed In as {$name}
 working_with_local_repo: Working with Local Repository
 working_with_test_repo: Working with Test Repository
+working_in_demo_mode: Demo Mode
 
 # Account menu: action items for sign-out and app installation
 sign_out: Sign Out
@@ -237,9 +253,14 @@ install_as_app: Install as App
 contents: Contents
 assets: Assets
 editorial_workflow: Editorial Workflow
+# Name of the Editorial Workflow page when all the content uses Preview Workflow, which has no
+# review stages, so the page only lists the drafts
+drafts: Drafts
 cms_config: CMS Configuration
 # Mobile menu page title (shown only on small screens)
 menu: Menu
+# Mobile menu page section heading listing the custom pages registered by the site
+custom_pages: Pages
 
 # Mobile promo infobar: encouraging users to try the mobile version
 mobile_promo_title: Sveltia CMS is now available on mobile!
@@ -250,10 +271,36 @@ mobile_promo_button: Give it a try
 new_language_available: Sveltia CMS is now available in {$locale}!
 change_language: Change Language
 
+# Live reload infobar: shown when the CMS runs on a page that a framework’s development server (e.g.
+# Astro) reloads on every file change, instead of a static HTML file
+live_reload_warning: Your development server reloads this page whenever a file changes, which can interrupt saving and leave your files broken. Serve the CMS from a static HTML file instead. <a>Learn more</a>
+
 # Toast notification shown while the translation for the selected language is being downloaded
 # {$locale} is the localized language name, e.g., “French”
 switching_language: Switching to {$locale}…
 locale_load_failed: Couldn’t load the {$locale} translation. Please try again later.
+
+# Toast notification shown when changes saved with the local backend couldn’t be committed to Git
+# {$reason} is one of the `local_git_skip_reasons` strings below
+local_git_not_committed: Your changes have been saved but not committed to Git. {$reason} To only save the files, turn off Git commits under Settings > Developer.
+local_git_skip_reasons:
+  unsupported_repository: Your repository uses a Git feature the CMS doesn’t support, such as a linked worktree, SHA-256 object names, the reftable format, a sparse index, or an index in version 3 or 4, which the feature.manyFiles option and git add -N use.
+  missing_identity: Your name and email address aren’t set in the repository’s Git configuration, and the CMS can’t read your global one. Set them in the repository with git config --local user.name "Your Name" and git config --local user.email "you@example.com".
+  locked: Another Git process is using the repository. If none is running, delete the .git/index.lock file.
+  # The operation in progress, with how to finish or cancel it
+  operation_in_progress:
+    merge: A merge is in progress. Finish it with git commit, or cancel it with git merge --abort.
+    rebase: A rebase is in progress. Finish it with git rebase --continue, or cancel it with git rebase --abort. If you’ve moved on, git rebase --quit drops it without changing your files.
+    cherry_pick: A cherry-pick is in progress. Finish it with git cherry-pick --continue, or cancel it with git cherry-pick --abort.
+    revert: A revert is in progress. Finish it with git revert --continue, or cancel it with git revert --abort.
+    am: Applying patches with git am is in progress. Finish it with git am --continue, or cancel it with git am --abort.
+    conflict: Some files have conflicts. Resolve them and stage the results first.
+  detached_head: No branch is checked out.
+  staged_changes: You have other changes staged for commit. Commit or unstage them first.
+  # {$path} is the file path
+  lfs: '{$path} is tracked with Git LFS, which the CMS can’t commit to.'
+  # {$message} is the error message
+  error: An unexpected error occurred. {$message}
 
 # Site and page navigation
 # Toolbar button aria-label for visiting the live site
@@ -399,6 +446,7 @@ x_of_x_selected: '{$selected} of {$total} selected'
 
 # View switcher: toggle between list and grid views
 switch_view: Switch View
+table_view: Table View
 list_view: List View
 grid_view: Grid View
 switch_to_list_view: Switch to List View
@@ -412,6 +460,16 @@ switch_to_grid_view: Switch to Grid View
 # Sort menu: button labels and options
 sort: Sort
 sorting_options: Sorting Options
+# Table view column labels for the entry metadata used as `{{…}}` template tags
+table_column_keys:
+  # The folder containing the entry file
+  dirname: Folder
+  # The entry file name without the extension
+  filename: File Name
+  # The entry file extension
+  extension: Extension
+  # The enabled locales of the entry
+  locales: Languages
 # Sort key option labels
 sort_keys:
   # No sorting; entries appear in their natural repository order
@@ -494,13 +552,32 @@ entry_not_found: Entry not found.
 # Entry creation restrictions: tooltip and advisory messages
 creating_entries_disabled_by_admin: Creating new entries in this collection is disabled by the administrator.
 # {$quota} is the collection’s maximum entry count
-creating_entries_disabled_by_quota: You cannot add new entries to this collection because it has reached its limit of {$quota} entries.
+creating_entries_disabled_by_quota: |
+  .input {$quota :integer}
+  .match $quota
+    one {{ You cannot add new entries to this collection because it has reached its limit of {$quota} entry. }}
+    *   {{ You cannot add new entries to this collection because it has reached its limit of {$quota} entries. }}
 # {$quota} is the collection limit and {$remaining} is the number of entries that can still be created
 creating_entries_nearing_quota: |
+  .input {$quota :integer}
   .input {$remaining :integer}
-  .match $remaining
-    one {{ This collection is nearing its limit of {$quota} entries. You can only create {$remaining} more entry. }}
-    *   {{ This collection is nearing its limit of {$quota} entries. You can only create {$remaining} more entries. }}
+  .match $quota $remaining
+    one one {{ This collection is nearing its limit of {$quota} entry. You can only create {$remaining} more entry. }}
+    one *   {{ This collection is nearing its limit of {$quota} entry. You can only create {$remaining} more entries. }}
+    *   one {{ This collection is nearing its limit of {$quota} entries. You can only create {$remaining} more entry. }}
+    *   *   {{ This collection is nearing its limit of {$quota} entries. You can only create {$remaining} more entries. }}
+
+# Read-only restrictions set with the `readonly` option: advisory messages
+readonly_cms: The CMS is in read-only mode. You can view content and assets but cannot make any changes.
+readonly_collection: This collection is read-only. You can view its content but cannot make any changes.
+readonly_entry: This entry is read-only. You can view it but cannot make any changes.
+readonly_asset_folder: This folder is read-only. You can view its assets but cannot make any changes.
+readonly_branch: You don’t have permission to push to the “{$branch}” branch. You can view this content but cannot make any changes.
+readonly_reference: The entry is read-only, so the reference can’t be removed.
+# {$entries} is a comma-separated list of entries, each shown as “Collection › Entry”
+cannot_rename_referenced_entry: 'This entry can’t be renamed, because the following read-only entries refer to it by its current name: {$entries}.'
+# {$entries} is a comma-separated list of entries, each shown as “Collection › Entry”
+cannot_move_referenced_asset: 'This asset can’t be moved or renamed, because the following read-only entries use it: {$entries}.'
 
 # Navigation: back links and list labels
 back_to_collection: Back to Collection
@@ -578,6 +655,8 @@ new_folder_description: The new folder will be created in “{$folder}”.
 new_folder_error:
   empty: The folder name cannot be empty.
   invalid: The folder name cannot contain slashes or start with a dot.
+  # A name the CMS itself is usually served from, e.g. `admin` or `cms`
+  reserved: The files in a folder with this name are read-only, as the CMS itself is usually served from it.
   duplicate: A folder or file with this name already exists here.
 # Progress and error messages while the folder is being created
 creating_folder: Creating the folder…
@@ -604,6 +683,13 @@ enter_new_name_for_external_folder: |
     0   {{ Enter a new name below. }}
     one {{ Enter a new name below. The file in the folder will be moved along, and its URL will change, so update any entry using it. }}
     *   {{ Enter a new name below. The {$count} files in the folder will be moved along, and their URLs will change, so update any entries using them. }}
+# Rename Folder dialog for a cloud storage service: warning shown when entries link to files in the
+# folder, which aren’t updated. {$count} is the number of entries
+renaming_external_folder_breaks_links: |
+  .input {$count :integer}
+  .match $count
+    one {{ An entry links to a file in this folder. The entry won’t be updated, so the link will break once the folder is renamed. }}
+    *   {{ {$count} entries link to files in this folder. The entries won’t be updated, so the links will break once the folder is renamed. }}
 # Delete Folder confirmation
 # {$name} is the folder name and {$count} is the number of assets in the folder
 confirm_deleting_folder: |
@@ -617,6 +703,9 @@ renaming_folder: Renaming the folder…
 renaming_folder_failed: Couldn’t rename the folder.
 deleting_folder: Deleting the folder…
 deleting_folder_failed: Couldn’t delete the folder.
+# Asset Library and asset picker: notice shown when a cloud storage service holds more files than
+# are listed at once
+external_assets_truncated: There are too many files on the service to list them all, so some of them are left out.
 
 # Edit options menu: button and item labels
 edit_options: Edit Options
@@ -643,11 +732,25 @@ enter_new_name_for_asset: |
     0   {{ Enter a new name below. }}
     one {{ Enter a new name below. An entry using the asset will also be updated. }}
     *   {{ Enter a new name below. {$count} entries using the asset will also be updated. }}
+# Rename Asset dialog for a file on a cloud storage service: warning shown when entries link to the
+# file, which aren’t updated. {$count} is the number of entries
+renaming_external_asset_breaks_links: |
+  .input {$count :integer}
+  .match $count
+    one {{ An entry links to this file. The entry won’t be updated, so the link will break once the file is renamed. }}
+    *   {{ {$count} entries link to this file. The entries won’t be updated, so the links will break once the file is renamed. }}
 # Validation errors for asset renaming
 enter_new_name_for_asset_error:
   empty: File name cannot be empty.
   character: File name cannot contain special characters.
   duplicate: This file name is used for another asset.
+  # A name starting with a dot hides the file, which the CMS wouldn’t list any more
+  leading_dot: File name cannot start with a dot.
+  # The name of a folder next to the file
+  folder_duplicate: A folder with this name already exists here.
+# Shown while renaming a file whose name will be changed on saving, e.g. by the `slugify_filename`
+# media library option
+file_will_be_saved_as: The file will be saved as “{$name}”.
 # Confirmation dialog shown when the file extension is changed while renaming an asset
 change_file_extension: Change File Extension
 # {$oldExtension} and {$newExtension} are file extensions without a leading dot, e.g. png
@@ -766,6 +869,13 @@ cannot_delete_referenced_assets: |
   .match $count
     one {{ This asset can’t be deleted, because the following fields in the entries using it would no longer be valid without it. Update those entries first. }}
     *   {{ These assets can’t be deleted, because the following fields in the entries using them would no longer be valid without them. Update those entries first. }}
+# Error shown in the asset deletion dialog when the entries using the assets couldn’t be looked up,
+# so the deletion can’t go ahead. {$count} is the number of assets being deleted
+checking_asset_references_failed: |
+  .input {$count :integer}
+  .match $count
+    one {{ Couldn’t check which entries use this asset. Close this dialog and try again. }}
+    *   {{ Couldn’t check which entries use these assets. Close this dialog and try again. }}
 
 # Delete entries: dialog titles and confirmation messages
 # {$count} is the number of entries targeted by the action
@@ -830,6 +940,40 @@ cancel_reordering_entries: Cancel Reordering Entries
 saving_reorder_failed: Failed to save new entry order. Please try again.
 
 # ==============================================================================
+# Bulk Entry Editing
+# ==============================================================================
+# Strings for editing the fields of many entries at once in a table.
+
+# Bulk edit mode: toggle buttons
+bulk_edit_entries: Edit Entries in Bulk
+save_bulk_edits: Save Bulk Edits
+cancel_bulk_edits: Cancel Bulk Edits
+
+# Bulk edit table: column header of the entry titles
+bulk_edit_entry: Entry
+
+# Bulk edit table: label of the table
+bulk_edit_table: Bulk Editor
+
+# Bulk edit table: label of a cell input; {$field} is the field label, {$entry} is the entry title
+bulk_edit_cell: '{$field} of {$entry}'
+
+# Bulk edit status: number of changed fields
+bulk_edit_count: |
+  .input {$count :integer}
+  .match $count
+    0   {{ No changes }}
+    one {{ 1 change }}
+    *   {{ {$count} changes }}
+
+# Bulk edit error messages
+bulk_edit_invalid: Some of the values aren’t valid. Fix the highlighted fields and try again.
+saving_bulk_edits_failed: Failed to save the changes. Please try again.
+
+# Bulk edit: confirmation shown when leaving the mode with unsaved changes
+discard_bulk_edits_confirm: Discard the changes made to the entries?
+
+# ==============================================================================
 # File Upload and Processing
 # ==============================================================================
 # Strings for file upload dialogs, progress indicators, and validation.
@@ -877,6 +1021,20 @@ warning_invalid_files: |
   .match $count
     one {{ This file cannot be uploaded because it’s damaged, or its content doesn’t match its file extension. This often happens when a photo is renamed rather than converted, such as a HEIC image saved as a JPEG file. Please convert the file and try again. }}
     *   {{ These files cannot be uploaded because they’re damaged, or their content doesn’t match their file extensions. This often happens when photos are renamed rather than converted, such as HEIC images saved as JPEG files. Please convert the files and try again. }}
+# {$count} is the number of files that are not of a type the field accepts, even once transformed
+# {$types} is the list of accepted file types, such as “.pdf or .txt”
+warning_unsupported_files: |
+  .input {$count :integer}
+  .match $count
+    one {{ This file cannot be uploaded because it’s not one of the following types: {$types}. }}
+    *   {{ These files cannot be uploaded because they’re not one of the following types: {$types}. }}
+# {$count} is the number of files that are not of an image type the field accepts
+# {$types} is the list of accepted image formats, such as “PNG or WebP”
+warning_unsupported_image_files: |
+  .input {$count :integer}
+  .match $count
+    one {{ This file cannot be uploaded because only an image of the following types is accepted: {$types}. }}
+    *   {{ These files cannot be uploaded because only images of the following types are accepted: {$types}. }}
 
 # File format validation when replacing an asset
 # Warning section for replacement files that are in a different format
@@ -912,6 +1070,8 @@ uploading_files_failed: Upload failed.
 # Errors shown when a file on a cloud storage service could not be deleted or renamed
 deleting_assets_failed: Delete failed.
 renaming_asset_failed: Rename failed.
+# Error shown when an edited text file in the Asset Library could not be saved
+saving_asset_failed: Save failed.
 
 # File metadata display
 # Appended when a file was auto-converted (e.g., HEIF to JPEG)
@@ -1109,6 +1269,9 @@ swap_panes: Swap Panes
 # {$locale} is the localized language name for the current content pane, e.g., English
 edit_x_locale: Edit {$locale} Content
 preview_x_locale: Preview {$locale} Content
+# The content of a monolingual entry, which has no locale to name
+edit_content: Edit Content
+preview_content: Preview Content
 
 # Preview iframe labels
 content_preview: Content Preview
@@ -1117,6 +1280,8 @@ content_preview: Content Preview
 # {$locale} is the localized language name for the content options menu, e.g., English
 show_content_options_x_locale: Show {$locale} Content Options
 content_options_x_locale: '{$locale} Content Options'
+show_content_options: Show Content Options
+content_options: Content Options
 
 # Field container labels
 # {$field} is the field’s display label
@@ -1190,9 +1355,20 @@ translate_from: Translate from…
 # {$locale} is the localized language name of the source content being translated, e.g., English
 translate_from_x: Translate from {$locale}
 
-# Revert changes
+# Revert changes, restore the default values or clear the fields. The field options menu offers
+# them for a field, the content options menu of an editor pane for the locale it shows, and the
+# editor options menu for the whole entry, the latter two asking for confirmation first
 revert_changes: Revert Changes
 revert_all_changes: Revert All Changes
+restore_default: Restore Default
+clear_all: Clear All
+confirm_reverting_changes: Are you sure you want to revert all the changes made to this entry?
+# {$locale} is a locale name, e.g. French
+confirm_reverting_changes_x_locale: Are you sure you want to revert all the changes made to the {$locale} content?
+confirm_restoring_defaults: Are you sure you want to restore the default values of all the fields in this entry? Your changes will be lost.
+confirm_restoring_defaults_x_locale: Are you sure you want to restore the default values of all the fields in the {$locale} content? Your changes will be lost.
+confirm_clearing_fields: Are you sure you want to clear all the fields in this entry? Your changes will be lost.
+confirm_clearing_fields_x_locale: Are you sure you want to clear all the fields in the {$locale} content? Your changes will be lost.
 
 # Slug editing
 edit_slug: Edit Slug
@@ -1313,6 +1489,9 @@ validation:
     email: Please enter a valid email.
     url: Please enter a valid URL.
 
+  # Value used for the same field in another entry of the collection
+  value_not_unique: This value is used for another entry.
+
   # Custom field validation error
   invalid_value: Invalid value.
   unexpected_error: Unexpected error occurred.
@@ -1370,10 +1549,18 @@ save_conflict:
   overwrite_warning: If you save now, their changes will be lost.
   # Follows `deleted`
   recreate_warning: If you save now, the entry will be created again.
+  # Follows `modified_by`, `modified` or `deleted` for an entry stored in the same file as the other
+  # entries of the collection, which can’t be saved over the change
+  reload_warning: As the entry is stored in the same file as other entries, it can’t be saved over the change. Cancel editing, then open the entry again from the list and make your edits.
   # OK button label
   save_anyway: Save Anyway
   # Error shown when the repository was updated between the check above and the commit itself
   branch_moved: The repository has been updated by someone else while saving. Please try again.
+  # Error shown when saving would change an item in a file storing all the entries of a collection,
+  # which someone else has changed or moved since it was loaded
+  array_item_changed: An entry stored in the same file has been changed by someone else. Please try again.
+  # {$path} is the file path
+  array_file_invalid: The {$path} file can’t be updated, as it doesn’t contain a valid list of entries.
 
 # Notice shown in the entry editor when someone else has changed or deleted the entry in the
 # repository while the user has it open. The change itself is described with the `save_conflict`
@@ -1461,6 +1648,9 @@ reorder_item: Reorder Item
 # aria-label for the text input holding one item of a simple List field, which has no subfield to
 # take a label from
 list_item_value: Item Value
+# aria-label for each item of a List field, giving its position in the list
+# {$position} is the 1-based position of the item, {$count} is the number of items
+list_item_position: Item {$position} of {$count}
 
 # Add item button label, also used by the Relation field to create a new entry in the referenced
 # collection, with the collection’s singular label
@@ -1537,6 +1727,7 @@ assets_dialog:
 
   # Stock photo panels
   available_images: Available Images
+  available_files: Available Files
 
   # URL entry option
   enter_url: Enter URL
@@ -1726,26 +1917,37 @@ config:
     unsupported_backend_suggestion: Use one of the <a>supported backends</a> instead.
     missing_repository: The repository is not defined.
     invalid_repository: The configured repository is invalid. It must be in “owner/repo” format.
+    invalid_root_dir: The root directory is invalid. It must be a path within the repository, without “..”.
+    invalid_root_dir_branch: The root directory can’t be used in the branch names of the `editorial_workflow` and `preview` publish modes. No part of its path can start with a dot, end with “.lock” or contain a space or a special character such as a colon or an asterisk.
+    path_outside_root_dir: The path “{$path}” leads outside the root directory, where the CMS can’t list files.
     oauth_implicit_flow: The configured authentication method (implicit flow) is not supported in Sveltia CMS. Use a different <a>authentication method</a> instead.
     github_pkce_unsupported: PKCE authorisation is not yet supported due to GitHub’s limitations. Use a different <a>authentication method</a> instead.
     oauth_no_app_id: OAuth application ID is not defined.
-    # Don’t localize `open_authoring` and `editorial_workflow`
-    open_authoring_no_workflow: The `open_authoring` option requires the `editorial_workflow` publish mode. See the <a>documentation</a> for details.
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
+    open_authoring_no_workflow: The `open_authoring` option requires the `editorial_workflow` or `preview` publish mode. See the <a>documentation</a> for details.
     # Don’t localize `auth_methods`
     no_auth_methods: The `auth_methods` option must contain at least one method.
     missing_media_folder: The media folder is not defined.
     public_folder_relative_path: The configured public folder is invalid. It must be an absolute path starting with “/”.
     public_folder_absolute_url: An absolute URL for the public folder option is not supported in Sveltia CMS.
+    # {$option} is `media_folder` or `public_folder` and {$tag} is the template tag from the configuration; Don’t localize the template tags. The curly brackets are escaped with backslashes for MessageFormat 2
+    unsupported_folder_template_tag: The `{$option}` option contains the `{$tag}` template tag, which isn’t supported there. Only the slug template tags, such as `\{\{slug\}\}` and `\{\{year\}\}`, and the `\{\{dirname\}\}`, `\{\{filename\}\}`, `\{\{extension\}\}`, `\{\{media_folder\}\}` and `\{\{public_folder\}\}` tags can be used.
+    # {$option} is `media_folder` or `public_folder` and {$tag} is the template tag from the configuration; Don’t localize the template tags. The curly brackets are escaped with backslashes for MessageFormat 2
+    global_folder_template_tag: The `{$option}` option contains the `{$tag}` template tag, which can only be used in the option of a collection, a collection file or a field, where there is an entry to fill it in with.
     # {$replacement} is the configured replacement string; Don’t localize `sanitize_replacement`
     invalid_sanitize_replacement: The `sanitize_replacement` option is set to `{$replacement}`, but it contains a character that can’t be used in a slug, so it can’t stand in for one.
     # {$option} is the option name (`site_url` or `display_url`) and {$url} is the configured value
     invalid_url_option: The `{$option}` option is set to `{$url}`, but it must be an absolute URL starting with `https://` or `http://`.
+    # Don’t localize `publish_mode`, `stages`, `draft`, `pending_review` and `pending_publish`
+    invalid_publish_mode_stages: The `stages` option of `publish_mode` must start with `draft` and list the stages in the order `draft`, `pending_review`, `pending_publish`, without repeating any.
     # Don’t localize `i18n` and `locales`
     i18n_no_locales: The `i18n.locales` option must list at least one locale.
     # {$locale} is the locale code from the configuration; Don’t localize `default_locale` and `locales`
     i18n_invalid_default_locale: The `default_locale` option is set to `{$locale}`, but it’s not one of the `locales`.
     # {$locale} is the locale code from the configuration; Don’t localize `initial_locales` and `locales`
     i18n_invalid_initial_locale: The `initial_locales` option contains `{$locale}`, but it’s not one of the `locales`.
+    # Don’t localize `i18n`
+    i18n_no_collections: 'The `i18n` option is configured at the top level, but none of the collections or singletons have the `i18n` option, so no content can be translated. Add `i18n: true` to the collections and singletons to translate.'
     # {$key} is the unsupported key found in the option map; Don’t localize `transformations`, `raster_image` and `svg`
     invalid_transformation_key: The `transformations` option contains an unsupported `{$key}` key. It must be `raster_image`, `svg` or a supported raster image format.
     # {$key} is the transformation key; Don’t localize `quality`
@@ -1758,12 +1960,24 @@ config:
     invalid_asset_collection_name: The asset collection name `{$name}` is invalid. It must not contain special characters.
     # {$name} is the duplicate asset collection name
     duplicate_asset_collection_name: Asset collection names must be unique, but `{$name}` is used more than once.
-    # Don’t localize `folder`, `files`, and `divider`
-    invalid_collection_no_options: The collection must have either the `folder`, `files` or `divider` option defined.
-    # Don’t localize `folder`, `files`, and `divider`
-    invalid_collection_multiple_options: The collection cannot have the `folder`, `files` and `divider` options together.
+    # Don’t localize `folder`, `file`, `files`, and `divider`
+    invalid_collection_no_options: The collection must have either the `folder`, `file`, `files` or `divider` option defined.
+    # Don’t localize `folder`, `file`, `files`, and `divider`
+    invalid_collection_multiple_options: The collection cannot have more than one of the `folder`, `file`, `files` and `divider` options.
     # {$extension} is the file extension and {$format} is the configured content format
     file_format_mismatch: The `{$extension}` extension doesn’t match the `{$format}` format.
+    # {$name} is the field name from the configuration and {$widget} is its field type
+    front_matter_body_field_not_text: The `{$name}` field is saved as the body below the front matter, which can only hold text, not a number, a boolean, a list or an object as a `{$widget}` field does. Use a field type holding text, or rename the field.
+    # {$file} is the file path from the configuration; Don’t localize `file` and `locale`. The curly
+    # brackets are escaped with backslashes for MessageFormat 2
+    invalid_collection_data_file: The `file` option `{$file}` is invalid. It must be the path to a JSON file, without the `\{\{locale\}\}` placeholder.
+    # {$prop} is the option name; Don’t localize `file`
+    unsupported_collection_data_file_option: The `{$prop}` option is not supported in a collection with the `file` option.
+    # Don’t localize `file`, `publish_mode` and `simple`
+    collection_data_file_workflow: Editorial Workflow and Preview Workflow, including Open Authoring, are not supported in a collection with the `file` option. Set the collection’s `publish_mode` option to `simple`.
+    # {$prop} is the option name; Don’t localize `file` and `slug`. The curly brackets are escaped
+    # with backslashes for MessageFormat 2
+    collection_data_file_slug_tag: The `{$prop}` option can’t contain the `\{\{slug\}\}` tag in a collection with the `file` option, as an entry’s slug is its position, which changes when the entries are reordered or deleted. Use a field with a unique value instead.
     # {$slug} is the invalid slug template from the configuration; Don’t localize `path` and `slug`
     invalid_slug_slash: The slug template `{$slug}` is invalid as it cannot contain slashes. To organise entries in subfolders, use the `path` option instead of `slug`.
     # {$name} is the field name from the configuration; Don’t localize `identifier_field`
@@ -1776,12 +1990,20 @@ config:
     option_field_not_found: The `{$option}` option refers to `{$name}`, but no such field is defined.
     # {$name} is the field name from the configuration and {$widget} is its field type; Don’t localize `thumbnail`
     thumbnail_field_not_media: The `thumbnail` option refers to `{$name}`, but it must be an Image or File field, not a `{$widget}` field.
+    # Don’t localize `inline` or `multiple`
+    invalid_inline_component_fields: The `inline` mode requires a single Boolean, Color, DateTime, Number, Relation, Select or String field. A Relation or Select field can’t have the `multiple` option enabled.
     # {$option} is an option name such as `pattern` or `filter` and {$pattern} is the configured pattern
     invalid_regex: The `{$option}` option contains an invalid regular expression `{$pattern}`, which is ignored.
     # {$name} is the group name from the configuration; Don’t localize `reorder`, `group` and `view_groups`
     invalid_reorder_group: The `reorder` option refers to a view group named `{$name}`, but no such group is defined in the `view_groups` option.
+    # {$name} is the field name from the configuration; Don’t localize `bulk_edit` and `fields`
+    invalid_bulk_edit_field: The `fields` list of the `bulk_edit` option refers to a field named `{$name}`, but no such top-level field is defined in the collection.
+    # {$name} is the field name from the configuration; Don’t localize `bulk_edit`, `fields` and `multiple`
+    unsupported_bulk_edit_field: The `{$name}` field in the `fields` list of the `bulk_edit` option can’t be edited in bulk. Only a Boolean, Color, DateTime, Number, Relation, Select or String field that isn’t read-only, doesn’t have the `multiple` option enabled and isn’t set automatically on save is supported.
     # {$name} is the field name from the configuration; Don’t localize `sortable_fields`
     invalid_sortable_field: The `sortable_fields` option refers to a field named `{$name}`, but no such field is defined in the collection.
+    # {$option} is `table_columns` or `summary_fields`, and {$name} is the field name from the configuration
+    invalid_table_column_field: The `{$option}` option refers to a field named `{$name}`, but no such field is defined in the collection.
     # {$name} is the field name from the configuration; Don’t localize `view_groups`
     invalid_view_group_field: The `view_groups` option refers to a field named `{$name}`, but no such field is defined in the collection.
     # {$name} is the field name from the configuration; Don’t localize `view_filters`
@@ -1823,6 +2045,12 @@ config:
     invalid_collection_folder_locale: The `folder` path `{$folder}` is invalid. The `locale` placeholder must be used only once as a whole folder name, like `content/\{\{locale\}\}/posts`.
     # Don’t localize `i18n`, `locale` and `file`
     collection_file_i18n_required: The collection file must have the `i18n` option defined if the `locale` placeholder is used in the `file` path.
+    # Don’t localize `i18n`, `i18n: true` and `i18n: duplicate`
+    collection_i18n_no_fields: 'The collection has the `i18n` option, but none of its fields have the `i18n` option, so no field can be translated. Add `i18n: true` or `i18n: duplicate` to the fields to translate.'
+    # Don’t localize `i18n` and `i18n: true`
+    collection_i18n_no_files: 'The collection has the `i18n` option, but none of its files have the `i18n` option, so no file can be translated. Add `i18n: true` to the files to translate.'
+    # Don’t localize `i18n`, `i18n: true` and `i18n: duplicate`
+    collection_file_i18n_no_fields: 'The collection file has the `i18n` option, but none of its fields have the `i18n` option, so no field can be translated. Add `i18n: true` or `i18n: duplicate` to the fields to translate.'
     # {$count} is the 1-based field index in the current fields array; Don’t localize `name`
     missing_field_name: The field {$count} must have the `name` option defined as a non-empty string.
     # {$name} is the invalid or duplicate field name
@@ -1834,6 +2062,8 @@ config:
     invalid_variable_type: The variable type name `{$name}` is invalid. It must not contain special characters.
     duplicate_variable_type: Variable type names must be unique, but `{$name}` is used more than once.
     date_field_type: 'The deprecated Date field type is not supported in Sveltia CMS. Use the DateTime field type with the `type: date` option instead.'
+    # curly brackets in the placeholder are escaped with backslashes for MessageFormat 2
+    hidden_field_locale_without_i18n: The `default` option of a Hidden field uses the `\{\{locale\}\}` placeholder, but i18n isn’t enabled for the collection, so the content has no locale to fill it with.
     # {$timeZone} is the invalid IANA timezone identifier from the configuration
     invalid_timezone: 'Invalid timezone: {$timeZone}. Must be a valid IANA timezone identifier like `America/New_York` or `Asia/Tokyo`.'
     # {$prop} is the deprecated option name and {$newProp} is the supported replacement option
@@ -1849,7 +2079,7 @@ config:
     # {$min} and {$max} are option names such as `min` and `max` or `minlength` and `maxlength`
     invalid_range_options: The `{$min}` option must not be greater than the `{$max}` option.
     # {$step} is the configured value; Don’t localize `step`
-    invalid_step: The `step` option is set to `{$step}`, but it must be greater than zero.
+    invalid_step: The `step` option is set to `{$step}`, but it must be greater than zero, or `-1` to turn stepping off.
     # Don’t localize `options`
     select_field_no_options: The Select field must have at least one item in the `options` option.
     # {$value} is the option value from the configuration; Don’t localize `options`
@@ -1892,6 +2122,11 @@ config:
     # Don’t localize `file`
     relation_field_missing_file_name: The `file` option must be defined for a relation to a file collection.
     relation_field_invalid_value_field: The referenced value field `{$field}` is invalid or not defined.
+    # {$collection} is the referenced collection name; Don’t localize `file`, `value_field` and `slug`.
+    # The curly brackets are escaped with backslashes for MessageFormat 2
+    relation_field_array_file_slug: The relation to the `{$collection}` collection can’t store the `\{\{slug\}\}` value, as an entry’s slug in a collection with the `file` option is its position, which changes when the entries are reordered or deleted. Set the `value_field` option to a field with a unique value instead.
+    # {$collection} is the referenced collection name; Don’t localize `file`
+    relation_field_array_file_workflow: A collection with the `file` option can’t have a relation to the `{$collection}` collection, which uses Editorial Workflow or Preview Workflow, as the references to an entry renamed or deleted there can’t be updated in the file.
     relation_field_invalid_display_field: The referenced display field `{$field}` is invalid or not defined.
     relation_field_invalid_search_field: The referenced search field `{$field}` is invalid or not defined.
     relation_field_invalid_filter_field: The referenced filter field `{$field}` is invalid or not defined.
@@ -1927,10 +2162,10 @@ config:
   # Warning messages (logged to console)
   warning:
     oauth_no_app_id: OAuth application ID is not defined. Users are required to provide an access token to sign in.
-    editorial_workflow_unsupported: Editorial Workflow is currently supported only with the GitHub and GitLab backends.
-    open_authoring_unsupported_backend: Open Authoring is currently supported only with the GitHub backend.
     # {$prop} is the unsupported option name that will be ignored
     unsupported_ignored_option: The `{$prop}` option is not supported in Sveltia CMS. It will be ignored.
+    # Don’t localize `stages`, `publish_mode`, `editorial_workflow` and {$type}, which is `preview` or `simple`
+    publish_mode_stages_ignored: The `stages` option of `publish_mode` only applies to the `editorial_workflow` publish mode, so it’s ignored with `{$type}`.
     # Don’t localize `picker_utc`, `input_timezone`, and `output_utc`
     conflicting_timezone_options: Both `picker_utc` and newer timezone options (`input_timezone` or `output_utc`) are set. The new options take precedence. Consider removing `picker_utc` from your configuration.
     # Don’t localize `preview_path`
@@ -1943,8 +2178,16 @@ config:
     missing_identifier_field: The collection has no `{$name}` field to name new entries with, so each new entry gets a random slug. Add a `{$name}` field, or set the `identifier_field` or `slug` option.
     # Don’t localize `slug`, `i18n`, `multiple_files`, `multiple_folders` and `multiple_root_folders`
     slug_i18n_ineffective: The `i18n` option of `slug` has no effect, because the collection doesn’t use the `multiple_files`, `multiple_folders` or `multiple_root_folders` i18n structure, where each locale has a file of its own.
+    # Don’t localize `slug`, `template` and `auto_increment`
+    slug_template_ignored: The `template` option of `slug` is ignored, because the `auto_increment` option numbers the slugs instead.
+    # {$file} is the file path; Don’t localize `file`, `locale`, `i18n`, `false`,
+    # `omit_default_locale_from_file_path` and the example paths. The curly brackets in the examples
+    # are escaped with backslashes for MessageFormat 2
+    locale_not_omitted_from_file_path: The `locale` placeholder can’t be removed from the `file` path `{$file}`, so the default locale is kept in it despite the `omit_default_locale_from_file_path` i18n option. To leave the locale out, use the placeholder as a whole folder name, like `\{\{locale\}\}/about.md`, or between the file name and the extension, like `about.\{\{locale\}\}.md`. To keep it, set the option to `false` in the file’s `i18n` option.
     # Don’t localize `i18n`
     i18n_not_configured: The `i18n` option is enabled, but i18n is not configured at the top level of the configuration or in the collection, so the option has no effect.
+    # Don’t localize `public_folder` and `media_folder`
+    empty_public_folder: The `public_folder` option is an empty string, so the `media_folder` path is used for the asset paths saved in entries instead. Remove the option, or set it to the path you want to use, such as `/images`.
     # {$option} is an option path from the configuration, such as `filter.Regulation`
     schema_unknown_option: The `{$option}` option is not defined in the Sveltia CMS configuration schema. It will be ignored. Check for a typo or a syntax mistake.
 
@@ -1979,6 +2222,11 @@ viewing_editorial_workflow: 'You’re now viewing the Editorial Workflow board. 
 # Same as above, for an Open Authoring contributor: their board has no Ready column, because only
 # a maintainer can publish
 viewing_open_authoring_workflow: 'You’re now viewing the Editorial Workflow board. Drafts: {$draft}. In Review: {$review}. Pending Deletion: {$deletion}.'
+# Same as above, when the In Review stage is left out with the `stages` publish mode option
+viewing_editorial_workflow_without_review: 'You’re now viewing the Editorial Workflow board. Drafts: {$draft}. Ready: {$ready}. Pending Deletion: {$deletion}.'
+# Same as above, when all the content uses Preview Workflow, which has no review stages, so the
+# page only lists the drafts
+viewing_preview_workflow: 'You’re now viewing the Drafts page. Drafts: {$draft}. Pending Deletion: {$deletion}.'
 
 # Workflow status names. `drafts` is the plural form used as a column heading,
 # while `draft` is the singular form used in the editor’s status button.
@@ -2047,6 +2295,10 @@ workflow:
   # Used as both the dialog title and its OK button; the Cancel button reuses the `later` string
   send_for_review: Send for Review
   confirm_sending_for_review: Your changes have been saved as a draft. Send the entry for review so someone can look at it and publish it?
+  # Same as above, when the In Review stage is left out with the `stages` publish mode option, so
+  # the next step is to mark the entry as ready to be published
+  mark_as_ready: Mark as Ready
+  confirm_marking_as_ready: Your changes have been saved as a draft. Mark the entry as ready so it can be published?
   # Editor toolbar: button shown when the entry is ready to be published
   publish_entry: Publish Entry
   # Editor toolbar button label and confirmation dialog title, used instead of “Delete” when the
@@ -2079,7 +2331,7 @@ workflow:
       one {{ One of them hasn’t been published yet, so your unpublished changes will be discarded. Any published version will remain published. }}
       *   {{ {$count} of them haven’t been published yet, so your unpublished changes will be discarded. Any published versions will remain published. }}
   # Confirmation dialog shown before merging the pull request. Keep the wording free of Git jargon.
-  confirm_publishing_entry: Are you sure you want to publish this entry? Your changes will take effect right away.
+  confirm_publishing_entry_after_build: Are you sure you want to publish this entry? Your changes will go live once your site has been rebuilt.
   # Workflow page: toast notifications shown while an entry is being published from a card, and
   # once publishing has completed
   publishing_entry: Publishing Entry…
@@ -2091,6 +2343,17 @@ workflow:
   entry_deleted: Entry deleted.
   # Error notification when publishing fails
   publishing_entry_failed: Couldn’t publish the entry. Please try again.
+  # Error notification when an entry can’t be published from the CMS, because its request also
+  # changes files that aren’t part of the entry and that the CMS doesn’t show, goes somewhere other
+  # than the site’s branch, or is too large to check. Keep the wording free of Git jargon
+  publish_refused_other_changes: This entry can’t be published here, because it comes with other changes the CMS can’t show you. Ask a developer to review it.
+  # Error notification when an entry can’t be published because its branch has been committed to
+  # since the entry was opened, so what would be published isn’t what was reviewed
+  publish_refused_entry_changed: The entry has been changed since you opened it. Reload the page to review the latest version before publishing it.
+  # Error shown in the save error dialog when an entry can’t be saved for review, because a request
+  # the CMS doesn’t show is already open from the branch the entry would be saved to. `{$number}` is
+  # the request number, e.g. `#12` on GitHub or `!12` on GitLab. Keep the wording free of Git jargon
+  branch_in_use: Another request ({$number}) is already open for this entry outside the CMS. Ask a developer to close it first.
   # Workflow page: empty column message
   no_entries: No entries.
   # Workflow page: aria-label for a draggable entry card
@@ -2098,6 +2361,22 @@ workflow:
   # Workflow page: note on a card in the Deploying tray, marking an entry that’s being removed from
   # the site rather than published to it
   deploying_deletion: Deletion
+
+# Dialog asking the user for a commit message every time changes are saved, when the site is
+# configured to. The message is recorded in the repository’s history along with the changes
+commit_message:
+  # Dialog title
+  title: Commit Message
+  # Description when the user writes the whole message, which the text box is filled in with
+  description_replace: Describe your changes. The message is recorded in the history along with them.
+  # Description when the text the user enters is added before or after a message the CMS writes
+  description_addition: Add a note to the message recorded in the history along with your changes, such as an issue number. It can be left empty.
+  # Accessible name of the text box when the user writes the whole message
+  message: Commit message
+  # Accessible name of the text box when the text is added before or after the message
+  addition: Note
+  # Preview of the message as it will be recorded. {$message} is the message
+  preview: 'Message: {$message}'
 
 # Open Authoring: a contributor without write access to the configured repository works in a fork
 # of it, and their changes reach the site through a pull request a maintainer merges
@@ -2111,6 +2390,10 @@ open_authoring:
   fork_declined: You need a fork of the repository on your account to suggest changes.
   # Error shown when the fork couldn’t be created. {$repo} is the repository identifier
   fork_failed: Couldn’t create a fork of the “{$repo}” repository on your account.
+  # Error shown when the user’s fork doesn’t have the branch the CMS is configured with, so there’s
+  # nothing to start their changes from. {$fork} and {$repo} are repository identifiers in
+  # owner/repo format, {$branch} is the branch name
+  fork_branch_missing: Your “{$fork}” fork doesn’t have the “{$branch}” branch. Update the fork from the “{$repo}” repository, then sign in again.
   # Error shown when the CMS couldn’t work out whether the user can write to the repository, e.g.
   # because the API rate limit is exhausted. {$repo} is the repository identifier
   permission_check_failed: Couldn’t check your access to the “{$repo}” repository. Please try again in a moment.
@@ -2125,6 +2408,10 @@ open_authoring:
   private_repo_scope_required: Your sign-in doesn’t include access to private repositories, so the “{$repo}” repository can’t be read. Ask a maintainer to check the CMS authentication settings.
   # Error shown when a contributor tries to publish an entry, which only a maintainer can do
   publish_unsupported: Only a maintainer can publish changes to this site. Mark your entry as In Review instead, and someone will take a look.
+  # Error shown when a contributor changes the status of an entry whose request a maintainer has
+  # published since the page was loaded, leaving nothing to review. The entry then leaves the
+  # Editorial Workflow board and the editor closes. Keep the wording free of Git jargon
+  entry_already_published: A maintainer has already published this entry, so there’s nothing left to review.
   # Error shown when a change would go straight to the site instead of being reviewed, which a
   # contributor can’t do. It covers media library uploads and deletions, and entry reordering
   direct_commit_unsupported: This change can’t be made directly. Only edits to entries can be suggested for review.
@@ -2236,17 +2523,38 @@ prefs:
       description: Show underline for links in the entry preview and user interface labels.
       switch_label: Always Underline Links
 
-  # Advanced panel
-  advanced:
-    title: Advanced
-    beta:
-      title: Beta Features
-      description: Enable some beta features that may be unstable or unlocalised.
-      switch_label: Join Beta Programme
+  # Data Management panel
+  data:
+    title: Data Management
+    clear_data:
+      title: Clear Data
+      # Clear File Cache button
+      file_cache:
+        description: Delete the locally cached file contents and image thumbnails to free up storage space or resolve issues caused by stale data.
+        button_label: Clear File Cache
+        confirmation: The locally cached file contents and image thumbnails will be deleted. Your unsaved drafts and settings will be kept, and any deleted data will be downloaded or generated again as needed. The CMS will be reloaded once done.
+      # Erase All Data button
+      all_data:
+        description: Delete everything the CMS keeps in this browser, including the cached files, unsaved drafts and settings. Anything already saved to your repository won’t be affected.
+        button_label: Erase All Data
+        confirmation: All the data stored in this browser will be deleted, including the cached file contents, image thumbnails, unsaved drafts, settings and sign-in state. Your repository won’t be affected, but any change you haven’t saved will be lost, and you’ll have to sign in again. The CMS will be reloaded once done.
+
+  # Developer panel
+  developer:
+    title: Developer
     developer_mode:
       title: Developer Mode
       description: Enable some developer-oriented features, including detailed console logs and native context menus.
       switch_label: Enable Developer Mode
+    local_git:
+      title: Git Commits
+      description: Commit your changes to the current branch of your local repository whenever you save them, as the CMS does when you work with a remote repository. You can then review and push the commits with your usual Git tools.
+      switch_label: Commit Changes to Git
+      checking: Checking the repository…
+      # {$branch} is the branch name, {$name} and {$email} are the commit author’s name and email address
+      ready: Changes will be committed to the {$branch} branch as {$name} ({$email}).
+      # {$reason} is one of the `local_git_skip_reasons` strings
+      not_ready: Changes can’t be committed right now. {$reason}
     deploy_hook:
       title: Deploy Hook
       description: Enter a webhook URL to be called when you manually trigger a deployment by selecting Publish Changes. This can be left blank if you’re using GitHub Actions.
@@ -2260,18 +2568,6 @@ prefs:
         field_label: Authorization header (e.g., Bearer <token>) (optional)
         saved: Authorization header saved.
         removed: Authorization header removed.
-    clear_data:
-      title: Clear Data
-      # Clear File Cache button
-      file_cache:
-        description: Delete the locally cached file contents and image thumbnails to free up storage space or resolve issues caused by stale data.
-        button_label: Clear File Cache
-        confirmation: The locally cached file contents and image thumbnails will be deleted. Your unsaved drafts and settings will be kept, and any deleted data will be downloaded or generated again as needed. The CMS will be reloaded once done.
-      # Erase All Data button
-      all_data:
-        description: Delete everything the CMS keeps in this browser, including the cached files, unsaved drafts and settings. Anything already saved to your repository won’t be affected.
-        button_label: Erase All Data
-        confirmation: All the data stored in this browser will be deleted, including the cached file contents, image thumbnails, unsaved drafts, settings and sign-in state. Your repository won’t be affected, but any change you haven’t saved will be lost, and you’ll have to sign in again. The CMS will be reloaded once done.
 
 # ==============================================================================
 # Keyboard Shortcuts

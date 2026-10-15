@@ -9,27 +9,41 @@
 
   import SubfolderNameDialog from '$lib/components/assets/list/subfolder-name-dialog.svelte';
   import { getSubfolderAssets, renameSubfolder } from '$lib/services/assets/data/subfolder';
-  import { getDirName, renamingSubfolder } from '$lib/services/assets/subfolders';
+  import {
+    browsedDirPath,
+    getTakenNames,
+    renamingSubfolder,
+  } from '$lib/services/assets/subfolders';
   import { listedAssets, listedSubfolders } from '$lib/services/assets/view';
-  import { createPath } from '$lib/services/utils/file';
+  import { isCommitCancelled } from '$lib/services/backends/commit-prompt';
+  import { createPath, getDirName } from '$lib/services/utils/file';
 
-  let open = $state(false);
   // Committing to a remote repository takes a few seconds, and the dialog is gone by then, so the
   // folder would otherwise be renamed with nothing on screen to say it’s under way
   let renaming = $state(false);
   let renamingFailed = $state(false);
 
   const subfolder = $derived(renamingSubfolder.current);
+  // Open while there’s a folder to act on. Closing the dialog writes `open` back, and the folder is
+  // let go of once the dialog has closed
+  let open = $derived(!!subfolder);
   /* v8 ignore start -- these are only read while the dialog is open, which takes a folder */
   const currentName = $derived(subfolder?.name ?? '');
   /** Number of assets in the folder, at any depth, which will be moved along. */
   const assetCount = $derived(subfolder ? getSubfolderAssets(subfolder.path).length : 0);
   /* v8 ignore stop */
-  /** Names taken by the siblings of the folder, which it can’t take over. */
-  const takenNames = $derived([
-    ...listedSubfolders.current.map(({ name }) => name).filter((n) => n !== currentName),
-    ...listedAssets.current.map(({ name }) => name),
-  ]);
+  /**
+   * Names taken by the siblings of the folder, which it can’t take over, including the folders
+   * leading to another asset folder nested in the directory.
+   */
+  const takenNames = $derived(
+    getTakenNames({
+      subfolders: listedSubfolders.current,
+      fileNames: listedAssets.current.map(({ name }) => name),
+      exclude: currentName,
+      dirPath: browsedDirPath.current,
+    }),
+  );
 
   /**
    * Rename the folder.
@@ -51,19 +65,16 @@
         newDirPath: createPath([getDirName(path), newName]),
       });
     } catch (/** @type {any} */ ex) {
-      renamingFailed = true;
-      // eslint-disable-next-line no-console
-      console.error(ex);
+      // The user has cancelled the commit at the commit message prompt, which isn’t a failure
+      if (!isCommitCancelled(ex)) {
+        renamingFailed = true;
+        // eslint-disable-next-line no-console
+        console.error(ex);
+      }
     } finally {
       renaming = false;
     }
   };
-
-  $effect(() => {
-    if (subfolder) {
-      open = true;
-    }
-  });
 </script>
 
 <SubfolderNameDialog

@@ -1531,7 +1531,7 @@ config:
     oauth_implicit_flow: Sveltia CMS không hỗ trợ phương thức xác thực đã cấu hình (Implicit Flow). Hãy sử dụng <a>phương thức xác thực khác</a>.
     github_pkce_unsupported: Xác thực PKCE chưa được hỗ trợ do các hạn chế của GitHub. Thay vào đó, hãy sử dụng <a>phương thức xác thực khác</a>.
     oauth_no_app_id: ID ứng dụng OAuth không được xác định.
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: Tùy chọn `open_authoring` yêu cầu chế độ xuất bản `editorial_workflow`. Xem <a>tài liệu</a> để biết chi tiết.
     # Don’t localize `auth_methods`
     no_auth_methods: Tùy chọn `auth_methods` phải chứa ít nhất một phương thức.
@@ -1653,8 +1653,6 @@ config:
   # Warning messages (logged to console)
   warning:
     oauth_no_app_id: ID ứng dụng OAuth không được xác định. Người dùng được yêu cầu cung cấp mã truy cập để đăng nhập.
-    editorial_workflow_unsupported: Quy trình biên tập hiện chỉ hỗ trợ dịch vụ GitHub và GitLab.
-    open_authoring_unsupported_backend: Open Authoring hiện chỉ được hỗ trợ với dịch vụ GitHub.
     # {$prop} is the unsupported option name that will be ignored
     unsupported_ignored_option: Tùy chọn `{$prop}` không được hỗ trợ trong Sveltia CMS. Nó sẽ bị bỏ qua.
     # Don’t localize `picker_utc`, `input_timezone`, and `output_utc`
@@ -1794,8 +1792,6 @@ workflow:
     .match $count
       1   {{ Một bài viết chưa được xuất bản nên các thay đổi chưa xuất bản sẽ bị hủy. Phiên bản đã xuất bản vẫn được giữ nguyên. }}
       *   {{ {$count} bài viết chưa được xuất bản nên các thay đổi chưa xuất bản sẽ bị hủy. Các phiên bản đã xuất bản vẫn được giữ nguyên. }}
-  # Confirmation dialog shown before merging the pull request. Keep the wording free of Git jargon.
-  confirm_publishing_entry: Bạn có chắc chắn muốn xuất bản bài viết này? Những thay đổi của bạn sẽ có hiệu lực ngay lập tức.
   # Workflow page: toast notifications shown while an entry is being published from a card, and
   # once publishing has completed
   publishing_entry: Đang xuất bản bài viết…
@@ -1949,13 +1945,23 @@ prefs:
       description: Hiển thị gạch chân dưới các liên kết trong bản xem trước nội dung và trên giao diện.
       switch_label: Luôn gạch chân các liên kết
 
-  # Advanced panel
-  advanced:
-    title: Cài đặt nâng cao
-    beta:
-      title: Tính năng thử nghiệm
-      description: Bật một số tính năng thử nghiệm có thể chưa ổn định hoặc chưa được dịch đầy đủ.
-      switch_label: Bật tính năng thử nghiệm
+  # Data Management panel
+  data:
+    clear_data:
+      title: Xóa dữ liệu
+      # Clear File Cache button
+      file_cache:
+        description: Xóa nội dung tệp và hình thu nhỏ được lưu trong bộ nhớ đệm cục bộ để giải phóng dung lượng lưu trữ hoặc khắc phục sự cố do dữ liệu cũ gây ra.
+        button_label: Xóa bộ nhớ đệm tệp
+        confirmation: Nội dung tệp và hình thu nhỏ được lưu trong bộ nhớ đệm cục bộ sẽ bị xóa. Các bản nháp chưa lưu và cài đặt của bạn sẽ được giữ lại. Dữ liệu đã xóa sẽ được tải xuống hoặc tạo lại khi cần. CMS sẽ được tải lại sau khi hoàn tất.
+      # Erase All Data button
+      all_data:
+        description: Xóa mọi thứ mà CMS lưu trong trình duyệt này, bao gồm các tệp trong bộ nhớ đệm, bản nháp chưa lưu và cài đặt. Những gì đã lưu vào kho mã nguồn của bạn sẽ không bị ảnh hưởng.
+        button_label: Xóa toàn bộ dữ liệu
+        confirmation: Thao tác này sẽ xóa bộ nhớ đệm, bản nháp chưa lưu, cài đặt và trạng thái đăng nhập trong trình duyệt. Dữ liệu trong kho mã nguồn vẫn được giữ nguyên. CMS sẽ tải lại và bạn cần đăng nhập lại.
+
+  # Developer panel
+  developer:
     developer_mode:
       title: Chế độ nhà phát triển
       description: Bật các tính năng dành cho nhà phát triển, bao gồm thông tin chi tiết trong nhật ký bảng điều khiển và trình đơn chuột phải mặc định.
@@ -1973,18 +1979,6 @@ prefs:
         field_label: 'Header xác thực (ví dụ: Bearer <token>) (không bắt buộc)'
         saved: Đã lưu header xác thực.
         removed: Đã xóa header xác thực.
-    clear_data:
-      title: Xóa dữ liệu
-      # Clear File Cache button
-      file_cache:
-        description: Xóa nội dung tệp và hình thu nhỏ được lưu trong bộ nhớ đệm cục bộ để giải phóng dung lượng lưu trữ hoặc khắc phục sự cố do dữ liệu cũ gây ra.
-        button_label: Xóa bộ nhớ đệm tệp
-        confirmation: Nội dung tệp và hình thu nhỏ được lưu trong bộ nhớ đệm cục bộ sẽ bị xóa. Các bản nháp chưa lưu và cài đặt của bạn sẽ được giữ lại. Dữ liệu đã xóa sẽ được tải xuống hoặc tạo lại khi cần. CMS sẽ được tải lại sau khi hoàn tất.
-      # Erase All Data button
-      all_data:
-        description: Xóa mọi thứ mà CMS lưu trong trình duyệt này, bao gồm các tệp trong bộ nhớ đệm, bản nháp chưa lưu và cài đặt. Những gì đã lưu vào kho mã nguồn của bạn sẽ không bị ảnh hưởng.
-        button_label: Xóa toàn bộ dữ liệu
-        confirmation: Thao tác này sẽ xóa bộ nhớ đệm, bản nháp chưa lưu, cài đặt và trạng thái đăng nhập trong trình duyệt. Dữ liệu trong kho mã nguồn vẫn được giữ nguyên. CMS sẽ tải lại và bạn cần đăng nhập lại.
 
 # ==============================================================================
 # Keyboard Shortcuts

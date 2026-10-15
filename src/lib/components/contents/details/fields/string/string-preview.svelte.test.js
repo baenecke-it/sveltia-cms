@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest';
-import { render } from 'vitest-browser-svelte';
+
+import { renderFieldPreview } from '$lib/test/field.svelte';
 
 import StringPreview from './string-preview.svelte';
 
@@ -16,17 +17,13 @@ const UNSAFE_URL = 'javascript:alert(1)';
  * @param {Partial<StringField>} [config] Field options.
  * @returns {Promise<HTMLElement>} Container.
  */
-const renderPreview = async (currentValue, config = {}) => {
-  const { container } = await render(StringPreview, {
-    locale: 'en',
-    keyPath: 'link',
-    typedKeyPath: 'link',
-    fieldConfig: { name: 'link', widget: 'string', ...config },
-    currentValue,
-  });
-
-  return container;
-};
+const renderPreview = async (currentValue, config = {}) =>
+  (
+    await renderFieldPreview(StringPreview, {
+      fieldConfig: { name: 'link', widget: 'string', ...config },
+      currentValue,
+    })
+  ).container;
 
 describe('StringPreview', () => {
   test('shows plain text', async () => {
@@ -41,6 +38,19 @@ describe('StringPreview', () => {
 
     expect(link).toHaveAttribute('href', 'https://example.com/caf%C3%A9');
     expect(link).toHaveTextContent('https://example.com/café');
+  });
+
+  test('doesn’t encode the escape sequences of a link again', async () => {
+    const encodedURL = 'https://example.com/caf%C3%A9?q=a%20b';
+    const link = (await renderPreview(encodedURL)).querySelector('a');
+
+    expect(link).toHaveAttribute('href', encodedURL);
+
+    const email = (await renderPreview('jos%C3%A9@example.com', { type: 'email' })).querySelector(
+      'a',
+    );
+
+    expect(email).toHaveAttribute('href', 'mailto:jos%C3%A9@example.com');
   });
 
   test('shows a URL with an unsafe protocol as text', async () => {

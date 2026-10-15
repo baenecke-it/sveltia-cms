@@ -2,15 +2,19 @@ import { getPathInfo } from '@sveltia/utils/file';
 import equal from 'fast-deep-equal';
 
 import { getAssetsByDirName } from '$lib/services/assets';
+import { formatFileName, isSameFileName } from '$lib/services/assets/file-name';
 import { getAssetKind } from '$lib/services/assets/kinds';
+import { getPendingFileName } from '$lib/services/assets/name';
+import { assertOutsideCmsFolders } from '$lib/services/assets/reserved';
 import { fillTemplate } from '$lib/services/common/template';
 import { getSharedEntryFileName } from '$lib/services/contents/collection/nested';
 import { createEntryPath } from '$lib/services/contents/draft/save/entry-path';
 import { getFillSlugOptions } from '$lib/services/contents/draft/slugs';
+import { getDraftI18nConfig } from '$lib/services/contents/i18n/config';
 import {
   createPath,
   encodeFilePath,
-  formatFileName,
+  getDirName,
   getGitHash,
   resolvePath,
 } from '$lib/services/utils/file';
@@ -19,6 +23,7 @@ import {
  * @import {
  * Asset,
  * AssetFolderInfo,
+ * AssetNameTemplate,
  * EntryDraft,
  * FileChange,
  * FillTemplateOptions,
@@ -284,6 +289,43 @@ export const createPublicURL = (publicPath, fileName) =>
   publicPath ? `${publicPath === '/' ? '' : publicPath}/${fileName}` : fileName;
 
 /**
+ * Get the folder that the assets in the given folder are moved from, when the save takes the entry
+ * to another folder of its own. The assets stored with an entry follow it to its new folder, which
+ * is empty until then, so a file added in the same save has to be named against the assets that
+ * are on their way there as well. Otherwise one of them would take the new file’s name, and the
+ * move would then drop it as replaced, along with what the entry used it for. The move itself is
+ * planned by `buildEntryAssetMoveChanges()` in `asset-move.js`.
+ * @param {object} args Arguments.
+ * @param {EntryDraft} args.draft Entry draft.
+ * @param {InternalLocaleCode} args.locale Locale the file is being added to.
+ * @param {string} args.entryFilePath Path the entry file is saved to in that locale.
+ * @param {string} args.folderPath Folder the file is saved to.
+ * @returns {string | undefined} Folder path, or `undefined` if no asset is moved to the folder.
+ */
+const getVacatedAssetFolderPath = ({ draft, locale, entryFilePath, folderPath }) => {
+  const { collection, isNew, originalEntry } = draft;
+  const previousPath = isNew ? undefined : originalEntry?.locales[locale]?.path;
+
+  if (!previousPath) {
+    return undefined;
+  }
+
+  const oldFolderPath = getOwnedEntryFolderPath(collection, previousPath);
+  const newFolderPath = getOwnedEntryFolderPath(collection, entryFilePath);
+
+  if (
+    !oldFolderPath ||
+    !newFolderPath ||
+    oldFolderPath === newFolderPath ||
+    !(folderPath === newFolderPath || folderPath.startsWith(`${newFolderPath}/`))
+  ) {
+    return undefined;
+  }
+
+  return `${oldFolderPath}${folderPath.slice(newFolderPath.length)}`;
+};
+
+/**
  * Get the information required to save an asset.
  * @param {object} args Arguments.
  * @param {EntryDraft} args.draft Entry draft.
@@ -295,7 +337,9 @@ export const createPublicURL = (publicPath, fileName) =>
  * @param {string} [args.subfolderPath] Subfolder below the folder the file is saved to, picked
  * while browsing the folder in the asset picker.
  * @returns {{ assetFolderPaths: ResolvedAssetFolderPaths, assetNamesInSameFolder: string[],
- * savingAssetProps: SavingAsset }} Arguments.
+ * assetNamesMovingIn: string[], savingAssetProps: SavingAsset }} Arguments.
+ * `assetNamesMovingIn` lists the assets moved to the folder in the same save, which take their
+ * names with them. See {@link getVacatedAssetFolderPath}.
  */
 export const getAssetSavingInfo = ({
   draft,
@@ -319,10 +363,28 @@ export const getAssetSavingInfo = ({
   }
 
   const { resolvedInternalPath } = assetFolderPaths;
+  const _locale = locale ?? getDraftI18nConfig(draft).defaultLocale;
+
+  const vacatedFolderPath = folder.entryRelative
+    ? getVacatedAssetFolderPath({
+        draft,
+        locale: _locale,
+        entryFilePath: createEntryPath({ draft, locale: _locale, slug: slug ?? defaultLocaleSlug }),
+        folderPath: resolvedInternalPath,
+      })
+    : undefined;
+
+  /**
+   * Get the names of the assets stored in the given folder.
+   * @param {string} folderPath Folder path.
+   * @returns {string[]} Normalized asset names.
+   */
+  const getNames = (folderPath) => getAssetsByDirName(folderPath).map((a) => a.name.normalize());
 
   return {
     assetFolderPaths,
-    assetNamesInSameFolder: getAssetsByDirName(resolvedInternalPath).map((a) => a.name.normalize()),
+    assetNamesInSameFolder: getNames(resolvedInternalPath),
+    assetNamesMovingIn: vacatedFolderPath ? getNames(vacatedFolderPath) : [],
     savingAssetProps: { collectionName, folder },
   };
 };
@@ -334,6 +396,7 @@ export const getAssetSavingInfo = ({
  * @param {AssetFolderInfo} args.folder Asset folder associated with the new file.
  * @param {string} [args.subfolderPath] Subfolder below the folder the file is saved to.
  * @param {boolean} args.replace Whether to replace an existing file.
+ * @param {AssetNameTemplate} [args.nameTemplate] Template to name the file with.
  * @param {string} args.blobURL Blob URL of the file.
  * @param {EntryDraft} args.draft Entry draft.
  * @param {InternalLocaleCode} [args.locale] Locale the file is being added to. See
@@ -351,6 +414,7 @@ export const replaceBlobURL = async ({
   folder,
   subfolderPath,
   replace,
+  nameTemplate,
   blobURL,
   draft,
   locale,
@@ -367,16 +431,23 @@ export const replaceBlobURL = async ({
   const {
     savingAssetProps,
     assetNamesInSameFolder,
+    assetNamesMovingIn,
     assetFolderPaths: { resolvedInternalPath, resolvedPublicPath },
   } = getAssetSavingInfo({ draft, locale, slug, defaultLocaleSlug, folder, subfolderPath });
 
+  // Files already being saved to the same folder in this save
+  const savingAssetsInSameFolder = savingAssets.filter(
+    (f) => getDirName(f.path) === resolvedInternalPath,
+  );
+
   // The same file picked for another field or locale is saved once, as long as it goes to the same
-  // place: the same folder, and the same subfolder in it
-  const dupFile = savingAssets.find(
+  // place: the same folder, and the same subfolder in it. A file replacing an existing one must
+  // keep its name, so an identical file saved under another name doesn’t count
+  const dupFile = savingAssetsInSameFolder.find(
     (f) =>
       f.sha === sha &&
       (!folder.entryRelative || equal(f.folder, folder)) &&
-      getPathInfo(f.path).dirname === (resolvedInternalPath || undefined),
+      (!replace || isSameFileName(f.name, file.name)),
   );
 
   let fileName = '';
@@ -385,14 +456,49 @@ export const replaceBlobURL = async ({
   if (dupFile) {
     fileName = dupFile.name;
   } else {
-    fileName = formatFileName(file.name, replace ? {} : { assetNamesInSameFolder });
+    // A different file with the same name, e.g. two images pasted from the clipboard as
+    // `image.png`, may already be headed for this folder in the same save. It’s not in the asset
+    // store yet, so take its name into account too, or one file would overwrite the other. The
+    // code below runs without awaiting anything, so concurrent calls can’t pick the same name
+    const item = { file, folder, replace, nameTemplate };
+    const pendingFileName = getPendingFileName({ draft, item, defaultLocaleSlug });
+    const namesInSave = savingAssetsInSameFolder.map((f) => f.name.normalize());
+    const ownName = replace ? formatFileName(pendingFileName) : undefined;
 
-    const update = replace && assetNamesInSameFolder.includes(fileName);
+    // Only the first of the files with the same name in this save replaces the existing file;
+    // another one gets a name of its own, or it would overwrite the first one
+    const replacing =
+      ownName !== undefined &&
+      !namesInSave.some((name) => name.toLowerCase() === ownName.toLowerCase());
+
+    fileName = replacing
+      ? ownName
+      : formatFileName(pendingFileName, {
+          assetNamesInSameFolder: [
+            ...assetNamesInSameFolder,
+            ...assetNamesMovingIn,
+            ...namesInSave,
+          ],
+        });
+
+    // A replacing file overwrites the existing asset whose name only differs in case, e.g.
+    // `Photo.jpg` and `photo.jpg`, rather than being added next to it, as the two would clash on a
+    // case-insensitive file system
+    const replacedName = replacing
+      ? assetNamesInSameFolder.find((name) => name.toLowerCase() === fileName.toLowerCase())
+      : undefined;
+
+    const update = !!replacedName;
+
+    if (replacedName) {
+      fileName = replacedName;
+    }
+
     const assetPath = resolvedInternalPath ? `${resolvedInternalPath}/${fileName}` : fileName;
 
-    if (!update) {
-      assetNamesInSameFolder.push(fileName);
-    }
+    // A file picked in the editor can go to any subfolder the picker browsed to, but the files in a
+    // folder the CMS itself is served from are read-only, like they are in the Asset Library
+    assertOutsideCmsFolders([assetPath]);
 
     changes.push({
       action: update ? 'update' : 'create',
@@ -417,5 +523,5 @@ export const replaceBlobURL = async ({
     publicURL = encodeFilePath(publicURL);
   }
 
-  content[keyPath] = /** @type {string} */ (content[keyPath]).replaceAll(blobURL, publicURL);
+  content[keyPath] = /** @type {string} */ (content[keyPath]).replaceAll(blobURL, () => publicURL);
 };

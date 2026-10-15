@@ -1,8 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-/**
- * @import { ConfigParserCollectors } from '$lib/types/private';
- */
+import { createCollectors } from '$lib/test/config-parser';
 
 // Mock @sveltia/i18n
 /** @type {Record<string, string>} */
@@ -16,30 +14,10 @@ const mockI18nStrings = {
   'config.error_locator.collection': 'Collection: {collection}',
 };
 
-/**
- * Mock translation function.
- * @param {string} key Message key.
- * @param {object & { values?: Record<string, string> }} [options] Options.
- * @returns {string} Translated string.
- */
-function mockTranslate(key, options) {
-  let message = mockI18nStrings[key] || key;
+vi.mock('@sveltia/i18n', async () =>
+  (await import('$lib/test/i18n')).createI18nMock({ strings: mockI18nStrings, locale: 'en-US' }),
+);
 
-  if (options?.values) {
-    Object.entries(options.values).forEach(([k, v]) => {
-      message = message.replace(`{${k}}`, v);
-    });
-  }
-
-  return message;
-}
-
-vi.mock('@sveltia/i18n', () => ({
-  _: mockTranslate,
-  locale: { current: 'en-US', set: vi.fn() },
-}));
-
-const mockGetStore = vi.fn();
 const mockAddMessage = vi.fn();
 const mockCheckName = vi.fn();
 const mockCheckUnsupportedOptions = vi.fn();
@@ -58,8 +36,10 @@ vi.mock('$lib/services/config/parser/fields', () => ({
 }));
 
 const mockIsFormatMismatch = vi.fn();
+const mockCheckBodyField = vi.fn();
 
 vi.mock('$lib/services/config/parser/collections/format', () => ({
+  checkBodyField: mockCheckBodyField,
   isFormatMismatch: mockIsFormatMismatch,
 }));
 
@@ -75,24 +55,9 @@ vi.mock('$lib/services/config/deprecations', () => ({
   warnDeprecation: mockWarnDeprecation,
 }));
 
-/**
- * Create a fresh collectors object for testing.
- * @returns {ConfigParserCollectors} Collectors instance.
- */
-function createCollectors() {
-  return {
-    errors: new Set(),
-    warnings: new Set(),
-    mediaFields: new Set(),
-    relationFields: new Set(),
-  };
-}
-
 describe('Collections Parser', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-
-    mockGetStore.mockImplementation((store) => store);
 
     mockCheckName.mockReturnValue(true);
   });
@@ -816,6 +781,73 @@ describe('Collections Parser', () => {
       );
     });
 
+    it('should report the bulk_edit fields that are missing or can’t be edited in bulk', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: {
+          name: 'articles',
+          folder: 'content/articles',
+          fields: [
+            { name: 'title', widget: 'string' },
+            { name: 'body', widget: 'markdown' },
+          ],
+          bulk_edit: { fields: ['title', 'body', 'missing'] },
+        },
+      };
+
+      parseEntryCollection(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          strKey: 'unsupported_bulk_edit_field',
+          values: { name: 'body' },
+          context,
+          collectors,
+        }),
+      );
+
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          strKey: 'invalid_bulk_edit_field',
+          values: { name: 'missing' },
+          context,
+          collectors,
+        }),
+      );
+
+      expect(mockAddMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ values: { name: 'title' } }),
+      );
+    });
+
+    it('should skip bulk_edit field validation without a field list', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+
+      parseEntryCollection(
+        /** @type {any} */ ({
+          cmsConfig: {},
+          collection: {
+            name: 'articles',
+            folder: 'content/articles',
+            fields: [{ name: 'body', widget: 'markdown' }],
+            bulk_edit: true,
+          },
+        }),
+        collectors,
+      );
+
+      expect(mockAddMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          strKey: expect.stringMatching(/bulk_edit/),
+        }),
+      );
+    });
+
     it('should validate the fields referenced from the view options', async () => {
       const { parseEntryCollection } = await import('.');
       const collectors = createCollectors();
@@ -927,6 +959,74 @@ describe('Collections Parser', () => {
       expect(secondCall[1].isIndexFile).toBe(true);
     });
 
+    it('should check the body field of the collection and of an index file', async () => {
+      const { parseEntryCollection } = await import('.');
+      const collectors = createCollectors();
+      const fields = [{ name: 'title', widget: 'string' }];
+      const indexFields = [{ name: 'body', widget: 'object', fields }];
+      const bodyField = { key: 'body' };
+
+      /**
+       * Parse a collection with the given index file and get the `checkBodyField()` arguments.
+       * @param {any} indexFile Index file option.
+       * @returns {any[]} Arguments of each call, without the collectors.
+       */
+      const parse = (indexFile) => {
+        mockCheckBodyField.mockClear();
+        parseEntryCollection(
+          {
+            cmsConfig: /** @type {any} */ ({}),
+            collection: /** @type {any} */ ({
+              name: 'posts',
+              folder: 'content/posts',
+              extension: 'html',
+              format: 'yaml-frontmatter',
+              body_field: bodyField,
+              fields,
+              index_file: indexFile,
+            }),
+          },
+          collectors,
+        );
+
+        return mockCheckBodyField.mock.calls.map(
+          ([{ extension, format, bodyField: _bodyField, fields: _fields, context }]) => ({
+            extension,
+            format,
+            bodyField: _bodyField,
+            fields: _fields,
+            isIndexFile: !!context.isIndexFile,
+          }),
+        );
+      };
+
+      const collectionCall = {
+        extension: 'html',
+        format: 'yaml-frontmatter',
+        bodyField,
+        fields,
+        isIndexFile: false,
+      };
+
+      // The index file shares the collection’s fields and format
+      expect(parse(true)).toEqual([collectionCall]);
+      expect(parse({})).toEqual([collectionCall]);
+      // The index file has fields of its own
+      expect(parse({ fields: indexFields })).toEqual([
+        collectionCall,
+        { ...collectionCall, fields: indexFields, isIndexFile: true },
+      ]);
+      // The index file has a format of its own, which replaces the collection’s extension too
+      expect(parse({ format: 'toml-frontmatter' })).toEqual([
+        collectionCall,
+        { ...collectionCall, extension: undefined, format: 'toml-frontmatter', isIndexFile: true },
+      ]);
+      expect(parse({ extension: 'md' })).toEqual([
+        collectionCall,
+        { ...collectionCall, extension: 'md', format: undefined, isIndexFile: true },
+      ]);
+    });
+
     it('should check for unsupported options', async () => {
       const { parseEntryCollection } = await import('.');
       const collectors = createCollectors();
@@ -949,6 +1049,35 @@ describe('Collections Parser', () => {
   });
 
   describe('parseCollection', () => {
+    it('should check the template tags in the collection’s folder options', async () => {
+      const { parseCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: {
+          name: 'posts',
+          folder: 'content/posts',
+          media_folder: '/static/{{slug}}',
+          public_folder: '/{{title}}',
+          fields: [{ name: 'title', widget: 'string' }],
+        },
+      };
+
+      parseCollection(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledWith({
+        strKey: 'unsupported_folder_template_tag',
+        values: { option: 'public_folder', tag: '{{title}}' },
+        context,
+        collectors,
+      });
+      expect(mockAddMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ values: { option: 'media_folder', tag: '{{slug}}' } }),
+      );
+    });
+
     it('should error when collection has no options', async () => {
       const { parseCollection } = await import('.');
       const collectors = createCollectors();
@@ -1054,6 +1183,78 @@ describe('Collections Parser', () => {
       parseCollection(context, collectors);
 
       expect(mockParseFields).toHaveBeenCalled();
+    });
+
+    it('should parse entry collection storing all the entries in one file', async () => {
+      const { parseCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: {
+          name: 'members',
+          label: 'Members',
+          file: 'data/members.json',
+          fields: [{ name: 'title', widget: 'string' }],
+        },
+      };
+
+      parseCollection(context, collectors);
+
+      expect(mockParseFields).toHaveBeenCalled();
+      expect(mockParseCollectionFiles).not.toHaveBeenCalled();
+      expect(mockAddMessage).not.toHaveBeenCalled();
+    });
+
+    it('should validate the `file` option of an entry collection', async () => {
+      const { parseCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: {
+          name: 'members',
+          label: 'Members',
+          file: 'data/members.yaml',
+          fields: [],
+        },
+      };
+
+      parseCollection(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          strKey: 'invalid_collection_data_file',
+          values: { file: 'data/members.yaml' },
+        }),
+      );
+    });
+
+    it('should error when collection has conflicting options (file and folder)', async () => {
+      const { parseCollection } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: {
+          name: 'members',
+          file: 'data/members.json',
+          folder: 'content/members',
+          fields: [],
+        },
+      };
+
+      parseCollection(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          strKey: 'invalid_collection_multiple_options',
+        }),
+      );
+      expect(mockParseFields).not.toHaveBeenCalled();
     });
 
     it('should skip divider collections', async () => {

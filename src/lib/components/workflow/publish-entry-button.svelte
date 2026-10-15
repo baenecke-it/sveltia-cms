@@ -6,14 +6,14 @@
   import { _ } from '@sveltia/i18n';
   import { Alert, Button, ConfirmationDialog, Toast } from '@sveltia/ui';
 
-  import { goBack } from '$lib/services/app/navigation';
   import { getCollection } from '$lib/services/contents/collection';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
-  import { publishingBranches } from '$lib/services/workflow';
+  import { isPublishAllowed, publishingBranches } from '$lib/services/workflow';
   import { getPublishDialogStrings } from '$lib/services/workflow/dialogs';
-  import { openAuthoring } from '$lib/services/workflow/open-authoring';
+  import { closeWorkflowEntryEditor } from '$lib/services/workflow/editor';
   import { publishWorkflowEntry } from '$lib/services/workflow/save';
   import { canPublish } from '$lib/services/workflow/validate';
+  import { getWorkflowErrorMessage } from '$lib/services/workflow/verify';
 
   /**
    * @import { UnpublishedEntry } from '$lib/types/private';
@@ -41,6 +41,8 @@
 
   let showPublishDialog = $state(false);
   let showErrorToast = $state(false);
+  /** Message the error toast shows, which says why publishing has failed if it can. */
+  let errorMessage = $state('');
   let showValidationToast = $state(false);
 
   // Publishing a removal is what deletes the entry, so the control is presented as Delete
@@ -51,14 +53,8 @@
   const publishing = $derived(
     publishingBranches.current.includes(entry.workflow.pullRequest.branch),
   );
-  // The collection’s `publish` option can hide the control, so an editor can move an entry through
-  // the review stages but leave the actual publishing to someone else. An Open Authoring
-  // contributor can’t merge a pull request on the configured repository, so they never see it
-  const visible = $derived(
-    !openAuthoring.current &&
-      (entry.workflow.status === 'pending_publish' || deletion) &&
-      getCollection(entry.workflow.collectionName)?.publish !== false,
-  );
+  // Only a user who can merge the pull request gets the control, once the entry is ready
+  const visible = $derived(isPublishAllowed(entry, getCollection(entry.workflow.collectionName)));
 
   /**
    * Publish the entry by merging the pull request, then go back to the entry list.
@@ -77,19 +73,9 @@
 
     try {
       await publishWorkflowEntry(entry);
-
-      // The merge can take minutes when the Git service waits for a pipeline, and the editor can
-      // have moved on by then: the draft state is shared by the whole page, so the draft open now
-      // may be another entry’s, with unsaved changes. Only this entry’s draft is closed
-      const originalEntry = /** @type {UnpublishedEntry | undefined} */ (
-        entryDraft.current?.originalEntry
-      );
-
-      if (originalEntry?.workflow?.pullRequest.branch === pullRequest.branch) {
-        entryDraft.current = null;
-        goBack(`/collections/${collectionName}`);
-      }
+      closeWorkflowEntryEditor({ entryDraft, branch: pullRequest.branch, collectionName });
     } catch (/** @type {any} */ ex) {
+      errorMessage = getWorkflowErrorMessage(ex, 'workflow.publishing_entry_failed');
       showErrorToast = true;
       // eslint-disable-next-line no-console
       console.error(ex);
@@ -121,7 +107,7 @@
 </ConfirmationDialog>
 
 <Toast bind:show={showErrorToast}>
-  <Alert status="error">{_('workflow.publishing_entry_failed')}</Alert>
+  <Alert status="error">{errorMessage}</Alert>
 </Toast>
 
 <Toast bind:show={showValidationToast}>

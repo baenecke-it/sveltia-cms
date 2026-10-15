@@ -6,12 +6,14 @@
   import { goto } from '$lib/services/app/navigation';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
   import { getBacklinks } from '$lib/services/contents/entry/relations/backlinks';
+  import { encodePathSegments } from '$lib/services/utils/url';
 
   /**
    * @import { EntryBacklink } from '$lib/types/private';
    */
 
   const entryDraft = getEntryDraftContext();
+  const id = $props.id();
 
   /** @type {EntryBacklink[]} */
   const backlinks = $derived.by(() => {
@@ -53,17 +55,20 @@
 
 <PanelContainer title={_('entry_sidebar.backlinks.title')}>
   {#if backlinks.length > 0}
-    {#each groupedEntries as { collectionLabel, items } (collectionLabel)}
-      <section class="collection" role="group">
-        <h4>{collectionLabel}</h4>
+    {#each groupedEntries as { collectionLabel, items }, index (collectionLabel)}
+      <section class="collection" role="group" aria-labelledby="{id}-{index}-label">
+        <h4 id="{id}-{index}-label">{collectionLabel}</h4>
         {#each items as ref (ref.entry.id)}
           <Button
             class="ref"
             variant="ghost"
             onclick={() => {
-              goto(`/collections/${ref.collectionName}/entries/${ref.entry.subPath}`, {
-                transitionType: 'forwards',
-              });
+              goto(
+                encodePathSegments(
+                  `/collections/${ref.collectionName}/entries/${ref.entry.subPath}`,
+                ),
+                { transitionType: 'forwards' },
+              );
             }}
           >
             <span class="summary"><bdi>{ref.summary}</bdi></span>

@@ -1,20 +1,25 @@
 // @ts-nocheck
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { getEntriesByCollection } from '$lib/services/contents/collection/entries';
+import {
+  getEntriesByCollection,
+  getEntriesInCollectionFolder,
+} from '$lib/services/contents/collection/entries';
 import { getSharedEntryFileName } from '$lib/services/contents/collection/nested';
 import { getUnpublishedEntriesByCollection } from '$lib/services/workflow';
 
 import {
   validateSlugs as _validateSlugs,
+  getOtherEntries,
   getSlugValidationMessage,
   getTakenSlugs,
   validateSlug,
 } from './slugs';
 
-vi.mock('@sveltia/i18n', () => ({ _: vi.fn((key) => key) }));
+vi.mock('@sveltia/i18n', async () => (await import('$lib/test/i18n')).createI18nMock());
 vi.mock('$lib/services/contents/collection/entries', () => ({
   getEntriesByCollection: vi.fn(() => []),
+  getEntriesInCollectionFolder: vi.fn(() => []),
 }));
 vi.mock('$lib/services/workflow', () => ({
   getUnpublishedEntriesByCollection: vi.fn(() => []),
@@ -56,6 +61,7 @@ describe('draft/validate/slugs', () => {
     vi.clearAllMocks();
 
     vi.mocked(getEntriesByCollection).mockReturnValue([]);
+    vi.mocked(getEntriesInCollectionFolder).mockReturnValue([]);
     vi.mocked(getUnpublishedEntriesByCollection).mockReturnValue([]);
     vi.mocked(getSharedEntryFileName).mockReturnValue(undefined);
 
@@ -69,6 +75,43 @@ describe('draft/validate/slugs', () => {
       currentSlugs: { en: 'test-post' },
       slugEditor: { en: false },
     };
+  });
+
+  describe('getOtherEntries', () => {
+    it('should include every entry in the collection folder by default', () => {
+      const listed = createEntry('a', { en: 'a' });
+      const unlisted = createEntry('b', { en: 'b' });
+      const unpublished = createEntry('c', { en: 'c' });
+
+      vi.mocked(getEntriesByCollection).mockReturnValue([listed]);
+      vi.mocked(getEntriesInCollectionFolder).mockReturnValue([listed, unlisted]);
+      vi.mocked(getUnpublishedEntriesByCollection).mockReturnValue([unpublished]);
+
+      expect(getOtherEntries(mockEntryDraft)).toEqual([listed, unlisted, unpublished]);
+    });
+
+    it('should include only the entries the collection lists with `inFolder: false`', () => {
+      const listed = createEntry('a', { en: 'a' });
+      const unlisted = createEntry('b', { en: 'b' });
+      const unpublished = createEntry('c', { en: 'c' });
+
+      vi.mocked(getEntriesByCollection).mockReturnValue([listed]);
+      vi.mocked(getEntriesInCollectionFolder).mockReturnValue([listed, unlisted]);
+      vi.mocked(getUnpublishedEntriesByCollection).mockReturnValue([unpublished]);
+
+      expect(getOtherEntries(mockEntryDraft, { inFolder: false })).toEqual([listed, unpublished]);
+      expect(getEntriesByCollection).toHaveBeenCalledWith('posts');
+    });
+
+    it('should leave out the entry being edited', () => {
+      const own = createEntry('a', { en: 'a' });
+      const other = createEntry('b', { en: 'b' });
+
+      vi.mocked(getEntriesByCollection).mockReturnValue([own, other]);
+      mockEntryDraft.originalEntry = own;
+
+      expect(getOtherEntries(mockEntryDraft, { inFolder: false })).toEqual([other]);
+    });
   });
 
   describe('validateSlugs', () => {
@@ -212,7 +255,7 @@ describe('draft/validate/slugs', () => {
 
   describe('getTakenSlugs', () => {
     it('should collect the slugs of the other entries for each locale', () => {
-      vi.mocked(getEntriesByCollection).mockReturnValue([
+      vi.mocked(getEntriesInCollectionFolder).mockReturnValue([
         createEntry('1', { en: 'hello', fr: 'bonjour' }),
       ]);
       vi.mocked(getUnpublishedEntriesByCollection).mockReturnValue([
@@ -224,7 +267,7 @@ describe('draft/validate/slugs', () => {
     });
 
     it('should collect the slugs for the given locales', () => {
-      vi.mocked(getEntriesByCollection).mockReturnValue([
+      vi.mocked(getEntriesInCollectionFolder).mockReturnValue([
         createEntry('1', { en: 'hello', fr: 'bonjour' }),
       ]);
       mockEntryDraft.currentSlugs = {};
@@ -233,7 +276,7 @@ describe('draft/validate/slugs', () => {
     });
 
     it('should collect the slugs in every locale for a locale-agnostic slug', () => {
-      vi.mocked(getEntriesByCollection).mockReturnValue([
+      vi.mocked(getEntriesInCollectionFolder).mockReturnValue([
         createEntry('1', { en: 'hello', fr: 'bonjour' }),
       ]);
       mockEntryDraft.currentSlugs = { _: 'x' };
@@ -244,7 +287,7 @@ describe('draft/validate/slugs', () => {
     it('should leave out every version of the entry being edited and its own slugs', () => {
       const ownEntry = createEntry('own', { en: 'own' });
 
-      vi.mocked(getEntriesByCollection).mockReturnValue([
+      vi.mocked(getEntriesInCollectionFolder).mockReturnValue([
         ownEntry,
         // A published version left behind under the old slug by a renaming draft
         createEntry('old', { en: 'old-slug' }),
@@ -261,6 +304,88 @@ describe('draft/validate/slugs', () => {
       mockEntryDraft.currentSlugs = { en: 'original' };
 
       expect(getTakenSlugs(mockEntryDraft)).toEqual({ en: ['taken'] });
+    });
+  });
+
+  describe('getTakenSlugs with localized slugs', () => {
+    it('should count the entry’s own slug in another locale as taken by another entry', () => {
+      vi.mocked(getEntriesInCollectionFolder).mockReturnValue([
+        createEntry('a', { en: 'chat', fr: 'discussion' }),
+        createEntry('b', { en: 'cat', fr: 'chat' }),
+      ]);
+      mockEntryDraft.isNew = false;
+      mockEntryDraft.originalEntry = createEntry('a', { en: 'chat', fr: 'discussion' });
+      mockEntryDraft.originalSlugs = { en: 'chat', fr: 'discussion' };
+      mockEntryDraft.currentSlugs = { en: 'chat', fr: 'chat' };
+
+      expect(getTakenSlugs(mockEntryDraft)).toEqual({ en: ['cat'], fr: ['chat'] });
+    });
+
+    it('should report a localized slug taken by another entry in that locale', () => {
+      vi.mocked(getEntriesInCollectionFolder).mockReturnValue([
+        createEntry('a', { en: 'chat', fr: 'discussion' }),
+        createEntry('b', { en: 'cat', fr: 'chat' }),
+      ]);
+      mockEntryDraft.isNew = false;
+      mockEntryDraft.collection = { _type: 'entry' };
+      mockEntryDraft.originalEntry = createEntry('a', { en: 'chat', fr: 'discussion' });
+      mockEntryDraft.originalSlugs = { en: 'chat', fr: 'discussion' };
+      mockEntryDraft.currentLocales = { en: true, fr: true };
+      mockEntryDraft.currentSlugs = { en: 'chat', fr: 'chat' };
+      mockEntryDraft.slugEditor = { en: false, fr: false };
+
+      expect(validateSlugs().validities.fr._slug.duplicateError).toBe(true);
+    });
+  });
+
+  describe('getTakenSlugs for a new entry placed with the path editor', () => {
+    beforeEach(() => {
+      vi.mocked(getEntriesInCollectionFolder).mockReturnValue([
+        createEntry('1', { en: 'docs/intro', fr: 'docs/intro' }),
+        createEntry('2', { en: 'setup', fr: 'setup' }),
+        createEntry('3', { en: 'docs/guides/start', fr: 'docs/guides/start' }),
+      ]);
+      mockEntryDraft.collection = {
+        _type: 'entry',
+        nested: { depth: 5, subfolders: false },
+        meta: { path: { widget: 'string' } },
+        _i18n: { defaultLocale: 'en' },
+      };
+      mockEntryDraft.currentSlugs = { en: '', fr: '' };
+    });
+
+    it('should only count the file names of the entries in the chosen folder', () => {
+      mockEntryDraft.currentPath = '/docs/';
+
+      // The folders aren’t localized, so the other locales keep the sub paths
+      expect(getTakenSlugs(mockEntryDraft)).toEqual({
+        en: ['intro'],
+        fr: ['docs/intro', 'setup', 'docs/guides/start'],
+      });
+    });
+
+    it('should count the entries in the collection folder for the root folder', () => {
+      vi.mocked(getEntriesInCollectionFolder).mockReturnValue([
+        createEntry('1', { en: 'docs/intro' }),
+        createEntry('2', { en: 'setup' }),
+      ]);
+      mockEntryDraft.currentPath = '';
+      mockEntryDraft.originalPath = 'docs';
+      mockEntryDraft.currentSlugs = { _: '' };
+
+      expect(getTakenSlugs(mockEntryDraft)).toEqual({ _: ['setup'] });
+    });
+
+    it('should report a slug taken in the chosen folder', () => {
+      mockEntryDraft.collection.slug = { editable: true };
+      mockEntryDraft.currentPath = 'docs';
+      mockEntryDraft.currentSlugs = { en: 'intro' };
+      mockEntryDraft.slugEditor = { en: true };
+
+      expect(validateSlugs().validities.en._slug.duplicateError).toBe(true);
+
+      mockEntryDraft.currentSlugs = { en: 'setup' };
+      expect(validateSlugs().valid).toBe(true);
     });
   });
 
@@ -333,7 +458,7 @@ describe('draft/validate/slugs', () => {
     });
 
     it('should report a slug taken by another entry', () => {
-      vi.mocked(getEntriesByCollection).mockReturnValue([createEntry('1', { en: 'de' })]);
+      vi.mocked(getEntriesInCollectionFolder).mockReturnValue([createEntry('1', { en: 'de' })]);
       mockEntryDraft.collection = { _type: 'entry', slug: { editable: true } };
       mockEntryDraft.currentSlugs = { en: 'de' };
       mockEntryDraft.slugEditor = { en: true };
@@ -353,11 +478,11 @@ describe('draft/validate/slugs', () => {
       mockEntryDraft.slugEditor = { en: true };
 
       expect(validateSlugs().valid).toBe(true);
-      expect(getEntriesByCollection).not.toHaveBeenCalled();
+      expect(getEntriesInCollectionFolder).not.toHaveBeenCalled();
     });
 
     it('should not report a duplicate when the value is only part of the slug', () => {
-      vi.mocked(getEntriesByCollection).mockReturnValue([createEntry('1', { en: 'de' })]);
+      vi.mocked(getEntriesInCollectionFolder).mockReturnValue([createEntry('1', { en: 'de' })]);
       mockEntryDraft.collection = { _type: 'entry', slug: '{{year}}-{{fields._slug}}' };
       mockEntryDraft.currentSlugs = { en: 'de' };
       mockEntryDraft.slugEditor = { en: true };
@@ -378,14 +503,14 @@ describe('draft/validate/slugs', () => {
       mockEntryDraft.currentSlugs = { _: 'hello' };
 
       expect(validateSlugs().valid).toBe(true);
-      expect(getEntriesByCollection).not.toHaveBeenCalled();
+      expect(getEntriesInCollectionFolder).not.toHaveBeenCalled();
     });
 
     it('should validate an edited slug, which is always required', () => {
       mockEntryDraft.currentSlugs = { _: '' };
       expect(validateSlugs().validities._._slug.valueMissing).toBe(true);
 
-      vi.mocked(getEntriesByCollection).mockReturnValue([createEntry('1', { en: 'world' })]);
+      vi.mocked(getEntriesInCollectionFolder).mockReturnValue([createEntry('1', { en: 'world' })]);
       mockEntryDraft.currentSlugs = { _: 'world' };
       expect(validateSlugs().validities._._slug.duplicateError).toBe(true);
 

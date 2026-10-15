@@ -1,6 +1,11 @@
 import { checkForRemoteChanges, MIN_CHECK_GAP } from '$lib/services/backends/refresh';
 import { isDraftModified } from '$lib/services/contents/draft';
-import { deleteBackup, getBackup, getBackupSlug } from '$lib/services/contents/draft/backup';
+import {
+  cancelBackup,
+  deleteBackup,
+  getBackup,
+  getBackupSlug,
+} from '$lib/services/contents/draft/backup';
 import { createDraft } from '$lib/services/contents/draft/create';
 import { compareWithStore } from '$lib/services/contents/draft/save/conflict';
 import { isWorkflowDraft } from '$lib/services/workflow';
@@ -24,6 +29,8 @@ export const reloadDraft = async ({ entryDraft, entry }) => {
   const draft = /** @type {EntryDraft} */ (entryDraft.current);
   const { collectionName, collection, collectionFile, expanderStates } = draft;
 
+  // A backup scheduled for the edits being dropped would otherwise bring them back
+  cancelBackup();
   await deleteBackup(collectionName, getBackupSlug(draft));
 
   return createDraft({
@@ -35,6 +42,15 @@ export const reloadDraft = async ({ entryDraft, entry }) => {
     expanderStates,
   });
 };
+
+/**
+ * Check if the given draft is still the one in the editor, and the user hasn’t touched it yet.
+ * @param {EntryDraftState} entryDraft Entry draft state of the editor.
+ * @param {EntryDraft} draft Draft opened in the editor.
+ * @returns {boolean} Result.
+ */
+const isDraftUntouched = (entryDraft, draft) =>
+  entryDraft.current === draft && !draft.interacted && !isDraftModified(draft);
 
 /**
  * Bring a draft that has just been opened for an existing entry up to date with the repository, so
@@ -49,7 +65,9 @@ export const reloadDraft = async ({ entryDraft, entry }) => {
 export const refreshOpenedDraft = async (entryDraft) => {
   const draft = entryDraft.current;
 
-  // A new entry has nothing to compare; a workflow draft is saved to its own branch
+  // A new entry has nothing to compare. A workflow draft isn’t refreshed here either: this check
+  // watches the configured branch, while the draft lives on a branch of its own. That branch is
+  // compared with the draft when it’s saved, by {@link detectWorkflowConflict}
   if (!draft || draft.isNew || !draft.originalEntry || isWorkflowDraft(draft)) {
     return;
   }
@@ -63,13 +81,16 @@ export const refreshOpenedDraft = async (entryDraft) => {
     return;
   }
 
-  if (entryDraft.current !== draft || draft.interacted || isDraftModified(draft)) {
+  if (!isDraftUntouched(entryDraft, draft)) {
     return;
   }
 
   const conflict = compareWithStore(draft.originalEntry);
 
-  if (conflict?.type !== 'modified') {
+  // An entry stored in a file with the other entries of the collection is told by its position, and
+  // the item at the position may now be another entry that has moved there, which would silently
+  // take the place of the entry being viewed
+  if (conflict?.type !== 'modified' || !conflict.canOverwrite) {
     return;
   }
 
@@ -79,6 +100,11 @@ export const refreshOpenedDraft = async (entryDraft) => {
   // its own time, so the dialog can’t be relied upon to be showing yet. Restoring it into a draft
   // that has just been replaced would lose the restored edits, so the draft is left alone
   if (await getBackup(collectionName, getBackupSlug(draft))) {
+    return;
+  }
+
+  // The user may have started on the draft, or moved on, while the backup was being looked up
+  if (!isDraftUntouched(entryDraft, draft)) {
     return;
   }
 

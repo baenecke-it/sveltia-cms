@@ -2,6 +2,7 @@
 
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
+import { lockedBranch } from '$lib/services/backends/branch-access';
 import {
   buildTargetChanges,
   compactList,
@@ -26,7 +27,15 @@ vi.mock('$lib/services/contents/entry/changes', () => ({
     { action: 'update', slug: entry.slug, path: `content/posts/${entry.slug}.md`, data: '' },
   ]),
   createSyntheticDraft: vi.fn((args) => ({ synthetic: true, ...args })),
+}));
+
+vi.mock('$lib/services/contents/draft/save/file-changes', async (importOriginal) => ({
+  .../** @type {Record<string, any>} */ (await importOriginal()),
   resolveCacheDB: vi.fn(() => undefined),
+}));
+
+vi.mock('$lib/services/contents/entry/readonly', () => ({
+  isEntryReadonly: vi.fn(() => false),
 }));
 
 vi.mock('$lib/services/contents/entry/summary', () => ({
@@ -41,9 +50,10 @@ const { validateAnyField } = await import('$lib/services/contents/draft/validate
 const { getFieldValidationMessages } =
   await import('$lib/services/contents/draft/validate/messages');
 
-const { buildEntryUpdateChanges, createSyntheticDraft, resolveCacheDB } =
+const { buildEntryUpdateChanges, createSyntheticDraft } =
   await import('$lib/services/contents/entry/changes');
 
+const { resolveCacheDB } = await import('$lib/services/contents/draft/save/file-changes');
 const postsCollection = { name: 'posts', label: 'Blog Posts', _type: 'entry' };
 
 /**
@@ -179,6 +189,48 @@ describe('getFieldBlockers()', () => {
       },
     ]);
     expect(getFieldValidationMessages).toHaveBeenCalledWith({ validity, fieldConfig });
+  });
+
+  test('describes every field of a read-only entry, valid or not', () => {
+    const blockers = getFieldBlockers({
+      ...baseArgs,
+      collection: postsCollection,
+      collectionFile: { name: 'about', readonly: true },
+    });
+
+    expect(blockers).toEqual([
+      expect.objectContaining({ keyPath: 'tag', messages: ['readonly_reference'] }),
+    ]);
+    expect(validateAnyField).not.toHaveBeenCalled();
+
+    expect(
+      getFieldBlockers({ ...baseArgs, collection: { ...postsCollection, readonly: true } }),
+    ).toEqual([expect.objectContaining({ keyPath: 'tag', messages: ['readonly_reference'] })]);
+  });
+
+  test('describes every field of an entry locked by another collection it belongs to', async () => {
+    const { isEntryReadonly } = await import('$lib/services/contents/entry/readonly');
+
+    vi.mocked(isEntryReadonly).mockReturnValueOnce(true);
+
+    expect(getFieldBlockers(baseArgs)).toEqual([
+      expect.objectContaining({ keyPath: 'tag', messages: ['readonly_reference'] }),
+    ]);
+    expect(isEntryReadonly).toHaveBeenCalledWith(entry);
+    expect(validateAnyField).not.toHaveBeenCalled();
+  });
+
+  test('ignores a branch the user can’t push to', () => {
+    lockedBranch.current = 'main';
+
+    try {
+      // Only a deletion made through Editorial Workflow gets this far, and it commits the rewrite
+      // to its own branch
+      expect(getFieldBlockers(baseArgs)).toEqual([]);
+      expect(validateAnyField).toHaveBeenCalled();
+    } finally {
+      lockedBranch.current = undefined;
+    }
   });
 
   test('falls back to the collection and field names', () => {

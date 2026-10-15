@@ -12,7 +12,11 @@ vi.mock('$lib/services/assets/subfolders', () => ({
   focusedSubfolder: { current: undefined },
 }));
 
-vi.mock('$lib/services/assets', () => ({
+vi.mock('$lib/services/assets/folders', () => ({
+  allAssetFolders: { current: [] },
+}));
+
+vi.mock('$lib/services/assets/state', () => ({
   publishedAssets: { current: [] },
 }));
 
@@ -79,8 +83,13 @@ describe('assets/data/subfolder', () => {
     vi.clearAllMocks();
 
     const { gitConfigFiles } = await import('$lib/services/backends/git/shared/config');
-    const { publishedAssets } = await import('$lib/services/assets');
+    const { publishedAssets } = await import('$lib/services/assets/state');
+    const { allAssetFolders } = await import('$lib/services/assets/folders');
 
+    /** @type {any} */ (allAssetFolders).current = [
+      { internalPath: undefined },
+      { internalPath: 'static/images' },
+    ];
     gitConfigFiles.current = [
       { type: 'config', path: '.gitattributes', name: '.gitattributes', sha: 'a', size: 10 },
     ];
@@ -92,6 +101,26 @@ describe('assets/data/subfolder', () => {
       expect(getSubfolderAssets('static/images/2024')).toEqual([assets[1], assets[2]]);
       expect(getSubfolderAssets('static/images/2024/summer')).toEqual([assets[2]]);
       expect(getSubfolderAssets('static/images/2025')).toEqual([]);
+    });
+
+    it('should leave out the assets of another asset folder nested in the folder', async () => {
+      const { publishedAssets } = await import('$lib/services/assets/state');
+      const { allAssetFolders } = await import('$lib/services/assets/folders');
+      const banner = { path: 'static/images/blog/banner.png', name: 'banner.png', sha: 'n' };
+      const cover = { path: 'static/images/blog/covers/a.png', name: 'a.png', sha: 'c' };
+      const logo = { path: 'static/images/blog/logo/b.png', name: 'b.png', sha: 'l' };
+
+      // A collection’s `media_folder` set to `/static/images/blog/covers`, and another collection’s
+      // folder whose name only starts with that of a subfolder
+      /** @type {any} */ (allAssetFolders).current = [
+        { internalPath: 'static/images' },
+        { internalPath: 'static/images/blog/covers', collectionName: 'posts' },
+        { internalPath: 'static/images/blog/log', collectionName: 'logs' },
+      ];
+      /** @type {any} */ (publishedAssets).current = [banner, cover, logo];
+
+      expect(getSubfolderAssets('static/images/blog')).toEqual([banner, logo]);
+      expect(getSubfolderAssets('static/images/blog/covers')).toEqual([]);
     });
   });
 
@@ -138,6 +167,40 @@ describe('assets/data/subfolder', () => {
         'static/images/2024-old/.gitkeep',
       ]);
       expect(assetUpdatesToast.current).toMatchObject({ folderRenamed: true });
+    });
+
+    it('should leave the files of a nested asset folder where they are', async () => {
+      const { moveAssets } = await import('$lib/services/assets/data/move');
+      const { gitConfigFiles } = await import('$lib/services/backends/git/shared/config');
+      const { publishedAssets } = await import('$lib/services/assets/state');
+      const { allAssetFolders } = await import('$lib/services/assets/folders');
+      const banner = { path: 'static/images/blog/banner.png', name: 'banner.png', sha: 'n' };
+      const cover = { path: 'static/images/blog/covers/a.png', name: 'a.png', sha: 'c' };
+
+      const coverKeep = {
+        type: 'config',
+        path: 'static/images/blog/covers/.gitkeep',
+        name: '.gitkeep',
+        sha: 'k',
+        size: 0,
+      };
+
+      /** @type {any} */ (allAssetFolders).current = [
+        { internalPath: 'static/images' },
+        { internalPath: 'static/images/blog/covers', collectionName: 'posts' },
+      ];
+      /** @type {any} */ (publishedAssets).current = [banner, cover];
+      gitConfigFiles.current = [/** @type {any} */ (coverKeep)];
+      vi.mocked(moveAssets).mockResolvedValue(undefined);
+
+      await renameSubfolder({ dirPath: 'static/images/blog', newDirPath: 'static/images/news' });
+
+      expect(moveAssets).toHaveBeenCalledWith(
+        'move',
+        [{ asset: banner, path: 'static/images/news/banner.png' }],
+        { extraChanges: [], notify: false },
+      );
+      expect(gitConfigFiles.current).toEqual([coverKeep]);
     });
 
     it('should keep the sidebar on the folder under its new name', async () => {
@@ -245,6 +308,15 @@ describe('assets/data/subfolder', () => {
       await expect(deleteSubfolder('static/images/2024')).rejects.toThrow('offline');
       expect(gitConfigFiles.current).toBe(configFiles);
     });
+  });
+
+  it('should refuse to create a folder below one the CMS is served from', async () => {
+    const { saveChanges } = await import('$lib/services/backends/save');
+
+    await expect(createSubfolder('static/admin/js')).rejects.toThrow(
+      'Cannot change a file in a folder the CMS is served from',
+    );
+    expect(saveChanges).not.toHaveBeenCalled();
   });
 
   it('should commit a .gitkeep file to the new folder', async () => {

@@ -1,7 +1,8 @@
 import { describe, expect, test, vi } from 'vitest';
 import { page, userEvent } from 'vitest/browser';
 
-import { createMockDraft, renderWithDraft } from '$lib/test/draft';
+import { createMockDraft } from '$lib/test/draft';
+import { renderFieldEditor } from '$lib/test/field.svelte';
 
 import ListEditorSimple from './list-editor-simple.svelte';
 
@@ -33,18 +34,14 @@ const renderEditor = async (value, { config = {}, readonly = false } = {}) => {
     values: { _default: Object.fromEntries(value.map((item, index) => [`tags.${index}`, item])) },
   });
 
-  const props = $state({
-    locale: '_default',
-    keyPath: 'tags',
-    typedKeyPath: 'tags',
-    fieldId: 'tags',
-    fieldLabel: 'Tags',
+  const { props, container } = await renderFieldEditor(ListEditorSimple, {
     fieldConfig,
+    fieldLabel: 'Tags',
+    locale: '_default',
     currentValue: value,
-    readonly,
+    props: { readonly },
+    draft,
   });
-
-  const { container } = await renderWithDraft(ListEditorSimple, { draft, props });
 
   return { draft, props, container };
 };
@@ -90,6 +87,15 @@ describe('ListEditorSimple', () => {
     await expect.element(page.getByRole('textbox')).toHaveAttribute('aria-required', 'true');
   });
 
+  test('leaves the stored value alone until the items are edited', async () => {
+    const { draft } = await renderEditor(['a', 'b']);
+
+    expect(getInputValues()).toEqual(['a', 'b']);
+    // Rewriting the value would add the list placeholder, which the loaded content doesn’t have,
+    // so opening the entry would count as a change
+    expect(draft.currentValues._default).toEqual({ 'tags.0': 'a', 'tags.1': 'b' });
+  });
+
   test('stores the edited items, skipping blank ones', async () => {
     const { draft } = await renderEditor(['a', 'b']);
 
@@ -116,12 +122,26 @@ describe('ListEditorSimple', () => {
   test('does not add an item beyond the maximum', async () => {
     await renderEditor(['a', 'b'], { config: { max: 2 } });
 
-    await expect
-      .element(page.getByRole('button', { name: /Add\W+tags/ }))
-      .toHaveAttribute('aria-disabled', 'true');
+    await expect.element(page.getByRole('textbox').nth(1)).toBeVisible();
+    expect(page.getByRole('button', { name: /Add\W+tags/ }).elements()).toHaveLength(0);
     await page.getByRole('textbox').nth(0).element().focus();
     await userEvent.keyboard('{Enter}');
     expect(getInputValues()).toEqual(['a', 'b']);
+  });
+
+  test('shows a list limited to one item as a single input', async () => {
+    await renderEditor(['a'], { config: { max: 1 } });
+
+    await expect.element(page.getByRole('textbox')).toHaveValue('a');
+    // Neither reordering nor removing can do anything with the one row, and there’s no room to add
+    expect(page.getByRole('button').elements()).toHaveLength(0);
+  });
+
+  test('shows the item controls for more items than a limit of one', async () => {
+    await renderEditor(['a', 'b'], { config: { max: 1 } });
+
+    await expect.element(page.getByRole('textbox').nth(1)).toHaveValue('b');
+    expect(page.getByRole('button', { name: 'Remove' }).elements()).toHaveLength(2);
   });
 
   test('removes an item', async () => {
@@ -132,6 +152,68 @@ describe('ListEditorSimple', () => {
     await expect.poll(getInputValues).toEqual(['a', 'c']);
     await expect.poll(() => getStoredItems(draft)).toEqual(['a', 'c']);
     await expect.element(page.getByRole('textbox').nth(1)).toHaveFocus();
+  });
+
+  test('keeps the focus in a row while typing', async () => {
+    const { draft } = await renderEditor(['a', 'b']);
+    const input = page.getByRole('textbox').nth(1);
+
+    await page.getByRole('button', { name: /Add\W+tags/ }).click();
+    await expect.element(page.getByRole('textbox').nth(2)).toHaveFocus();
+
+    const blankInput = page.getByRole('textbox').nth(2).element();
+
+    // The leading space leaves the row blank, so it isn’t stored until the letter is typed
+    await userEvent.keyboard(' c');
+    await expect.poll(() => getStoredItems(draft)).toEqual(['a', 'b', 'c']);
+    expect(page.getByRole('textbox').nth(2).element()).toBe(blankInput);
+    await expect.element(page.getByRole('textbox').nth(2)).toHaveFocus();
+
+    const element = input.element();
+
+    await input.click();
+    await userEvent.keyboard('xyz');
+    await expect.poll(() => getStoredItems(draft)).toEqual(['a', 'bxyz', 'c']);
+    expect(input.element()).toBe(element);
+    await expect.element(input).toHaveFocus();
+  });
+
+  test('keeps each row with its item as the items are reordered or removed', async () => {
+    await renderEditor(['a', 'b', 'c']);
+    await expect.poll(getInputValues).toEqual(['a', 'b', 'c']);
+
+    const [a, b, c] = page.getByRole('textbox').elements();
+
+    await page.getByRole('button', { name: 'Reorder Item' }).nth(2).element().focus();
+    await userEvent.keyboard('{Home}');
+    await expect.poll(getInputValues).toEqual(['c', 'a', 'b']);
+    expect(page.getByRole('textbox').elements()).toEqual([c, a, b]);
+
+    await page.getByRole('button', { name: 'Remove' }).nth(1).click();
+    await expect.poll(getInputValues).toEqual(['c', 'b']);
+    expect(page.getByRole('textbox').elements()).toEqual([c, b]);
+
+    // A new item gets a row of its own rather than taking over the removed one
+    await page.getByRole('button', { name: /Add\W+tags/ }).click();
+    await expect.poll(getInputValues).toEqual(['c', 'b', '']);
+    expect([a, b, c]).not.toContain(page.getByRole('textbox').nth(2).element());
+  });
+
+  test('renders the rows afresh for an external change to the value', async () => {
+    const { props } = await renderEditor(['a', 'b']);
+
+    await expect.poll(getInputValues).toEqual(['a', 'b']);
+
+    const [a, b] = page.getByRole('textbox').elements();
+
+    props.currentValue = ['a', 'x'];
+
+    await expect.poll(getInputValues).toEqual(['a', 'x']);
+
+    const [first, second] = page.getByRole('textbox').elements();
+
+    expect(first).not.toBe(a);
+    expect(second).not.toBe(b);
   });
 
   test('reorders an item with the keyboard', async () => {
@@ -208,5 +290,17 @@ describe('ListEditorSimple', () => {
 
     expect(page.getByRole('button').elements()).toHaveLength(0);
     await expect.element(page.getByRole('textbox').nth(0)).toHaveAttribute('aria-readonly', 'true');
+  });
+
+  test('does not add an item with the Enter key when read-only', async () => {
+    const { draft } = await renderEditor(['a', 'b'], { readonly: true });
+
+    await page.getByRole('textbox').nth(0).element().focus();
+    await userEvent.keyboard('{Enter}');
+    await new Promise((resolve) => {
+      setTimeout(resolve, 100);
+    });
+    expect(getInputValues()).toEqual(['a', 'b']);
+    expect(getStoredItems(draft)).toEqual(['a', 'b']);
   });
 });

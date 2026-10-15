@@ -1,17 +1,19 @@
 import { unique } from '@sveltia/utils/array';
 
+import { isReadonly } from '$lib/services/config/readonly';
 import { getCollection } from '$lib/services/contents/collection';
-import {
-  countCollectionEntries,
-  getEntriesByCollection,
-} from '$lib/services/contents/collection/entries';
+import { getEntriesByCollection } from '$lib/services/contents/collection/entries';
+import { countQuotaEntries } from '$lib/services/contents/collection/entries/count';
 import { getReferencedPendingEntries } from '$lib/services/contents/draft/pending-entries';
-import { createSavingEntryData } from '$lib/services/contents/draft/save/changes';
+import {
+  createSavingEntryData,
+  removeDisabledLocales,
+} from '$lib/services/contents/draft/save/changes';
 import { assignManualSortOrder } from '$lib/services/contents/draft/save/sort-order';
 import { getCanonicalSlug, getFillSlugOptions, getSlugs } from '$lib/services/contents/draft/slugs';
-import { updateListField } from '$lib/services/contents/draft/update/list';
-import { forEachTargetLocale } from '$lib/services/contents/draft/update/locale';
-import { getEntryOptions } from '$lib/services/contents/fields/relation/helpers';
+import { updateListFieldForLocales } from '$lib/services/contents/draft/update/list';
+import { assignAutoIncrementValues } from '$lib/services/contents/fields/number/auto-increment';
+import { getEntryOptions, getRefEntries } from '$lib/services/contents/fields/relation/helpers';
 import { renameIfNeeded } from '$lib/services/utils/file';
 import { isWorkflowDraft, isWorkflowEnabled } from '$lib/services/workflow';
 
@@ -41,7 +43,8 @@ const getPendingEntriesByCollection = (draft, collectionName) =>
  * Get the collection a Relation field can have a new entry created in, so the entry can be
  * referenced right away. That’s the referenced collection, provided it holds entries that can be
  * created: a file/singleton collection has a fixed set of files, and a reference to one of them
- * points at a list item within the file, so there is nothing to create there.
+ * points at a list item within the file, so there is nothing to create there. Nor can anything be
+ * created in a read-only collection.
  *
  * Nothing is offered while the entry being edited is saved through Editorial Workflow: the new
  * entry would go into the pull request along with it, but a pull request stands for a single entry
@@ -68,6 +71,7 @@ export const getCreatableCollection = ({
   if (
     collection?._type !== 'entry' ||
     collection.create === false ||
+    isReadonly({ collection }) ||
     isWorkflowEnabled(collection)
   ) {
     return undefined;
@@ -87,13 +91,10 @@ export const getCreatableCollection = ({
 export const hasCreationRoom = ({ collection, draft }) => {
   const { name, limit = Infinity } = collection;
 
-  // The collection’s index file is its own page rather than one of the entries in it, so it doesn’t
-  // take up a slot — see `countCollectionEntries()`
-  return (
-    countCollectionEntries(name, getEntriesByCollection(name)) +
-      getPendingEntriesByCollection(draft, name).length <
-    limit
-  );
+  // The entries only existing in a pull request take up a slot as well, while the collection’s
+  // index file, its own page rather than one of the entries in it, doesn’t — see
+  // `countQuotaEntries()`
+  return countQuotaEntries(name) + getPendingEntriesByCollection(draft, name).length < limit;
 };
 
 /**
@@ -124,6 +125,22 @@ export const getPendingRefEntries = ({
 };
 
 /**
+ * Get the entries the given Relation field refers to, followed by the pending entries of the draft
+ * it can refer to: the entries created from the field, or another one referring to the same
+ * collection, are offered and shown along with the saved ones until they’re saved too.
+ * @param {object} args Arguments.
+ * @param {EntryDraft | null | undefined} args.draft Draft being edited.
+ * @param {RelationField} args.fieldConfig Field configuration.
+ * @returns {Entry[]} Entries.
+ */
+export const getRefEntriesWithPending = ({ draft, fieldConfig }) => {
+  const refEntries = getRefEntries(fieldConfig);
+  const pendingEntries = getPendingRefEntries({ draft, fieldConfig, refEntries });
+
+  return pendingEntries.length ? [...refEntries, ...pendingEntries] : refEntries;
+};
+
+/**
  * Determine the slugs of an entry to be added to the draft. The slug is made unique among the
  * entries in the collection, but the entries pending on the draft aren’t there yet, so a second
  * entry added with the same title would get the same slug — and overwrite the first one on save.
@@ -135,18 +152,24 @@ export const getPendingRefEntries = ({
  * @returns {EntrySlugVariants} Slugs.
  */
 export const getPendingEntrySlugs = ({ draft, parentDraft }) => {
-  const slugs = getSlugs({ draft });
+  // A numbered slug comes after the ones the entries pending on the parent draft have taken
+  const slugs = getSlugs({ draft, pendingEntries: parentDraft.pendingEntries });
   const { defaultLocaleSlug, localizedSlugs } = slugs;
 
   const pendingSlugs = getPendingEntriesByCollection(parentDraft, draft.collectionName).map(
     ({ entry }) => entry.slug,
   );
 
-  const renamedSlug = renameIfNeeded(defaultLocaleSlug, pendingSlugs);
-
-  if (renamedSlug === defaultLocaleSlug) {
+  if (renameIfNeeded(defaultLocaleSlug, pendingSlugs) === defaultLocaleSlug) {
     return slugs;
   }
+
+  // The new slug has to be free among the saved entries as well, which the slug above was made
+  // unique against, but a renamed one wasn’t
+  const renamedSlug = renameIfNeeded(defaultLocaleSlug, [
+    ...pendingSlugs,
+    ...getEntriesByCollection(draft.collectionName).map(({ slug }) => slug),
+  ]);
 
   const renamedLocalizedSlugs = localizedSlugs
     ? { ...localizedSlugs, [draft.defaultLocale]: renamedSlug }
@@ -178,12 +201,18 @@ export const getPendingEntrySlugs = ({ draft, parentDraft }) => {
  */
 export const createPendingEntry = async ({ draft, parentDraft, fieldConfig }) => {
   const { collectionName } = draft;
+  // Each entry added takes the next order and number, the same way an entry saved on its own would
+  const pendingEntryCount = getPendingEntriesByCollection(parentDraft, collectionName).length;
 
-  // Each entry added takes the next order, the same way an entry saved on its own would
-  assignManualSortOrder(draft, getPendingEntriesByCollection(parentDraft, collectionName).length);
+  assignManualSortOrder(draft, pendingEntryCount);
+  assignAutoIncrementValues(draft, pendingEntryCount);
 
   const slugs = getPendingEntrySlugs({ draft, parentDraft });
-  const { savingEntry, changes, savingAssets } = await createSavingEntryData({ draft, slugs });
+  // The `preSave` event hooks are called when the entry is actually saved, along with the parent
+  const prepared = await createSavingEntryData({ draft, slugs, runPreSave: false });
+  const { changes, savingAssets } = prepared;
+  // The locales turned off have no file to save, so they’re left out of the entry the stores get
+  const savingEntry = removeDisabledLocales(prepared.savingEntry);
   // The value can be localized, e.g. `{{locale}}/{{slug}}`, so collect it for every locale the
   // parent entry has
   const { pendingEntries } = parentDraft;
@@ -266,7 +295,13 @@ export const selectPendingEntry = ({
     }
   };
 
-  forEachTargetLocale({ valueStore: draft[valueStoreKey], locale, i18n }, (_valueMap, _locale) => {
-    updateListField({ draft, locale: _locale, valueStoreKey, keyPath, manipulate });
+  updateListFieldForLocales({
+    draft,
+    locale,
+    i18n,
+    fieldConfig,
+    valueStoreKey,
+    keyPath,
+    manipulate,
   });
 };

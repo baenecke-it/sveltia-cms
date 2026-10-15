@@ -9,6 +9,7 @@
   import { goto, openProductionSite } from '$lib/services/app/navigation';
   import { canShowMobileSignInDialog, showMobileSignInDialog } from '$lib/services/app/onboarding';
   import { backend, backendName } from '$lib/services/backends';
+  import { isDemoSite } from '$lib/services/backends/fs/seed';
   import { cmsConfig } from '$lib/services/config';
   import { user } from '$lib/services/user/account.svelte';
   import { signOut } from '$lib/services/user/auth.svelte';
@@ -32,6 +33,7 @@
 
   const isLocalRepo = $derived(backendName.current === 'local');
   const isTestRepo = $derived(backendName.current === 'test-repo');
+  const isDemo = $derived(isDemoSite(backendName.current));
 
   /** @type {{url: string, label: string, auth: boolean}[]} */
   const additionalLinks = cmsConfig?.current?.links ?? [];
@@ -41,9 +43,11 @@
   <MenuItem
     label={isLocalRepo
       ? _('working_with_local_repo')
-      : isTestRepo
-        ? _('working_with_test_repo')
-        : _('signed_in_as_x', { values: { name: user.account?.login } })}
+      : isDemo
+        ? _('working_in_demo_mode')
+        : isTestRepo
+          ? _('working_with_test_repo')
+          : _('signed_in_as_x', { values: { name: user.account?.login } })}
     disabled={isLocalRepo || isTestRepo}
     onclick={() => {
       openNewTab(user.account?.profileURL);

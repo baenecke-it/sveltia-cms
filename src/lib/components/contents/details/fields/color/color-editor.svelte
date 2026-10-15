@@ -3,15 +3,14 @@
   Implement the editor for a Color field.
   @see https://decapcms.org/docs/widgets/#color
   @see https://sveltiacms.app/en/docs/fields/color
-  @todo Replace the native `<input>` with a custom component.
 -->
 <script>
   import { _ } from '@sveltia/i18n';
-  import { Button, Slider, TextInput } from '@sveltia/ui';
+  import { Button, ColorInput, Slider, TextInput } from '@sveltia/ui';
 
   import {
+    getColorFieldInputValues,
     getColorFieldValue,
-    parseColorFieldValue,
   } from '$lib/services/contents/fields/color/helpers';
   import { watch } from '$lib/services/utils/state.svelte';
 
@@ -46,29 +45,46 @@
   const id = $props.id();
 
   /**
+   * Values of the controls right after they were last synced with {@link currentValue}. The value
+   * is only written back once the user has changed a control from these, so a stored color the
+   * controls can’t represent, like `#fff` or `red`, isn’t replaced as soon as the editor is opened.
+   */
+  let syncedInputValues = { rgb: '', alpha: 255 };
+
+  /**
    * Update {@link inputValue} and {@link inputAlphaValue} based on {@link currentValue}.
    */
   const setInputValue = () => {
-    const parts = parseColorFieldValue(currentValue);
+    const parts = getColorFieldInputValues({
+      currentValue,
+      rgb: inputValue,
+      alpha: inputAlphaValue,
+      enableAlpha,
+    });
 
-    if (!parts) {
-      return;
+    if (parts) {
+      // Avoid a cycle dependency & infinite loop
+      if (inputValue !== parts.rgb) {
+        inputValue = parts.rgb;
+      }
+
+      if (enableAlpha && inputAlphaValue !== parts.alpha) {
+        inputAlphaValue = parts.alpha;
+      }
     }
 
-    // Avoid a cycle dependency & infinite loop
-    if (inputValue !== parts.rgb) {
-      inputValue = parts.rgb;
-    }
-
-    if (enableAlpha && inputAlphaValue !== parts.alpha) {
-      inputAlphaValue = parts.alpha;
-    }
+    syncedInputValues = { rgb: inputValue, alpha: inputAlphaValue };
   };
 
   /**
-   * Update {@link currentValue} based on {@link inputValue} and {@link inputAlphaValue}.
+   * Update {@link currentValue} based on {@link inputValue} and {@link inputAlphaValue}, if the
+   * user has changed either of them.
    */
   const setCurrentValue = () => {
+    if (inputValue === syncedInputValues.rgb && inputAlphaValue === syncedInputValues.alpha) {
+      return;
+    }
+
     const newValue = getColorFieldValue({ rgb: inputValue, alpha: inputAlphaValue, enableAlpha });
 
     // Avoid a cycle dependency & infinite loop
@@ -93,14 +109,12 @@
 </script>
 
 <div role="none">
-  <input
+  <ColorInput
     id="{id}-picker"
-    type="color"
     bind:value={inputValue}
     {readonly}
-    aria-invalid={invalid}
-    aria-readonly={readonly}
-    aria-required={required}
+    {required}
+    {invalid}
     aria-labelledby="{fieldId}-label"
     aria-errormessage="{fieldId}-error"
   />
@@ -124,6 +138,7 @@
           min={0}
           max={255}
           disabled={!inputValue}
+          {readonly}
           bind:value={inputAlphaValue}
           sliderLabel={_('opacity')}
         />
@@ -167,9 +182,5 @@
         }
       }
     }
-  }
-
-  input {
-    font-family: var(--sui-textbox-font-family);
   }
 </style>

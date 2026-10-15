@@ -477,13 +477,20 @@ entry_not_found: Entrada não encontrada.
 # Entry creation restrictions: tooltip and advisory messages
 creating_entries_disabled_by_admin: A criação de novas entradas nesta coleção foi desativada pelo administrador.
 # {$quota} is the collection’s maximum entry count
-creating_entries_disabled_by_quota: Você não pode adicionar novas entradas a esta coleção porque ela atingiu o limite de {$quota} entradas.
+creating_entries_disabled_by_quota: |
+  .input {$quota :integer}
+  .match $quota
+    one {{ Você não pode adicionar novas entradas a esta coleção porque ela atingiu o limite de {$quota} entrada. }}
+    *   {{ Você não pode adicionar novas entradas a esta coleção porque ela atingiu o limite de {$quota} entradas. }}
 # {$quota} is the collection limit and {$remaining} is the number of entries that can still be created
 creating_entries_nearing_quota: |
+  .input {$quota :integer}
   .input {$remaining :integer}
-  .match $remaining
-    one {{ Esta coleção está próxima do limite de {$quota} entradas. Você só pode criar mais {$remaining} entrada. }}
-    *   {{ Esta coleção está próxima do limite de {$quota} entradas. Você só pode criar mais {$remaining} entradas. }}
+  .match $quota $remaining
+    one one {{ Esta coleção está próxima do limite de {$quota} entrada. Você só pode criar mais {$remaining} entrada. }}
+    one *   {{ Esta coleção está próxima do limite de {$quota} entrada. Você só pode criar mais {$remaining} entradas. }}
+    *   one {{ Esta coleção está próxima do limite de {$quota} entradas. Você só pode criar mais {$remaining} entrada. }}
+    *   *   {{ Esta coleção está próxima do limite de {$quota} entradas. Você só pode criar mais {$remaining} entradas. }}
 
 # Navigation: back links and list labels
 back_to_collection: Voltar para a Coleção
@@ -1558,7 +1565,7 @@ config:
     oauth_implicit_flow: O método de autenticação configurado (implicit flow) não é suportado no Sveltia CMS. Use um <a>método de autenticação</a> diferente.
     github_pkce_unsupported: A autorização PKCE ainda não é suportada devido a limitações do GitHub. Use um <a>método de autenticação</a> diferente.
     oauth_no_app_id: O ID do aplicativo OAuth não está definido.
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: A opção `open_authoring` requer o modo de publicação `editorial_workflow`. Consulte a <a>documentação</a> para mais detalhes.
     # Don’t localize `auth_methods`
     no_auth_methods: A opção `auth_methods` deve conter pelo menos um método.
@@ -1680,8 +1687,6 @@ config:
   # Warning messages (logged to console)
   warning:
     oauth_no_app_id: O ID do aplicativo OAuth não está definido. Os usuários precisarão fornecer um token de acesso para entrar.
-    editorial_workflow_unsupported: O fluxo de trabalho editorial ainda não é suportado no Sveltia CMS.
-    open_authoring_unsupported_backend: No momento, o Open Authoring é suportado apenas com o backend do GitHub.
     # {$prop} is the unsupported option name that will be ignored
     unsupported_ignored_option: A opção `{$prop}` não é suportada no Sveltia CMS. Ela será ignorada.
     # Don’t localize `picker_utc`, `input_timezone`, and `output_utc`
@@ -1821,8 +1826,6 @@ workflow:
     .match $count
       one {{ Uma delas ainda não foi publicada, então suas alterações não publicadas serão descartadas. Qualquer versão publicada permanecerá publicada. }}
       *   {{ {$count} delas ainda não foram publicadas, então suas alterações não publicadas serão descartadas. Quaisquer versões publicadas permanecerão publicadas. }}
-  # Confirmation dialog shown before merging the pull request. Keep the wording free of Git jargon.
-  confirm_publishing_entry: Tem certeza de que deseja publicar esta entrada? Suas alterações entrarão em vigor imediatamente.
   # Workflow page: toast notifications shown while an entry is being published from a card, and
   # once publishing has completed
   publishing_entry: Publicando Entrada…
@@ -1976,13 +1979,23 @@ prefs:
       description: Mostrar sublinhado para links na pré-visualização da entrada e nos rótulos da interface do usuário.
       switch_label: Sempre Sublinhar Links
 
-  # Advanced panel
-  advanced:
-    title: Avançado
-    beta:
-      title: Recursos Beta
-      description: Ativa alguns recursos beta que podem estar instáveis ou não localizados.
-      switch_label: Participar do Programa Beta
+  # Data Management panel
+  data:
+    clear_data:
+      title: Limpar Dados
+      # Clear File Cache button
+      file_cache:
+        description: Exclui o conteúdo de arquivos e as miniaturas de imagens armazenados em cache localmente para liberar espaço ou resolver problemas causados por dados desatualizados.
+        button_label: Limpar Cache de Arquivos
+        confirmation: O conteúdo de arquivos e as miniaturas de imagens armazenados em cache localmente serão excluídos. Seus rascunhos não salvos e suas configurações serão mantidos, e os dados excluídos serão baixados ou gerados novamente conforme necessário. O CMS será recarregado ao concluir.
+      # Erase All Data button
+      all_data:
+        description: Exclui tudo o que o CMS mantém neste navegador, incluindo os arquivos em cache, rascunhos não salvos e configurações. O que já estiver salvo no seu repositório não será afetado.
+        button_label: Apagar Todos os Dados
+        confirmation: Todos os dados armazenados neste navegador serão excluídos, incluindo o conteúdo de arquivos em cache, miniaturas de imagens, rascunhos não salvos, configurações e estado de login. Seu repositório não será afetado, mas qualquer alteração que você não tenha salvo será perdida e você precisará entrar novamente. O CMS será recarregado ao concluir.
+
+  # Developer panel
+  developer:
     developer_mode:
       title: Modo Desenvolvedor
       description: Ativa alguns recursos voltados para desenvolvedores, incluindo logs detalhados no console e menus de contexto nativos.
@@ -2000,18 +2013,6 @@ prefs:
         field_label: Cabeçalho de autorização (ex., Bearer <token>) (opcional)
         saved: Cabeçalho de autorização salvo.
         removed: Cabeçalho de autorização removido.
-    clear_data:
-      title: Limpar Dados
-      # Clear File Cache button
-      file_cache:
-        description: Exclui o conteúdo de arquivos e as miniaturas de imagens armazenados em cache localmente para liberar espaço ou resolver problemas causados por dados desatualizados.
-        button_label: Limpar Cache de Arquivos
-        confirmation: O conteúdo de arquivos e as miniaturas de imagens armazenados em cache localmente serão excluídos. Seus rascunhos não salvos e suas configurações serão mantidos, e os dados excluídos serão baixados ou gerados novamente conforme necessário. O CMS será recarregado ao concluir.
-      # Erase All Data button
-      all_data:
-        description: Exclui tudo o que o CMS mantém neste navegador, incluindo os arquivos em cache, rascunhos não salvos e configurações. O que já estiver salvo no seu repositório não será afetado.
-        button_label: Apagar Todos os Dados
-        confirmation: Todos os dados armazenados neste navegador serão excluídos, incluindo o conteúdo de arquivos em cache, miniaturas de imagens, rascunhos não salvos, configurações e estado de login. Seu repositório não será afetado, mas qualquer alteração que você não tenha salvo será perdida e você precisará entrar novamente. O CMS será recarregado ao concluir.
 
 # ==============================================================================
 # Keyboard Shortcuts

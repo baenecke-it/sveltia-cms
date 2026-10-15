@@ -4,7 +4,10 @@ import { fetchAliasedBatch } from '$lib/services/backends/git/github/graphql';
 import { repository } from '$lib/services/backends/git/github/repository';
 import { fetchAPI, fetchGraphQL } from '$lib/services/backends/git/shared/api';
 import { runConcurrently } from '$lib/services/backends/git/shared/concurrency';
-import { getAllStatusLabels, getStatusLabel } from '$lib/services/workflow/labels';
+import { PULL_REQUEST_DESCRIPTION } from '$lib/services/backends/git/shared/pull-requests';
+import { deleteRemoteBranch } from '$lib/services/backends/git/shared/workflow';
+import { encodePathSegments } from '$lib/services/utils/url';
+import { getStatusLabel, replaceStatusLabel } from '$lib/services/workflow/labels';
 import { forkedRepository } from '$lib/services/workflow/open-authoring';
 
 /**
@@ -89,7 +92,9 @@ const FILES_CHUNK_SIZE = 100;
 /**
  * Fetch the content of the files changed in the given pull requests, and populate the
  * {@link WorkflowFile} objects in place. Binary files, such as images, are skipped; only their blob
- * metadata is stored.
+ * metadata is stored. The files are read at the pull request’s head commit rather than its branch,
+ * so the content shown is that of the commit a publish is pinned to, even if the branch moves on
+ * while the board loads.
  * @param {WorkflowPullRequest[]} pullRequests Pull requests to complete.
  */
 export const fetchPullRequestFiles = async (pullRequests) => {
@@ -120,8 +125,8 @@ export const fetchPullRequestFiles = async (pullRequests) => {
      * @param {{ pullRequest: WorkflowPullRequest, file: WorkflowFile }} target Target.
      * @returns {string} Field selection.
      */
-    getFragment: ({ pullRequest, file }) => `
-      object(expression: ${JSON.stringify(`${pullRequest.branch}:${file.path}`)}) {
+    getFragment: ({ pullRequest: { headSHA, branch }, file }) => `
+      object(expression: ${JSON.stringify(`${headSHA ?? branch}:${file.path}`)}) {
         ... on Blob {
           oid
           byteSize
@@ -164,6 +169,38 @@ export const fetchPullRequestFiles = async (pullRequests) => {
   });
 };
 
+const FETCH_BRANCH_HEAD_QUERY = `
+  query($owner: String!, $repo: String!, $branch: String!) {
+    repository(owner: $owner, name: $repo) {
+      branchHead: ref(qualifiedName: $branch) {
+        target {
+          oid
+        }
+      }
+    }
+  }
+`;
+
+/**
+ * Fetch the commit the given workflow branch points at. Two editors working on the same entry
+ * share its branch, so this is how a save finds out that someone else has committed to it since
+ * the draft was opened. The branch is looked up in the repository it lives in, which is the
+ * contributor’s fork with Open Authoring.
+ * @param {string} branch Branch name.
+ * @returns {Promise<string | undefined>} Git object ID, or `undefined` if the branch is gone,
+ * which is what a merged or closed pull request leaves behind.
+ * @see https://docs.github.com/en/graphql/reference/objects#ref
+ */
+export const fetchBranchHead = async (branch) => {
+  const { owner, repo } = getWorkflowRepository();
+
+  const { repository: result } = /** @type {{ repository: Record<string, any> }} */ (
+    await fetchGraphQL(FETCH_BRANCH_HEAD_QUERY, { owner, repo, branch: `refs/heads/${branch}` })
+  );
+
+  return result?.branchHead?.target?.oid;
+};
+
 /**
  * Delete the given branch. Failures are ignored, as the branch may already have been deleted by the
  * repository’s automatic head branch deletion setting.
@@ -173,37 +210,35 @@ export const fetchPullRequestFiles = async (pullRequests) => {
 export const deleteBranch = async (branch) => {
   const { owner, repo } = getWorkflowRepository();
 
-  try {
-    await fetchAPI(`/repos/${owner}/${repo}/git/refs/heads/${encodeURI(branch)}`, {
-      method: 'DELETE',
-      responseType: 'raw',
-    });
-  } catch (/** @type {any} */ ex) {
-    // Leaving the branch behind is harmless, but it makes the next pull request for the same entry
-    // start from an existing branch, so make the failure visible rather than swallowing it
-    // eslint-disable-next-line no-console
-    console.warn(`Failed to delete the ${branch} branch.`, ex);
-  }
+  await deleteRemoteBranch({
+    branch,
+    path: `/repos/${owner}/${repo}/git/refs/heads/${encodePathSegments(branch)}`,
+    // GitHub answers a missing reference with a 422 rather than a 404
+    goneStatuses: [404, 422],
+  });
 };
 
 /**
  * Replace the CMS-managed status label on a pull request while preserving any other label.
  * @param {WorkflowPullRequest} pullRequest Pull request.
  * @param {WorkflowStatus} status New status.
+ * @see https://docs.github.com/en/rest/pulls/pulls#get-a-pull-request
  * @see https://docs.github.com/en/rest/issues/issues#update-an-issue
  */
 export const updateLabels = async (pullRequest, status) => {
   const { owner, repo } = repository;
-  const cmsLabels = getAllStatusLabels();
 
+  // Read the labels from the pulls endpoint: the issues endpoint's `GET` needs issue access, which
+  // a fine-grained token created from the token page doesn't have, while its `PATCH` also accepts
+  // pull request access. @see https://github.com/sveltia/sveltia-cms/issues/1014
   const { labels = [] } = /** @type {{ labels?: { name: string }[] }} */ (
-    await fetchAPI(`/repos/${owner}/${repo}/issues/${pullRequest.number}`)
+    await fetchAPI(`/repos/${owner}/${repo}/pulls/${pullRequest.number}`)
   );
 
-  const newLabels = [
-    ...labels.map(({ name }) => name).filter((name) => !cmsLabels.includes(name)),
-    getStatusLabel(status),
-  ];
+  const newLabels = replaceStatusLabel(
+    labels.map(({ name }) => name),
+    status,
+  );
 
   await fetchAPI(`/repos/${owner}/${repo}/issues/${pullRequest.number}`, {
     method: 'PATCH',
@@ -261,7 +296,7 @@ export const createPullRequest = async ({ branch, title, status }) => {
         head: fork ? `${fork.owner}:${branch}` : branch,
         base: baseBranch,
         draft: isDraft,
-        body: 'Automatically generated by Sveltia CMS',
+        body: PULL_REQUEST_DESCRIPTION,
       },
     })
   );
@@ -292,18 +327,4 @@ export const createPullRequest = async ({ branch, title, status }) => {
   }
 
   return pullRequest;
-};
-
-/**
- * Reopen a pull request that was closed earlier.
- * @param {WorkflowPullRequest} pullRequest Pull request.
- * @see https://docs.github.com/en/rest/pulls/pulls#update-a-pull-request
- */
-export const reopenPullRequest = async (pullRequest) => {
-  const { owner, repo } = repository;
-
-  await fetchAPI(`/repos/${owner}/${repo}/pulls/${pullRequest.number}`, {
-    method: 'PATCH',
-    body: { state: 'open' },
-  });
 };

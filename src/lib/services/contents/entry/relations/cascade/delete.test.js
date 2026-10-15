@@ -8,6 +8,7 @@ import {
   getDeletedValues,
   getDeletedVersions,
   planCascadeDelete,
+  planCascadeDeleteOrThrow,
   removeReferences,
 } from '$lib/services/contents/entry/relations/cascade/delete';
 
@@ -48,7 +49,15 @@ vi.mock('$lib/services/contents/entry/changes', () => ({
     { action: 'update', slug: entry.slug, path: `content/posts/${entry.slug}.md`, data: '' },
   ]),
   createSyntheticDraft: vi.fn((args) => ({ synthetic: true, ...args })),
+}));
+
+vi.mock('$lib/services/contents/draft/save/file-changes', async (importOriginal) => ({
+  .../** @type {Record<string, any>} */ (await importOriginal()),
   resolveCacheDB: vi.fn(() => undefined),
+}));
+
+vi.mock('$lib/services/contents/entry/readonly', () => ({
+  isEntryReadonly: vi.fn(() => false),
 }));
 
 vi.mock('$lib/services/contents/entry/summary', () => ({
@@ -529,6 +538,38 @@ describe('planCascadeDelete()', () => {
     ]);
   });
 
+  test('reports every field of a read-only referencing entry, valid or not', () => {
+    registerTagRelation({ fieldConfig: { label: 'Tag' } });
+    getCollection.mockReturnValue({ ...postsCollection, readonly: true });
+    getEntriesByCollection.mockReturnValue([createPost('a', { title: 'Post A', tag: 'travel' })]);
+
+    const { blockers } = planCascadeDelete(baseArgs);
+
+    expect(blockers).toEqual([
+      expect.objectContaining({ keyPath: 'tag', messages: ['readonly_reference'] }),
+    ]);
+  });
+
+  test('reports a field of a read-only referencing file', () => {
+    getCollection.mockReturnValue({
+      name: 'config',
+      label: 'Config',
+      _type: 'file',
+      _i18n: { defaultLocale: '_default', allLocales: ['_default'] },
+    });
+    getCollectionFile.mockReturnValue({ name: 'general', fields: [], readonly: true });
+    registerTagRelation({
+      context: { collection: { name: 'config' }, collectionFile: { name: 'general' } },
+    });
+    getEntriesByCollection.mockReturnValue([
+      { ...createPost('general', { tag: 'travel' }), id: 'config-general' },
+    ]);
+
+    const { blockers } = planCascadeDelete(baseArgs);
+
+    expect(blockers).toEqual([expect.objectContaining({ messages: ['readonly_reference'] })]);
+  });
+
   test('reports a field invalid in several locales once', () => {
     const i18nCollection = {
       ...postsCollection,
@@ -725,6 +766,45 @@ describe('planCascadeDelete()', () => {
     expect(createSyntheticDraft).toHaveBeenCalledWith(
       expect.objectContaining({ isIndexFile: true }),
     );
+  });
+});
+
+describe('planCascadeDeleteOrThrow()', () => {
+  const baseArgs = { collection: tagsCollection, entries: [travelTag] };
+
+  test('returns the targets when nothing blocks the deletion', () => {
+    registerTagRelation();
+    getEntriesByCollection.mockReturnValue([createPost('my-trip', { tag: 'travel' })]);
+
+    expect(planCascadeDeleteOrThrow(baseArgs, 'Blocked')).toEqual([
+      {
+        entry: createPost('my-trip', { tag: '' }),
+        collection: postsCollection,
+        collectionFile: undefined,
+      },
+    ]);
+  });
+
+  test('returns no targets when nothing references the entries', () => {
+    expect(planCascadeDeleteOrThrow(baseArgs, 'Blocked')).toEqual([]);
+  });
+
+  test('throws with the blockers as the cause when the deletion is blocked', () => {
+    registerTagRelation({ fieldConfig: { label: 'Tag' } });
+    validateAnyField.mockReturnValue({ valid: false, valueMissing: true });
+    getEntriesByCollection.mockReturnValue([createPost('a', { title: 'Post A', tag: 'travel' })]);
+
+    let error;
+
+    try {
+      planCascadeDeleteOrThrow(baseArgs, 'Blocked');
+    } catch (ex) {
+      error = ex;
+    }
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toBe('Blocked');
+    expect(error.cause).toEqual([expect.objectContaining({ keyPath: 'tag', fieldLabel: 'Tag' })]);
   });
 });
 

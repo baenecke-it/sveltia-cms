@@ -176,3 +176,121 @@ export const watch = (getDependencies, fn) => {
     return untrack(fn);
   });
 };
+
+/**
+ * Run an async function whenever the reactive state it reads before its first `await` has changed,
+ * like `$effect`, and pass the result on, unless the function has been run again in the meantime.
+ * This keeps the result of a slow run for an earlier state from replacing the result for a later
+ * one. Use it in a component.
+ * @template T
+ * @param {() => Promise<T> | undefined} fn Function to run. It can return `undefined` instead of a
+ * `Promise` to skip the run, e.g. while a required value is missing.
+ * @param {(result: T) => void} onResult Function receiving the result of the latest run.
+ * @param {(error: unknown) => void} [onError] Function receiving the error the latest run has been
+ * rejected with. An error of a run that has been superseded is ignored. Without this, the error is
+ * left unhandled.
+ */
+export const watchAsync = (fn, onResult, onError) => {
+  $effect(() => {
+    const promise = fn();
+
+    if (!promise) {
+      return undefined;
+    }
+
+    let stale = false;
+
+    promise.then(
+      (result) => {
+        if (!stale) {
+          onResult(result);
+        }
+      },
+      onError &&
+        ((error) => {
+          if (!stale) {
+            onError(error);
+          }
+        }),
+    );
+
+    return () => {
+      stale = true;
+    };
+  });
+};
+
+/**
+ * Keep a field value and the value of its input in sync in both directions, like a bindable prop
+ * and the local state bound to an input widget. A change to either side is converted and written to
+ * the other side, but only if the converted value is different, so that the other side’s watcher
+ * doesn’t set off an infinite loop. Each side is watched with {@link watch}, so the converters can
+ * read other state, e.g. the field configuration, without being rerun on changes to it. The
+ * arguments are positional because an arrow function in an object literal would need a JSDoc
+ * comment of its own at every call site.
+ *
+ * The field value is only written once the user has edited the input, so that it differs from what
+ * the field value was last converted to. A value the input can’t represent, like a decimal number
+ * in an integer field, converts to an input that doesn’t convert back to the same value, so writing
+ * it back right away would replace the stored value as soon as the editor is opened, without any
+ * user action, and the next save would lose it.
+ * @template V, I
+ * @param {() => V} getValue Function returning the field value.
+ * @param {(value: V) => void} setValue Function updating the field value.
+ * @param {() => I} getInput Function returning the input value.
+ * @param {(input: I) => void} setInput Function updating the input value.
+ * @param {(value: V) => I} [toInput] Function converting a field value to an input value. Defaults
+ * to returning the value as is.
+ * @param {(input: I) => V} [toValue] Function converting an input value to a field value. Defaults
+ * to returning the value as is.
+ * @returns {{ updateInput: () => void, updateValue: () => void }} Functions to sync the input
+ * value with the field value and vice versa on demand, e.g. when the input loses focus.
+ */
+export const syncValues = (
+  getValue,
+  setValue,
+  getInput,
+  setInput,
+  toInput = (value) => /** @type {I} */ (/** @type {unknown} */ (value)),
+  toValue = (input) => /** @type {V} */ (/** @type {unknown} */ (input)),
+) => {
+  /**
+   * Input value converted from the field value the last time the input was synced with it.
+   * @type {I | undefined}
+   */
+  let syncedInput;
+
+  /**
+   * Update the input value based on the field value.
+   */
+  const updateInput = () => {
+    const input = toInput(getValue());
+
+    if (getInput() !== input) {
+      setInput(input);
+    }
+
+    syncedInput = input;
+  };
+
+  /**
+   * Update the field value based on the input value.
+   */
+  const updateValue = () => {
+    const value = toValue(getInput());
+
+    if (getValue() !== value) {
+      setValue(value);
+    }
+  };
+
+  watch(getValue, updateInput);
+  watch(getInput, () => {
+    // Skip the input that merely reflects the field value, including the one set on the first run
+    if (getInput() !== syncedInput) {
+      updateValue();
+    }
+  });
+
+  return { updateInput, updateValue };
+};
