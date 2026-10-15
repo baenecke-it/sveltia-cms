@@ -17,7 +17,6 @@
   import { getCollection } from '$lib/services/contents/collection';
   import { getEntriesByCollection } from '$lib/services/contents/collection/entries';
   import { getEntrySummary } from '$lib/services/contents/entry/summary';
-  import { openAuthoring } from '$lib/services/workflow/open-authoring';
 
   /** @import { Asset, InternalEntryCollection } from '$lib/types/private'; */
 
