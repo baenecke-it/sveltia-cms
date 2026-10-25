@@ -35,7 +35,7 @@
   import { isDraftReadonly } from '$lib/services/config/readonly';
   import { getCollectionLabel, selectedCollection } from '$lib/services/contents/collection';
   import { getCollectionFileLabel } from '$lib/services/contents/collection/files';
-  import { isNestedCollection, nestedFilterPath } from '$lib/services/contents/collection/nested';
+  import { hasNestedEntries, nestedFilterPath } from '$lib/services/contents/collection/nested';
   import { collectionState } from '$lib/services/contents/collection/view';
   import { createDraft } from '$lib/services/contents/draft/create';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
@@ -274,7 +274,7 @@
    * path given by `getEntryEditorBackPath()` otherwise.
    */
   const _goBack = () => {
-    const dirPath = collection && isNestedCollection(collection) ? nestedFilterPath.current : '';
+    const dirPath = collection && hasNestedEntries(collection) ? nestedFilterPath.current : '';
 
     goBack(getEntryEditorBackPath({ collectionName, dirPath }), {
       returnTo: isSearchResultsPath,
