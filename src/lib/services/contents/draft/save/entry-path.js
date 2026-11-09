@@ -13,6 +13,7 @@ import {
   getOwnFolderName,
   localizeDirPath,
 } from '$lib/services/contents/collection/nested/i18n';
+import { isArrayFileCollection } from '$lib/services/contents/collection/predicates';
 import { hasLocalizedSlugs } from '$lib/services/contents/draft/slugs';
 import { resolveFileConfig } from '$lib/services/contents/file/config';
 import { getLocalePath } from '$lib/services/contents/i18n';
@@ -179,6 +180,13 @@ export const createEntryPath = ({ draft, locale, slug }) => {
     const { _i18n, file } = collectionFile;
 
     return getLocalePath({ _i18n, locale, path: stripSlashes(file) });
+  }
+
+  // All the entries are stored in one file, which holds all the translations
+  if (isArrayFileCollection(collection)) {
+    return /** @type {string} */ (
+      /** @type {InternalEntryCollection} */ (collection)._file.fullPath
+    );
   }
 
   const entryCollection = /** @type {InternalEntryCollection} */ (collection);

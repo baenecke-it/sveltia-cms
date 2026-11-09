@@ -9,21 +9,21 @@
   import { _, locale as appLocale } from '@sveltia/i18n';
   import { Button, Icon } from '@sveltia/ui';
 
-  import Image from '$lib/components/assets/shared/image.svelte';
   import PreviewLinkButton from '$lib/components/contents/details/preview-link-button.svelte';
+  import EntryThumbnail from '$lib/components/contents/shared/entry-thumbnail.svelte';
   import DeployStatusBadge from '$lib/components/workflow/deploy-status-badge.svelte';
   import { goto } from '$lib/services/app/navigation';
-  import { allEntries } from '$lib/services/contents';
+  import { isReadonly } from '$lib/services/config/readonly';
   import { getCollection, getCollectionLabel } from '$lib/services/contents/collection';
   import {
     getCollectionFile,
     getCollectionFileLabel,
   } from '$lib/services/contents/collection/files';
-  import { getEntryThumbnail } from '$lib/services/contents/entry/assets';
   import { getEntrySummary } from '$lib/services/contents/entry/summary';
   import { deployments, productionSHA } from '$lib/services/deployments';
-  import { hasPublishedVersion } from '$lib/services/workflow';
-  import { openAuthoring } from '$lib/services/workflow/open-authoring';
+  import { encodePathSegments } from '$lib/services/utils/url';
+  import { checkPublishedVersion, isPublishAllowed } from '$lib/services/workflow';
+  import { getWorkflowStages } from '$lib/services/workflow/stages';
 
   /**
    * @import { UnpublishedEntry } from '$lib/types/private';
@@ -64,6 +64,13 @@
   const collectionFile = $derived(
     collection && fileName ? getCollectionFile(collection, fileName) : undefined,
   );
+  // A read-only entry can be opened and viewed, but not moved through the stages, published or
+  // discarded
+  const readonly = $derived(isReadonly({ collection, collectionFile }));
+  // With Preview Workflow, the drafting stage is the only one, so there’s nowhere to move the entry
+  const movable = $derived(
+    !deletion && !deploying && !readonly && getWorkflowStages(collection).length > 1,
+  );
   // The card has no locale of its own, so the link points at the entry’s default one
   const defaultLocale = $derived((collectionFile ?? collection)?._i18n?.defaultLocale);
   // A merged change goes out with the production build, which is a different commit from the pull
@@ -85,22 +92,16 @@
   const collectionLabel = $derived(
     appLocale.current && collection ? getCollectionLabel(collection, { useSingular: true }) : '',
   );
-  // The entry can only be published from the last column, and the collection’s `publish` option can
-  // hide the control altogether. An Open Authoring contributor can’t merge a pull request on the
-  // configured repository, so they never get the control
-  const canPublish = $derived(
-    !deploying &&
-      !openAuthoring.current &&
-      (status === 'pending_publish' || deletion) &&
-      collection?.publish !== false,
-  );
+  // The entry can only be published from the last column, and only by a user who can merge it
+  const canPublish = $derived(!deploying && !readonly && isPublishAllowed(entry, collection));
   // Deleting an entry that has a published version only throws away the pending changes.
-  // `allEntries.current` is a dependency, because the entry can be published from another view
-  const publishedVersionExists = $derived(!!allEntries.current && hasPublishedVersion(entry));
+  // The entry can be published from another view, so the check depends on `allEntries`
+  const publishedVersionExists = $derived(checkPublishedVersion(entry));
   // The `delete` option only blocks taking an entry off the site. Discarding a pull request leaves
   // the published version untouched, so it stays available even when deletion is disabled
   const canDelete = $derived(
     !deploying &&
+      !readonly &&
       (publishedVersionExists ||
         (collection?._type === 'entry' ? collection.delete !== false : true)),
   );
@@ -114,13 +115,13 @@
 </script>
 
 <!-- A pending deletion has no stages to move through, so its card doesn’t drag, and neither does
-a merged one -->
+a merged or read-only one, or one with no other stage to move to -->
 <div
   role="listitem"
   class="card"
   class:dragging
-  class:static={deletion || deploying}
-  draggable={!busy && !deletion && !deploying}
+  class:static={!movable}
+  draggable={!busy && movable}
   ondragstart={(/** @type {DragEvent} */ event) => {
     if (event.dataTransfer) {
       event.dataTransfer.effectAllowed = 'move';
@@ -141,17 +142,16 @@ a merged one -->
     disabled={gone}
     onclick={() => {
       // A collection file is addressed by its name, while its `subPath` is the whole file path
-      goto(`/collections/${collectionName}/entries/${fileName ?? entry.subPath}`, {
-        transitionType: 'forwards',
-      });
+      goto(
+        encodePathSegments(`/collections/${collectionName}/entries/${fileName ?? entry.subPath}`),
+        {
+          transitionType: 'forwards',
+        },
+      );
     }}
   >
     {#if collection?._type === 'entry'}
-      {#await getEntryThumbnail(collection, entry) then src}
-        {#if src}
-          <Image {src} variant="icon" cover />
-        {/if}
-      {/await}
+      <EntryThumbnail {collection} {entry} variant="icon" />
     {/if}
     <span role="none" class="text">
       <span role="none" class="collection"><bdi>{collectionLabel}</bdi></span>

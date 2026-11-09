@@ -1493,7 +1493,7 @@ config:
     oauth_implicit_flow: Sveltia CMS 不支持配置的认证方法（隐式授权）。请改用其他<a>认证方法</a>。
     github_pkce_unsupported: 由于 GitHub 的限制，暂不支持 PKCE 授权。请改用其他<a>认证方法</a>。
     oauth_no_app_id: 未定义 OAuth 应用程序 ID。
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: '`open_authoring` 选项需要 `editorial_workflow` 发布模式。详情请参阅<a>文档</a>。'
     # Don’t localize `auth_methods`
     no_auth_methods: '`auth_methods` 选项必须至少包含一种方法。'
@@ -1615,8 +1615,6 @@ config:
   # Warning messages (logged to console)
   warning:
     oauth_no_app_id: 未定义 OAuth 应用程序 ID。用户需要提供访问令牌才能登录。
-    editorial_workflow_unsupported: Sveltia CMS 暂不支持编辑工作流。
-    open_authoring_unsupported_backend: Open Authoring 目前仅支持 GitHub 后端。
     # {$prop} is the unsupported option name that will be ignored
     unsupported_ignored_option: Sveltia CMS 不支持 `{$prop}` 选项。该选项将会被忽略。
     # Don’t localize `picker_utc`, `input_timezone`, and `output_utc`
@@ -1754,8 +1752,6 @@ workflow:
     .input {$count :integer}
     .match $count
       * {{ 其中 {$count} 个条目尚未发布，因此您未发布的更改将被放弃。已发布的版本将保持发布状态。 }}
-  # Confirmation dialog shown before merging the pull request. Keep the wording free of Git jargon.
-  confirm_publishing_entry: 您确定要发布此条目吗？您的更改将立即生效。
   # Workflow page: toast notifications shown while an entry is being published from a card, and
   # once publishing has completed
   publishing_entry: 正在发布条目……
@@ -1909,13 +1905,23 @@ prefs:
       description: 在条目预览和界面标签中显示链接下划线。
       switch_label: 始终显示链接下划线
 
-  # Advanced panel
-  advanced:
-    title: 高级
-    beta:
-      title: Beta 功能
-      description: 启用一些可能不稳定或未完全本地化的 Beta 功能。
-      switch_label: 加入 Beta 计划
+  # Data Management panel
+  data:
+    clear_data:
+      title: 清除数据
+      # Clear File Cache button
+      file_cache:
+        description: 删除本地缓存的文件内容和图片缩略图，以释放存储空间或解决过期数据导致的问题。
+        button_label: 清除文件缓存
+        confirmation: 本地缓存的文件内容和图片缩略图将被删除。您未保存的草稿和设置将保留，删除的数据会在需要时重新下载或生成。完成后 CMS 将重新加载。
+      # Erase All Data button
+      all_data:
+        description: 删除 CMS 在此浏览器中保存的所有内容，包括缓存文件、未保存的草稿和设置。已保存到仓库的内容不受影响。
+        button_label: 清除所有数据
+        confirmation: 此浏览器中存储的所有数据将被删除，包括缓存的文件内容、图片缩略图、未保存的草稿、设置和登录状态。您的仓库不受影响，但任何未保存的更改都将丢失，并且您需要重新登录。完成后 CMS 将重新加载。
+
+  # Developer panel
+  developer:
     developer_mode:
       title: 开发者模式
       description: 启用一些面向开发者的功能，包括详细的控制台日志和原生上下文菜单。
@@ -1933,18 +1939,6 @@ prefs:
         field_label: Authorization 标头（例如 Bearer &lt;token&gt;）（可选）
         saved: Authorization 标头已保存。
         removed: Authorization 标头已移除。
-    clear_data:
-      title: 清除数据
-      # Clear File Cache button
-      file_cache:
-        description: 删除本地缓存的文件内容和图片缩略图，以释放存储空间或解决过期数据导致的问题。
-        button_label: 清除文件缓存
-        confirmation: 本地缓存的文件内容和图片缩略图将被删除。您未保存的草稿和设置将保留，删除的数据会在需要时重新下载或生成。完成后 CMS 将重新加载。
-      # Erase All Data button
-      all_data:
-        description: 删除 CMS 在此浏览器中保存的所有内容，包括缓存文件、未保存的草稿和设置。已保存到仓库的内容不受影响。
-        button_label: 清除所有数据
-        confirmation: 此浏览器中存储的所有数据将被删除，包括缓存的文件内容、图片缩略图、未保存的草稿、设置和登录状态。您的仓库不受影响，但任何未保存的更改都将丢失，并且您需要重新登录。完成后 CMS 将重新加载。
 
 # ==============================================================================
 # Keyboard Shortcuts

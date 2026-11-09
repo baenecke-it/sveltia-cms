@@ -1,5 +1,4 @@
 import { addMessages, locale } from '@sveltia/i18n';
-import { sleep } from '@sveltia/utils/misc';
 import { beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { page } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
@@ -118,7 +117,14 @@ describe('InternalAssetsPanel', () => {
 
   test('lists the assets in the saved view type within a drop zone', async () => {
     const onDrop = vi.fn();
-    const props = $state({ assets, selectedResources: [], onDrop });
+
+    const props = $state({
+      assets,
+      kind: /** @type {'image'} */ ('image'),
+      selectedResources: [],
+      onDrop,
+    });
+
     const { container } = await render(InternalAssetsPanel, props);
     const listbox = page.getByRole('listbox', { name: 'Available Images' });
 
@@ -126,7 +132,6 @@ describe('InternalAssetsPanel', () => {
     expect(listbox.element()).toHaveClass('list');
     await expect.poll(() => listbox.getByRole('option').elements().length).toBe(2);
 
-    await sleep(150);
     await page
       .elementLocator(
         /** @type {HTMLElement} */ (
@@ -145,6 +150,54 @@ describe('InternalAssetsPanel', () => {
     );
 
     await vi.waitFor(() => expect(onDrop).toHaveBeenCalledWith({ files: [file] }));
+  });
+
+  test('passes on a dropped file of another type, to be checked once processed', async () => {
+    const onDrop = vi.fn();
+
+    const { container } = await render(InternalAssetsPanel, {
+      assets,
+      accept: 'image/webp',
+      selectedResources: [],
+      onDrop,
+    });
+
+    const file = new File(['x'], 'kite.png', { type: 'image/png' });
+
+    /** @type {HTMLElement} */ (container.querySelector('.drop-target')).dispatchEvent(
+      createDropEvent([file]),
+    );
+
+    await vi.waitFor(() => expect(onDrop).toHaveBeenCalledWith({ files: [file] }));
+    expect(page.getByRole('alertdialog').elements()).toHaveLength(0);
+  });
+
+  test('takes no dropped files where nothing can be uploaded', async () => {
+    const onDrop = vi.fn();
+
+    const { container } = await render(InternalAssetsPanel, {
+      assets,
+      uploadDisabled: true,
+      selectedResources: [],
+      onDrop,
+    });
+
+    const target = /** @type {HTMLElement} */ (container.querySelector('.drop-target'));
+
+    // Dragging files over the panel doesn’t invite a drop
+    target.dispatchEvent(
+      new DragEvent('dragover', {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer: new DataTransfer(),
+      }),
+    );
+    target.dispatchEvent(createDropEvent([new File(['x'], 'kite.png', { type: 'image/png' })]));
+    await new Promise((resolve) => {
+      setTimeout(resolve, 100);
+    });
+    expect(container.querySelector('.drop-indicator')).toBeNull();
+    expect(onDrop).not.toHaveBeenCalled();
   });
 
   test('lists nothing without assets', async () => {

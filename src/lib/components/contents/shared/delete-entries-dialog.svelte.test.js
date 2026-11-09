@@ -5,8 +5,12 @@ import { render } from 'vitest-browser-svelte';
 
 import { allAssetFolders } from '$lib/services/assets/folders';
 import { backendName } from '$lib/services/backends';
+import { createLocalizedError } from '$lib/services/backends/git/shared/errors';
 import { getCollection, selectedCollection } from '$lib/services/contents/collection';
-import { contentUpdatesToast } from '$lib/services/contents/collection/data';
+import {
+  contentUpdatesToast,
+  UPDATE_TOAST_DEFAULT_STATE,
+} from '$lib/services/contents/collection/data';
 import { deleteEntries } from '$lib/services/contents/collection/data/delete';
 import { selectedEntries } from '$lib/services/contents/collection/entries';
 import { deleteWorkflowEntries, discardWorkflowEntries } from '$lib/services/workflow/save';
@@ -17,6 +21,7 @@ import {
   setAssets,
   setEntries,
 } from '$lib/test/config';
+import { waitForToastsToHide } from '$lib/test/toast';
 
 import DeleteEntriesDialog from './delete-entries-dialog.svelte';
 
@@ -101,6 +106,7 @@ describe('DeleteEntriesDialog', () => {
 
   test('discards an unpublished entry instead of deleting it', async () => {
     vi.mocked(discardWorkflowEntries).mockResolvedValue(undefined);
+    contentUpdatesToast.current = { ...UPDATE_TOAST_DEFAULT_STATE };
 
     const draft = createMockEntry({
       slug: 'd',
@@ -114,6 +120,10 @@ describe('DeleteEntriesDialog', () => {
 
     await vi.waitFor(() => expect(discardWorkflowEntries).toHaveBeenCalledWith([draft]));
     expect(deleteEntries).not.toHaveBeenCalled();
+    // The draft is gone for good, as nothing was published
+    expect(contentUpdatesToast.current).toEqual(
+      expect.objectContaining({ deleted: true, deletionPending: false, count: 1 }),
+    );
   });
 
   test('notes the unpublished entries among the selected ones', async () => {
@@ -128,6 +138,27 @@ describe('DeleteEntriesDialog', () => {
     await expect
       .element(page.getByRole('alertdialog'))
       .toMatchTextContent('One of them hasn’t been published yet');
+  });
+
+  test('says what stands in the way of the deletion', async () => {
+    vi.mocked(deleteEntries).mockRejectedValue(
+      createLocalizedError(
+        'Cannot delete a published entry as an Open Authoring contributor',
+        'open_authoring.direct_commit_unsupported',
+      ),
+    );
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    selectedEntries.current = [entries[0]];
+
+    await render(DeleteEntriesDialog, { open: true });
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Delete' }).click();
+
+    await expect
+      .element(page.getByRole('alert'))
+      .toHaveTextContent(
+        'error Error This change can’t be made directly. Only edits to entries can be suggested for review.',
+      );
+    await waitForToastsToHide();
   });
 
   test('reports a failure', async () => {
@@ -148,6 +179,27 @@ describe('DeleteEntriesDialog', () => {
         timeout: 7000,
       })
       .toBe('true');
+  });
+
+  test('says nothing and keeps the selection when the commit is cancelled', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    vi.mocked(deleteEntries).mockRejectedValue(new Error('commit_cancelled'));
+    selectedEntries.current = [entries[0]];
+
+    await render(DeleteEntriesDialog, { open: true });
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Delete' }).click();
+
+    await vi.waitFor(() => expect(deleteEntries).toHaveBeenCalledOnce());
+    // Let the rejection settle
+    await new Promise((resolve) => {
+      setTimeout(resolve, 100);
+    });
+    expect(
+      document.querySelector('.sui.toast:not([aria-hidden="true"]) .sui.alert.error'),
+    ).toBeNull();
+    expect(error).not.toHaveBeenCalled();
+    expect(selectedEntries.current).toEqual([entries[0]]);
   });
 
   describe('with entry-relative assets', () => {

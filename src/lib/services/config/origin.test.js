@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
+import { cmsConfig } from '$lib/services/config';
 import { fetchCmsConfig } from '$lib/services/config/loader';
 
-import { cmsConfig, initCmsConfig } from '.';
+import { initCmsConfig } from './init';
 
 // The site URL falls back to `DEV_SITE_URL` on the dev server and to the page origin in production.
 // A `file:` page or a sandboxed frame has the opaque origin `null`, which is stood in for here, as
@@ -50,13 +51,15 @@ vi.mock('$lib/services/user/prefs.svelte', () => ({
 vi.mock('$lib/services/backends', () => ({
   initBackend: vi.fn(),
   validBackendNames: ['github'],
+}));
+
+vi.mock('$lib/services/backends/git/services', () => ({
   gitBackendServices: { github: {} },
 }));
 
-vi.mock('@sveltia/i18n', () => ({
-  _: vi.fn((key) => key),
-  locale: { current: 'en', set: vi.fn() },
-}));
+vi.mock('@sveltia/i18n', async () =>
+  (await import('$lib/test/i18n')).createI18nMock({ locale: 'en' }),
+);
 
 describe('initCmsConfig with an opaque page origin', () => {
   beforeAll(() => {

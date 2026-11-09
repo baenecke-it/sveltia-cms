@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest';
-import { render } from 'vitest-browser-svelte';
+
+import { renderFieldPreview } from '$lib/test/field.svelte';
 
 import NumberPreview from './number-preview.svelte';
 
@@ -16,17 +17,8 @@ const fieldConfig = { name: 'price', widget: 'number' };
  * @param {string} [locale] Locale code.
  * @returns {Promise<HTMLElement>} Container.
  */
-const renderPreview = async (currentValue, locale = 'en') => {
-  const { container } = await render(NumberPreview, {
-    locale,
-    keyPath: 'price',
-    typedKeyPath: 'price',
-    fieldConfig,
-    currentValue,
-  });
-
-  return container;
-};
+const renderPreview = async (currentValue, locale = 'en') =>
+  (await renderFieldPreview(NumberPreview, { fieldConfig, locale, currentValue })).container;
 
 describe('NumberPreview', () => {
   test('formats a number for the locale', async () => {
@@ -36,6 +28,15 @@ describe('NumberPreview', () => {
 
   test('formats a numeric string', async () => {
     expect(await renderPreview('1000')).toHaveTextContent('1,000');
+  });
+
+  test('keeps every fraction digit', async () => {
+    expect(await renderPreview(35.681236)).toHaveTextContent('35.681236');
+    expect(await renderPreview(0.0004)).toHaveTextContent('0.0004');
+  });
+
+  test('shows text that isn’t a number as is', async () => {
+    expect(await renderPreview('1,5')).toHaveTextContent('1,5');
   });
 
   test('marks the paragraph with the language and direction', async () => {

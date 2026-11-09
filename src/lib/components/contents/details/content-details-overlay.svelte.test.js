@@ -1,7 +1,9 @@
+import { flushSync } from 'svelte';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { page } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
+import { lockedBranch } from '$lib/services/backends/branch-access';
 import { getCollection, selectedCollection } from '$lib/services/contents/collection';
 import { EntryDraftState } from '$lib/services/contents/draft/state.svelte';
 import {
@@ -30,6 +32,7 @@ vi.mock('$lib/services/contents/draft/backup', async () => {
   return {
     restoreDialogState: createDeepState({ show: false }),
     backupToastState: createDeepState({ saved: false, restored: false, deleted: false }),
+    cancelBackup: vi.fn(),
     deleteBackup: vi.fn(),
     getBackup: vi.fn(),
     getBackupSlug: vi.fn(() => ''),
@@ -106,6 +109,8 @@ describe('ContentDetailsOverlay', () => {
         { name: 'posts', label: 'Posts', folder: 'content/posts', i18n: true, fields },
         { name: 'locked', label: 'Locked', folder: 'content/locked', create: false, fields },
         { name: 'limited', label: 'Limited', folder: 'content/limited', limit: 1, fields },
+        { name: 'frozen', label: 'Frozen', folder: 'content/frozen', readonly: true, fields },
+        { name: 'plain', label: 'Plain', folder: 'content/plain', fields },
       ],
     });
     env.isSmallScreen = false;
@@ -118,6 +123,7 @@ describe('ContentDetailsOverlay', () => {
     entryEditorSettings.current = { showPreview: true, showSecondPane: true, syncScrolling: true };
     selectedCollection.current = getCollection('posts');
     prefs.devModeEnabled = false;
+    lockedBranch.current = undefined;
     window.history.replaceState(null, '');
   });
 
@@ -189,6 +195,15 @@ describe('ContentDetailsOverlay', () => {
     await expect
       .element(page.getByRole('group', { name: 'Preview \u2068German\u2069 Content' }))
       .toBeInTheDocument();
+  });
+
+  test('starts with the requested locale without the preview', async () => {
+    entryEditorSettings.current = { showPreview: false, showSecondPane: true };
+
+    await renderOverlay(createDraft(), { editorLocale: 'de' });
+
+    await expect.poll(() => editorFirstPane.current).toEqual({ mode: 'edit', locale: 'de' });
+    expect(editorSecondPane.current).toEqual({ mode: 'edit', locale: 'en' });
   });
 
   test('highlights a field on request', async () => {
@@ -286,6 +301,110 @@ describe('ContentDetailsOverlay', () => {
       )
       .toBeInTheDocument();
     await expect.element(page.getByRole('button', { name: 'Save' })).toBeDisabled();
+  });
+
+  test('refuses to create an entry in a read-only collection', async () => {
+    selectedCollection.current = getCollection('frozen');
+
+    await renderOverlay(
+      createMockDraft({
+        collectionName: 'frozen',
+        fields,
+        draft: { collection: getCollection('frozen') },
+      }),
+    );
+
+    await expect
+      .element(
+        page.getByText(
+          'This collection is read-only. You can view its content but cannot make any changes.',
+        ),
+      )
+      .toBeInTheDocument();
+    expect(page.getByRole('button', { name: 'Save' }).elements()).toHaveLength(0);
+    // The message is given once, in place of the editor
+    expect(page.getByRole('status').elements()).toHaveLength(0);
+  });
+
+  test('shows an existing entry of a read-only collection for reference', async () => {
+    selectedCollection.current = getCollection('frozen');
+
+    await renderOverlay(
+      createMockDraft({
+        collectionName: 'frozen',
+        fields,
+        values: { _default: { title: 'Hello', body: '', 'author.name': 'Melvin' } },
+        draft: {
+          collection: getCollection('frozen'),
+          isNew: false,
+          originalEntry: createMockEntry({ slug: 'hello', folder: 'content/frozen' }),
+        },
+      }),
+    );
+
+    await expect
+      .element(page.getByRole('status'))
+      .toHaveTextContent(
+        'info Information This entry is read-only. You can view it but cannot make any changes.',
+      );
+    await expect.element(page.getByRole('textbox', { name: 'Title' })).toHaveValue('Hello');
+    await expect
+      .element(page.getByRole('textbox', { name: 'Title' }))
+      .toHaveAttribute('aria-readonly', 'true');
+    expect(page.getByRole('button', { name: 'Save' }).elements()).toHaveLength(0);
+  });
+
+  test('refuses to create an entry when the user can’t push to the branch', async () => {
+    selectedCollection.current = getCollection('plain');
+    lockedBranch.current = 'main';
+
+    await renderOverlay(
+      createMockDraft({
+        collectionName: 'plain',
+        fields,
+        draft: { collection: getCollection('plain') },
+      }),
+    );
+
+    await expect
+      .element(
+        page.getByText(
+          'You don’t have permission to push to the “\u2068main\u2069” branch. You can view this ' +
+            'content but cannot make any changes.',
+        ),
+      )
+      .toBeInTheDocument();
+    expect(page.getByRole('button', { name: 'Save' }).elements()).toHaveLength(0);
+    expect(page.getByRole('status').elements()).toHaveLength(0);
+  });
+
+  test('shows an existing entry for reference when the user can’t push to the branch', async () => {
+    selectedCollection.current = getCollection('plain');
+    lockedBranch.current = 'main';
+
+    await renderOverlay(
+      createMockDraft({
+        collectionName: 'plain',
+        fields,
+        values: { _default: { title: 'Hello', body: '', 'author.name': 'Melvin' } },
+        draft: {
+          collection: getCollection('plain'),
+          isNew: false,
+          originalEntry: createMockEntry({ slug: 'hello', folder: 'content/plain' }),
+        },
+      }),
+    );
+
+    await expect
+      .element(page.getByRole('status'))
+      .toHaveTextContent(
+        'info Information You don’t have permission to push to the “\u2068main\u2069” branch. ' +
+          'You can view this content but cannot make any changes.',
+      );
+    await expect
+      .element(page.getByRole('textbox', { name: 'Title' }))
+      .toHaveAttribute('aria-readonly', 'true');
+    expect(page.getByRole('button', { name: 'Save' }).elements()).toHaveLength(0);
   });
 
   test('drops the draft when the overlay is closed', async () => {
@@ -399,6 +518,62 @@ describe('ContentDetailsOverlay', () => {
     expect(editorSecondPane.current).toBeNull();
   });
 
+  test('highlights the path editor on request', async () => {
+    // A nested collection with the path editor, and a folder to choose from
+    await initTestConfig({
+      i18n: {
+        structure: /** @type {const} */ ('multiple_folders'),
+        locales: ['en', 'fr', 'de'],
+        default_locale: 'en',
+      },
+      collections: [
+        {
+          name: 'guides',
+          label: 'Guides',
+          folder: 'content/guides',
+          i18n: true,
+          nested: { depth: 3 },
+          meta: { path: { widget: 'string', index_file: 'index' } },
+          fields,
+        },
+      ],
+    });
+    // With the `multiple_folders` structure, each locale is stored in a folder of its own
+    setEntries(
+      ['docs', 'docs/start'].map((dirPath) => {
+        const slug = `${dirPath}/index`;
+
+        return createMockEntry({
+          slug,
+          folder: 'content/guides',
+          entry: {
+            locales: Object.fromEntries(
+              ['en', 'fr', 'de'].map((locale) => [
+                locale,
+                { slug, path: `content/guides/${locale}/${slug}.md`, content: { title: dirPath } },
+              ]),
+            ),
+          },
+        });
+      }),
+    );
+
+    await renderOverlay(createDraft({ collection: getCollection('guides'), currentPath: 'docs' }));
+
+    const button = page
+      .getByRole('group', { name: 'Edit \u2068English\u2069 Content' })
+      .getByRole('button', { name: 'Parent Folder' });
+
+    await expect.element(button).toBeInTheDocument();
+
+    // The path editor isn’t a field, but the validation panel lists its error as `_path`
+    window.postMessage(
+      { type: 'highlight-editor-field', payload: { locale: 'en', keyPath: '_path' } },
+      window.location.origin,
+    );
+    await expect.element(button).toHaveFocus();
+  });
+
   test('highlights the field named in the history state', async () => {
     window.history.replaceState({ highlight: { locale: 'de', keyPath: 'body' } }, '');
 
@@ -455,6 +630,37 @@ describe('ContentDetailsOverlay', () => {
     await expect.element(title).not.toHaveFocus();
   });
 
+  test('leaves an earlier highlight request to a newer one', async () => {
+    await renderOverlay(createDraft());
+
+    const title = page
+      .getByRole('group', { name: 'Edit \u2068English\u2069 Content' })
+      .getByRole('textbox', { name: 'Title' });
+
+    await expect.element(title).toBeInTheDocument();
+
+    // The French content has to be brought into an edit pane first, which takes a while
+    window.postMessage(
+      { type: 'highlight-editor-field', payload: { locale: 'fr', keyPath: 'body' } },
+      window.location.origin,
+    );
+    window.postMessage(
+      { type: 'highlight-editor-field', payload: { locale: 'en', keyPath: 'title' } },
+      window.location.origin,
+    );
+    await expect.element(title).toHaveFocus();
+
+    const frenchBody = page
+      .getByRole('group', { name: 'Edit \u2068French\u2069 Content' })
+      .getByRole('textbox', { name: 'Body' });
+
+    await expect.element(frenchBody).toBeInTheDocument();
+    await new Promise((resolve) => {
+      setTimeout(resolve, 300);
+    });
+    await expect.element(title).toHaveFocus();
+  });
+
   test('renders no pane until the panes are set up', async () => {
     const { container } = await renderOverlay(createDraft());
 
@@ -466,6 +672,7 @@ describe('ContentDetailsOverlay', () => {
 
   test('logs the draft in developer mode', async () => {
     const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn');
 
     prefs.devModeEnabled = true;
 
@@ -473,8 +680,32 @@ describe('ContentDetailsOverlay', () => {
       files: { 'blob:x': { file: new File(['x'], 'x.png'), folder: undefined } },
     });
 
-    await renderOverlay(draft);
+    const { entryDraft } = await renderOverlay(draft);
+
     expect(info).toHaveBeenCalledWith('entryDraft', draft);
+    // Logging the `$state` proxy itself would make Svelte warn
+    expect(warn.mock.calls.some(([message]) => message.includes('console_log_state'))).toBe(false);
+
+    // The draft is logged again when a value or a validity in it changes
+    info.mockClear();
+    /** @type {any} */ (entryDraft.current).currentValues.en.title = 'Hi';
+    flushSync();
+    expect(info).toHaveBeenLastCalledWith(
+      'entryDraft',
+      expect.objectContaining({
+        currentValues: expect.objectContaining({ en: expect.objectContaining({ title: 'Hi' }) }),
+      }),
+    );
+
+    info.mockClear();
+    /** @type {any} */ (entryDraft.current).validities.en.title = { valid: false };
+    flushSync();
+    expect(info).toHaveBeenLastCalledWith(
+      'entryDraft',
+      expect.objectContaining({
+        validities: expect.objectContaining({ en: { title: { valid: false } } }),
+      }),
+    );
   });
 
   test('refuses to create an entry over the limit', async () => {
@@ -493,7 +724,7 @@ describe('ContentDetailsOverlay', () => {
       await expect
         .element(
           page.getByText(
-            'You cannot add new entries to this collection because it has reached its limit of 1 entries.',
+            'You cannot add new entries to this collection because it has reached its limit of 1 entry.',
           ),
         )
         .toBeInTheDocument();

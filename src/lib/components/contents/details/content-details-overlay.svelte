@@ -6,6 +6,7 @@
     EmptyState,
     Group,
     Icon,
+    Infobar,
     ResizableHandle,
     ResizablePane,
     ResizablePaneGroup,
@@ -15,48 +16,46 @@
   import { sleep } from '@sveltia/utils/misc';
   import { onMount, tick, untrack } from 'svelte';
 
-  import BackupFeedback from '$lib/components/contents/details/backup-feedback.svelte';
   import PaneBody from '$lib/components/contents/details/pane-body.svelte';
   import PaneHeader from '$lib/components/contents/details/pane-header.svelte';
   import RemoteChangeInfobar from '$lib/components/contents/details/remote-change-infobar.svelte';
   import SidebarSheet from '$lib/components/contents/details/sidebar/sidebar-sheet.svelte';
   import Sidebar from '$lib/components/contents/details/sidebar/sidebar.svelte';
   import Toolbar from '$lib/components/contents/details/toolbar.svelte';
-  import { rememberFocus } from '$lib/services/app/focus';
+  import { focusOverlay, rememberFocus } from '$lib/services/app/focus';
   import { goto } from '$lib/services/app/navigation';
+  import { getReadonlyMessage, isDraftReadonly } from '$lib/services/config/readonly';
   import { selectedCollection } from '$lib/services/contents/collection';
   import { collectionState } from '$lib/services/contents/collection/view';
-  import {
-    resetBackupToastState,
-    scheduleBackup,
-    showBackupToastIfNeeded,
-  } from '$lib/services/contents/draft/backup';
-  import { getValueMapVersion } from '$lib/services/contents/draft/create/proxy.svelte';
-  import {
-    setEntryDraftContext,
-    setEntryDraftRoot,
-  } from '$lib/services/contents/draft/state.svelte';
-  import { updateComputedValues } from '$lib/services/contents/draft/update/compute';
+  import { resetBackupToastState, scheduleBackup } from '$lib/services/contents/draft/backup';
+  import { getValueMapVersion } from '$lib/services/contents/draft/create/versioned-map.svelte';
+  import { initEntryDraftEditor } from '$lib/services/contents/draft/editor.svelte';
+  import { setEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
   import {
     editorFirstPane,
     editorSecondPane,
     showContentOverlay,
     showDuplicateToast,
   } from '$lib/services/contents/editor';
-  import { getExpanderKeys, syncExpanderStates } from '$lib/services/contents/editor/fields';
+  import { revealEditorField } from '$lib/services/contents/editor/fields';
   import {
     getDefaultPanes,
+    getLocaleContentLabel,
     getPanesEditingLocale,
     getPaneSizes,
     getPaneStateKey,
     getRestoredPanes,
     savePaneState,
   } from '$lib/services/contents/editor/panes';
+  import {
+    afterPendingFieldUpdates,
+    awaitPendingFieldUpdates,
+  } from '$lib/services/contents/editor/pending';
   import { entryEditorSettings } from '$lib/services/contents/editor/settings';
-  import { getLocaleLabel } from '$lib/services/contents/i18n';
-  import { DEFAULT_I18N_CONFIG } from '$lib/services/contents/i18n/config';
+  import { getDraftI18nConfig } from '$lib/services/contents/i18n/config';
   import { env } from '$lib/services/user/env.svelte';
   import { prefs } from '$lib/services/user/prefs.svelte';
+  import { createLatestGuard } from '$lib/services/utils/scheduling';
   import { watch } from '$lib/services/utils/state.svelte';
 
   /**
@@ -89,6 +88,11 @@
   let restoring = false;
   let switching = false;
   /**
+   * Guard for field highlight requests, so a request still looking for its field can tell whether a
+   * newer one has come in.
+   */
+  const highlightRequestGuard = createLatestGuard();
+  /**
    * Width of the first pane in pixels, used to place the pane swap button over the gutter between
    * the panes. The button sits next to the resize handle rather than inside it: the handle is a
    * focusable `separator`, and a button nested in it is an interactive control inside another one.
@@ -113,16 +117,20 @@
     collectionFile,
     fileName,
     isIndexFile,
-    currentValues,
   } = $derived(/** @type {EntryDraft} */ (entryDraft.current ?? {}));
   const { showPreview, showSecondPane = true } = $derived(entryEditorSettings.current ?? {});
-  /* v8 ignore start -- only read while the panes are set up, which needs a collection */
   const { i18nEnabled, allLocales, defaultLocale } = $derived(
-    (collectionFile ?? collection)?._i18n ?? DEFAULT_I18N_CONFIG,
+    getDraftI18nConfig(entryDraft.current),
   );
-  /* v8 ignore stop */
   const paneStateKey = $derived(getPaneStateKey({ collection, collectionFile }));
-  const { canCreate, quota, creationDisabled } = $derived(collectionState.current);
+  const {
+    readonly: collectionReadonly,
+    canCreate,
+    quota,
+    creationDisabled,
+  } = $derived(collectionState.current);
+  // The entry can be viewed but not changed, which the editor says up front
+  const readonly = $derived(isDraftReadonly(entryDraft.current));
   const [firstPaneSize, secondPaneSize, minPaneSize] = $derived(
     getPaneSizes({ firstPane: editorFirstPane.current, secondPane: editorSecondPane.current }),
   );
@@ -180,6 +188,7 @@
 
     if (!(await restorePanes())) {
       [editorFirstPane.current, editorSecondPane.current] = getDefaultPanes({
+        editorLocale,
         currentLocale: editorFirstPane.current?.locale,
         defaultLocale,
         allLocales,
@@ -210,10 +219,12 @@
    * Swap the panes.
    */
   const swapPanes = () => {
-    [editorFirstPane.current, editorSecondPane.current] = [
-      editorSecondPane.current,
-      editorFirstPane.current,
-    ];
+    afterPendingFieldUpdates(() => {
+      [editorFirstPane.current, editorSecondPane.current] = [
+        editorSecondPane.current,
+        editorFirstPane.current,
+      ];
+    });
   };
 
   /**
@@ -227,24 +238,13 @@
   };
 
   /**
-   * Move focus to the wrapper once the overlay is loaded.
-   */
-  const moveFocus = async () => {
-    // Wait until `inert` is updated
-    await tick();
-
-    /* v8 ignore next 4 -- the wrapper is bound as long as the overlay is mounted */
-    if (wrapper) {
-      wrapper.tabIndex = 0;
-      wrapper.focus();
-    }
-  };
-
-  /**
    * Ensure the given locale’s edit pane is visible, switching panes if needed.
    * @param {InternalLocaleCode} locale Locale code.
    */
   const ensureEditPaneVisible = async (locale) => {
+    // The panes are about to change, so let what was just typed reach the draft first
+    await awaitPendingFieldUpdates();
+
     const panes = getPanesEditingLocale({
       firstPane: editorFirstPane.current,
       secondPane: editorSecondPane.current,
@@ -263,14 +263,15 @@
   };
 
   /**
-   * Highlight the corresponding editor field by expanding the parent list/object(s), moving the
-   * element into the viewport, and focus any control within the field, such as a text input or
-   * button.
+   * Reveal the requested editor field: switch to an edit pane for the locale if needed, then expand
+   * the parent list/object(s), move the field into the viewport and focus a control within it.
    * @param {object} args Arguments.
    * @param {InternalLocaleCode} args.locale Locale code.
    * @param {FieldKeyPath} args.keyPath Key path of the field.
    */
-  const highlightEditorField = async ({ locale, keyPath }) => {
+  const revealRequestedField = async ({ locale, keyPath }) => {
+    const isLatest = highlightRequestGuard.next();
+
     await ensureEditPaneVisible(locale);
 
     const draft = entryDraft.current;
@@ -281,44 +282,13 @@
       return;
     }
 
-    const valueMap = currentValues?.[locale] ?? {};
+    /**
+     * Check whether a newer request has come in.
+     * @returns {boolean} Result.
+     */
+    const isOutdated = () => !isLatest();
 
-    const expanderKeys = getExpanderKeys({
-      collectionName,
-      fileName,
-      valueMap,
-      keyPath,
-      isIndexFile,
-    });
-
-    syncExpanderStates({
-      draft,
-      stateMap: Object.fromEntries(expanderKeys.map((key) => [key, true])),
-    });
-
-    window.requestAnimationFrame(() => {
-      const targetField = document.querySelector(
-        `.content-editor .pane[data-mode="edit"][data-locale="${CSS.escape(locale)}"] ` +
-          `.field[data-key-path="${CSS.escape(keyPath)}"]`,
-      );
-
-      if (targetField) {
-        /* v8 ignore start -- `scrollIntoViewIfNeeded()` is non-standard; Firefox doesn’t have it */
-        if (typeof targetField.scrollIntoViewIfNeeded === 'function') {
-          targetField.scrollIntoViewIfNeeded();
-        } else {
-          targetField.scrollIntoView();
-        }
-        /* v8 ignore stop */
-
-        const widgetWrapper = targetField.querySelector('.field-wrapper');
-
-        /** @type {HTMLElement | null} */ (
-          widgetWrapper?.querySelector('[contenteditable="true"], [tabindex="0"]') ??
-            widgetWrapper?.querySelector('input, textarea, button')
-        )?.focus();
-      }
-    });
+    await revealEditorField({ draft, locale, keyPath, isOutdated });
   };
 
   /**
@@ -326,19 +296,19 @@
    * clicks a search result or validation error. Then clear the highlight state so that it doesn’t
    * trigger again on navigation.
    */
-  const highlightEditorFieldIfNeeded = async () => {
+  const revealRequestedFieldIfNeeded = async () => {
     const { state } = window.history;
     const { locale, keyPath } = state?.highlight ?? {};
 
     if (typeof locale === 'string' && typeof keyPath === 'string' && locale && keyPath) {
-      await highlightEditorField({ locale, keyPath });
+      await revealRequestedField({ locale, keyPath });
       window.history.replaceState({ ...state, highlight: null }, '');
     }
   };
 
   /**
    * Called when a message event is received. If the event is a highlight event, calls
-   * {@link highlightEditorField} with the event payload.
+   * {@link revealRequestedField} with the event payload.
    * @param {MessageEvent} event The message event.
    */
   const onmessage = (event) => {
@@ -348,7 +318,7 @@
     }
 
     if (event.data?.type === 'highlight-editor-field' && event.data.payload) {
-      highlightEditorField(event.data.payload);
+      revealRequestedField(event.data.payload);
     }
   };
 
@@ -369,42 +339,20 @@
   });
 
   $effect(() => {
-    /* v8 ignore next 5 -- the wrapper is bound as long as the overlay is mounted */
-    if (wrapper) {
-      // Rich text editor components are mounted outside the component tree, so they look the
-      // draft up through the DOM rather than the context
-      setEntryDraftRoot(wrapper, entryDraft);
-    }
-  });
-
-  $effect(() => {
     if (prefs.devModeEnabled) {
+      // Log a plain copy rather than the `$state` proxy. Taking it reads every value in the draft,
+      // so the draft is logged again whenever a value or its validity changes
       // eslint-disable-next-line no-console
-      console.info('entryDraft', entryDraft.current);
+      console.info('entryDraft', $state.snapshot(entryDraft.current));
     }
   });
 
-  $effect(() => {
-    const draft = entryDraft.current;
-
-    if (!draft) {
-      return;
-    }
-
-    // Depend on every field value at the cost of one dependency per locale, without walking the
-    // values: each value map proxy counts its writes
-    Object.values(draft.currentValues).forEach(getValueMapVersion);
-    // The extra values of rich text editor components are plain `$state` objects with no version,
-    // so they have to be read to be tracked. They are few, so the walk is cheap
-    Object.values(draft.extraValues).forEach((valueMap) => void $state.snapshot(valueMap));
-    void $state.snapshot(draft.currentLocales);
-
-    untrack(() => {
-      // Resolve the Compute fields here rather than in their own editors, which only run while
-      // they are rendered — a collapsed or off-screen list item renders none of its fields
-      updateComputedValues(draft);
-    });
-  });
+  // Register the editor root, which the rich text editor components look the draft up with, and
+  // resolve the Compute fields
+  initEntryDraftEditor(
+    () => entryDraft,
+    () => wrapper,
+  );
 
   $effect(() => {
     const draft = entryDraft.current;
@@ -455,13 +403,13 @@
     /* v8 ignore next -- the wrapper is bound as long as the overlay is mounted */
     if (wrapper) {
       (async () => {
-        if (!showContentOverlay.current) {
-          await showBackupToastIfNeeded(entryDraft.current);
-        } else if (hidden) {
+        // The overlay is only rendered while it’s shown, so there is nothing to do once it’s
+        // closed; the page shows the backup toast then
+        if (hidden) {
           hidden = false;
           await switchPanes();
-          await moveFocus();
-          await highlightEditorFieldIfNeeded();
+          await focusOverlay(() => wrapper);
+          await revealRequestedFieldIfNeeded();
           resetBackupToastState();
         }
       })();
@@ -478,13 +426,14 @@
   <div class="pane-wrapper">
     <Group
       class="pane"
-      ariaLabel={_(mode === 'edit' ? 'edit_x_locale' : 'preview_x_locale', {
-        values: { locale: getLocaleLabel(locale) ?? locale },
-      })}
+      ariaLabel={getLocaleContentLabel(
+        mode === 'edit' ? 'edit_x_locale' : 'preview_x_locale',
+        locale,
+      )}
       data-locale={locale}
       data-mode={mode}
     >
-      <PaneHeader id="{position}-pane-header" {thisPane} {thatPane} />
+      <PaneHeader id={`${position}-pane-header`} {thisPane} {thatPane} />
       {#if position === 'first'}
         <PaneBody
           id="first-pane-body"
@@ -511,6 +460,16 @@
   bind:this={wrapper}
 >
   {#key entryDraft.current?.id}
+    <!-- A new entry that can’t be created gets the message in place of the editor instead -->
+    {#if readonly && !loading && !(isNew && creationDisabled)}
+      <Infobar
+        dismissible={false}
+        --sui-infobar-border-width="0 0 1px"
+        --sui-infobar-message-justify-content="center"
+      >
+        {getReadonlyMessage('entry', { collection, collectionFile })}
+      </Infobar>
+    {/if}
     <Toolbar disabled={loading || (isNew && creationDisabled)} />
     {#if loading}
       <EmptyState>
@@ -523,6 +482,8 @@
         <div role="none">
           {#if notFound}
             {_('entry_not_found')}
+          {:else if collectionReadonly}
+            {getReadonlyMessage('collection', { collection })}
           {:else if !canCreate}
             {_('creating_entries_disabled_by_admin')}
           {:else}
@@ -608,8 +569,6 @@
     {/if}
   {/key}
 </div>
-
-<BackupFeedback />
 
 <Toast bind:show={showDuplicateToast.current}>
   <Alert status="success">

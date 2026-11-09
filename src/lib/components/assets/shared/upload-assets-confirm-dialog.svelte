@@ -4,21 +4,17 @@
   import { getPathInfo } from '@sveltia/utils/file';
 
   import UploadAssetsPreview from '$lib/components/assets/shared/upload-assets-preview.svelte';
-  import {
-    getAssetsByDirName,
-    getDuplicateFiles,
-    processedAssets,
-    uploadingAssets,
-  } from '$lib/services/assets';
+  import { getAssetsByDirName, getDuplicateFiles } from '$lib/services/assets';
   import { saveAssets } from '$lib/services/assets/data/create';
+  import { formatSize } from '$lib/services/assets/file-size';
+  import { processedAssets } from '$lib/services/assets/process';
+  import { uploadingAssets } from '$lib/services/assets/state';
   import { getUploadDirPath } from '$lib/services/assets/subfolders';
   import { showAssetOverlay, showUploadAssetsConfirmDialog } from '$lib/services/assets/view';
+  import { isCommitCancelled } from '$lib/services/backends/commit-prompt';
   import { getDefaultMediaLibraryOptions } from '$lib/services/integrations/media-libraries/default';
-  import { formatSize, isEquivalentFileExtension } from '$lib/services/utils/file';
+  import { isEquivalentFileExtension } from '$lib/services/utils/file';
 
-  /** @type {File[]} */
-  let files = $state([]);
-  let replaceFiles = $state(true);
   // Committing to a remote repository takes a few seconds, and the confirmation dialog is gone by
   // then, so the upload would otherwise happen with nothing on screen to say it’s under way
   let uploading = $state(false);
@@ -40,8 +36,6 @@
   const assetsInSameFolder = $derived(
     originalAsset || dirPath === undefined ? [] : getAssetsByDirName(dirPath),
   );
-  const dupFiles = $derived(getDuplicateFiles(files, assetsInSameFolder));
-  const dupFileCount = $derived(dupFiles.length);
   // A replacement file keeps the name of the asset it replaces, so it has to be in the same
   // format: `cat.jpg` can be replaced with `cat2.jpeg`, which is that same format under another
   // extension, while a `cat.png` is a different thing that can’t be saved under the `.jpg` name.
@@ -60,10 +54,18 @@
       : [],
   );
 
-  $effect(() => {
-    files = validFiles.filter((file) => !mismatchedFiles.includes(file));
-    replaceFiles = true;
+  /** Files that can be saved. */
+  const uploadableFiles = $derived(validFiles.filter((file) => !mismatchedFiles.includes(file)));
+  /** Files to be saved, which the user can remove from the list. */
+  let files = $derived(uploadableFiles);
+  // Duplicates are replaced by default, again whenever another set of files comes in
+  let replaceFiles = $derived.by(() => {
+    void uploadableFiles;
+
+    return true;
   });
+  const dupFiles = $derived(getDuplicateFiles(files, assetsInSameFolder));
+  const dupFileCount = $derived(dupFiles.length);
 
   $effect(() => {
     if (!showAssetOverlay.current) {
@@ -79,24 +81,27 @@
   okLabel={_(originalAsset ? 'replace' : 'upload')}
   okDisabled={!files.length}
   onOk={async () => {
+    const request = originalAsset
+      ? { files, folder, originalAssets }
+      : { files, folder, subfolderPath, replaceDuplicates: replaceFiles };
+
+    // Clear the selection before the commit, which can take a while: files the user picks or drops
+    // meanwhile then open the dialog again rather than being swallowed by this upload, and a failed
+    // upload doesn’t leave the store holding files that no dialog is showing any more
+    uploadingAssets.current = { folder: undefined, files: [] };
     uploading = true;
 
     try {
-      await saveAssets(
-        originalAsset
-          ? { files, folder, originalAssets }
-          : { files, folder, subfolderPath, replaceDuplicates: replaceFiles },
-        { commitType: 'uploadMedia' },
-      );
+      await saveAssets(request, { commitType: 'uploadMedia' });
     } catch (/** @type {any} */ ex) {
-      uploadFailed = true;
-      // eslint-disable-next-line no-console
-      console.error(ex);
+      // The user has cancelled the commit at the commit message prompt, which isn’t a failure
+      if (!isCommitCancelled(ex)) {
+        uploadFailed = true;
+        // eslint-disable-next-line no-console
+        console.error(ex);
+      }
     } finally {
       uploading = false;
-      // Clear the selection whatever happened, so a failed upload doesn’t leave the store holding
-      // files that no dialog is showing any more
-      uploadingAssets.current = { folder: undefined, files: [] };
     }
   }}
   onCancel={() => {

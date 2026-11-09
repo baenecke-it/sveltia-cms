@@ -3,8 +3,8 @@ import { beforeAll, beforeEach, describe, expect, test } from 'vitest';
 import { page } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
-import { uploadingAssets } from '$lib/services/assets';
 import { getAssetFolder } from '$lib/services/assets/folders';
+import { uploadingAssets } from '$lib/services/assets/state';
 import { getCollection, selectedCollection } from '$lib/services/contents/collection';
 import { currentView } from '$lib/services/contents/collection/view/settings';
 import { env } from '$lib/services/user/env.svelte';
@@ -100,7 +100,6 @@ describe('SecondarySidebar', () => {
     expect(uploadingAssets.current.folder?.internalPath).toBe('static/posts');
 
     // Selecting an asset opens its details
-    await sleep(150);
     await group.getByRole('option').click();
     await expect.poll(() => window.location.hash).toBe('#/assets/static/posts/a.png');
   });

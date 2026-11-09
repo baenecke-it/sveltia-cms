@@ -10,7 +10,6 @@
     Menu,
     MenuButton,
     MenuItem,
-    MenuItemCheckbox,
     Spacer,
     SplitButton,
     Toast,
@@ -20,68 +19,59 @@
   import { LocalStorage } from '@sveltia/utils/storage';
   import { mount } from 'svelte';
 
-  import CascadeDeleteNote from '$lib/components/common/cascade-delete-note.svelte';
   import BackButton from '$lib/components/common/page-toolbar/back-button.svelte';
+  import ResetDialog from '$lib/components/contents/details/editor/reset-dialog.svelte';
+  import ResetMenuItems from '$lib/components/contents/details/editor/reset-menu-items.svelte';
+  import ValidationErrorsToast from '$lib/components/contents/details/editor/validation-errors-toast.svelte';
+  import ViewMenuItems from '$lib/components/contents/details/editor/view-menu-items.svelte';
+  import EntryRemoval from '$lib/components/contents/details/entry-removal.svelte';
   import PreviewLinkButton from '$lib/components/contents/details/preview-link-button.svelte';
+  import SaveConflictDialog from '$lib/components/contents/details/save-conflict-dialog.svelte';
   import EntryStatusMenu from '$lib/components/workflow/entry-status-menu.svelte';
   import PublishEntryButton from '$lib/components/workflow/publish-entry-button.svelte';
-  import { goBack, goto, overlayTitle } from '$lib/services/app/navigation';
-  import { getAssetFolder } from '$lib/services/assets/folders';
+  import { getEntryEditorBackPath, goBack, goto, overlayTitle } from '$lib/services/app/navigation';
   import { skipCIConfigured, skipCIEnabled } from '$lib/services/backends/git/shared/integration';
-  import { allEntries } from '$lib/services/contents';
+  import { isDraftReadonly } from '$lib/services/config/readonly';
   import { getCollectionLabel, selectedCollection } from '$lib/services/contents/collection';
-  import {
-    contentUpdatesToast,
-    UPDATE_TOAST_DEFAULT_STATE,
-  } from '$lib/services/contents/collection/data';
-  import { deleteEntries } from '$lib/services/contents/collection/data/delete';
   import { getCollectionFileLabel } from '$lib/services/contents/collection/files';
   import { isNestedCollection, nestedFilterPath } from '$lib/services/contents/collection/nested';
   import { collectionState } from '$lib/services/contents/collection/view';
   import { createDraft } from '$lib/services/contents/draft/create';
-  import { duplicateDraft } from '$lib/services/contents/draft/create/duplicate';
-  import { saveEntry } from '$lib/services/contents/draft/save';
-  import { describeConflict } from '$lib/services/contents/draft/save/conflict';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
-  import { revertChanges } from '$lib/services/contents/draft/update/revert';
-  import { validateDraft } from '$lib/services/contents/draft/validate';
+  import { canResetEntry } from '$lib/services/contents/draft/update/reset';
   import { activeInlineEditors, copyFromLocaleToast } from '$lib/services/contents/editor';
-  import { entryEditorSettings } from '$lib/services/contents/editor/settings';
+  import { fieldUpdatePending } from '$lib/services/contents/editor/pending';
+  import { createResetMenuState } from '$lib/services/contents/editor/reset-menu.svelte';
+  import { duplicateEntryDraft, saveEntryDraftFlow } from '$lib/services/contents/editor/save';
   import { getSidebarPanels, showSidebarPanel } from '$lib/services/contents/editor/sidebar';
   import { canUpdateSlug } from '$lib/services/contents/editor/slug';
-  import { getAssociatedAssets } from '$lib/services/contents/entry/assets';
-  import { planCascadeDelete } from '$lib/services/contents/entry/relations/cascade/delete';
+  import { getEntryToolbarState } from '$lib/services/contents/editor/toolbar';
+  import { getEntryRelativeAssets } from '$lib/services/contents/entry/assets';
   import { getEntrySummary } from '$lib/services/contents/entry/summary';
   import { getLocaleLabel } from '$lib/services/contents/i18n';
-  import { DEFAULT_I18N_CONFIG } from '$lib/services/contents/i18n/config';
+  import { getDraftI18nConfig } from '$lib/services/contents/i18n/config';
   import { deployPollTimedOut } from '$lib/services/deployments';
   import { recheckDeployments, retainDeployPolling } from '$lib/services/deployments/poll';
+  import { isSearchResultsPath } from '$lib/services/search/navigation';
   import { env } from '$lib/services/user/env.svelte';
   import { prefs } from '$lib/services/user/prefs.svelte';
   import {
+    checkPublishedVersion,
     getUnpublishedEntryByDraft,
-    hasPublishedVersion,
+    isDirectPublishAllowed,
     isPendingDeletion,
     isWorkflowEnabled,
     workflowEnabled,
   } from '$lib/services/workflow';
   import { getDiscardDialogStrings } from '$lib/services/workflow/dialogs';
   import { openAuthoring } from '$lib/services/workflow/open-authoring';
-  import {
-    deleteWorkflowEntry,
-    discardWorkflowEntry,
-    updateWorkflowStatus,
-  } from '$lib/services/workflow/save';
 
   import NewsletterContent from '../../newsletter/NewsletterContent.svelte';
 
   /**
-   * @import { CascadeDeletePlan, UnpublishedEntry, UpdateToastState } from '$lib/types/private';
    * @import { EntryConflict } from '$lib/services/contents/draft/save/conflict';
+   * @import { WorkflowStatus } from '$lib/types/private';
    */
-
-  /** @type {CascadeDeletePlan} */
-  const EMPTY_PLAN = { targets: [], blockers: [] };
 
   /**
    * @typedef {object} Props
@@ -102,46 +92,55 @@
   // count: the fields are revalidated as they’re corrected, and a toast counting down to “0 fields
   // have errors” while it’s still on screen would be confusing
   let errorCount = $state(0);
-  let showDeleteDialog = $state(false);
   let showReviewDialog = $state(false);
+  /**
+   * Stage the review prompt offers to move the entry just saved to.
+   * @type {WorkflowStatus | undefined}
+   */
+  let reviewStage = $state();
   /**
    * Resolver for the review prompt, so the save can wait for the answer.
    * @type {((sendForReview: boolean) => void) | undefined}
    */
   let resolveReviewPrompt = $state();
-  let showDiscardDialog = $state(false);
   let showConflictDialog = $state(false);
   /**
    * Someone else’s change to the entry that the last save attempt would have overwritten, along
    * with the options of that attempt, so the save can be repeated as asked once the user agrees.
-   * @type {{ conflict: EntryConflict, skipCI: boolean | undefined } | undefined}
+   * @type {{ conflict: EntryConflict, skipCI: boolean | undefined, publish: boolean } | undefined}
    */
   let saveConflict = $state();
-  let showDeleteErrorToast = $state(false);
   let showErrorDialog = $state(false);
   let showSendNewsletterDialog = $state(false);
   let showSendNewsletterErrorDialog = $state(false);
   let updateNewsletterSentStateErrorDialog = $state(false);
   let errorMessage = $state('');
   let saving = $state(false);
+  /** Whether the entry being saved is also being published, bypassing the review. */
+  let publishing = $state(false);
   let deleting = $state(false);
   /** Whether the entry is being duplicated, which takes a moment when it has assets to copy. */
   let duplicating = $state(false);
-  /** I18n key of the message shown while a deletion is in flight. */
-  let progressMessage = $state('');
   /** @type {MenuButton | undefined} */
   let menuButton = $state();
+  /** @type {EntryRemoval | undefined} */
+  let entryRemoval = $state();
+  const resetMenu = createResetMenuState(() => {
+    const draft = entryDraft.current;
+
+    return {
+      restore: !!draft && canResetEntry({ draft, restore: true }),
+      clear: !!draft && canResetEntry({ draft }),
+    };
+  });
 
   const notFound = $derived(entryDraft.current === undefined);
   const isNew = $derived(entryDraft.current?.isNew ?? true);
   const isIndexFile = $derived(!!entryDraft.current?.isIndexFile);
   const collection = $derived(entryDraft.current?.collection);
-  const entryCollection = $derived(collection?._type === 'entry' ? collection : undefined);
   const collectionFile = $derived(entryDraft.current?.collectionFile);
   const originalEntry = $derived(entryDraft.current?.originalEntry);
-  const { i18nEnabled, allLocales, defaultLocale } = $derived(
-    (collectionFile ?? collection)?._i18n ?? DEFAULT_I18N_CONFIG,
-  );
+  const { defaultLocale } = $derived(getDraftI18nConfig(entryDraft.current));
   const collectionName = $derived(collection?.name);
   const fileName = $derived(collectionFile?.name);
   /* v8 ignore start -- only read for an existing entry, which has a collection */
@@ -171,7 +170,6 @@
         ? _('create_entry_title', { values: { name: collectionLabelSingular } })
         : `${collectionLabel} › ${entrySummary}`,
   );
-  const canPreview = $derived(entryDraft.current?.canPreview ?? true);
 
   $effect(() => {
     overlayTitle.current = title;
@@ -180,23 +178,15 @@
       overlayTitle.current = '';
     };
   });
-  const showSecondPane = $derived(entryEditorSettings.current?.showSecondPane ?? true);
-  // There’s only something to put in the second pane when another locale can be edited alongside
-  // the first one, or when the entry has a preview
-  const canShowSecondPane = $derived((i18nEnabled && allLocales.length > 1) || canPreview);
-  /* v8 ignore start -- only read while the draft is there, as the preview is on by default */
-  const hasSingleLocale = $derived(
-    Object.keys(entryDraft.current?.currentValues ?? {}).length === 1,
-  );
-  /* v8 ignore stop */
   // Saving, deleting or duplicating takes a moment and navigates away when it’s done, so the whole
   // control group is locked meanwhile rather than just the button that started it
   const busy = $derived(saving || deleting || duplicating);
   const controlsDisabled = $derived(disabled || busy);
-  const modified = $derived(isNew || entryDraft.modified);
+  // A change still on its way to the draft counts, so a save can be started right after it
+  const modified = $derived(isNew || entryDraft.modified || fieldUpdatePending.current);
   const associatedAssets = $derived(
-    collectionName && originalEntry && getAssetFolder({ collectionName, fileName })?.entryRelative
-      ? getAssociatedAssets({ entry: originalEntry, collectionName, fileName, relative: true })
+    collectionName && originalEntry
+      ? getEntryRelativeAssets({ entry: originalEntry, collectionName, fileName })
       : [],
   );
   // Look the entry up in the store rather than using `originalEntry` directly, so the status button
@@ -206,42 +196,36 @@
       ? getUnpublishedEntryByDraft({ collectionName, fileName, originalEntry })
       : undefined,
   );
-  // A collection can opt in or out of Editorial Workflow with its own `publish_mode` option, but an
-  // entry that already has a pull request stays in it until it’s published or discarded
-  const useWorkflow = $derived(!!unpublishedEntry || isWorkflowEnabled(collection));
-  // The `delete` option only blocks taking an entry off the site. Discarding a pull request leaves
-  // the published version untouched, so it stays available even when deletion is disabled
-  const canDelete = $derived(entryCollection?.delete !== false);
-  // `allEntries.current` is a dependency, because the entry can be published from another view
-  const publishedVersionExists = $derived(
-    !!unpublishedEntry && !!allEntries.current && hasPublishedVersion(unpublishedEntry),
-  );
-  // Deleting an entry that was never published just throws the draft away; anything else takes an
-  // entry off the site
-  const discardsDraft = $derived(!!unpublishedEntry && !publishedVersionExists);
-  // Taking a published entry off the site is a maintainer’s call. An Open Authoring contributor can
-  // discard their own draft, but not propose the removal of something already live
-  const canDeleteEntry = $derived(canDelete && (discardsDraft || !openAuthoring.current));
-  // An entry awaiting deletion is read-only: there’s nothing to save or move through the stages,
-  // only the deletion itself to carry out or call off
+  // The entry can be published from another view, so the check depends on `allEntries`
+  const publishedVersionExists = $derived(checkPublishedVersion(unpublishedEntry));
   const pendingDeletion = $derived(isPendingDeletion(unpublishedEntry));
+  const readonly = $derived(isDraftReadonly(entryDraft.current));
+  const { useWorkflow, discardsDraft, locked, canDuplicate, removalMenuItems } = $derived(
+    getEntryToolbarState({
+      collection,
+      collectionFile,
+      isIndexFile,
+      hasPullRequest: !!unpublishedEntry,
+      workflowEnabled: isWorkflowEnabled(collection),
+      publishedVersionExists,
+      pendingDeletion,
+      readonly,
+      openAuthoring: openAuthoring.current,
+      creationDisabled: collectionState.current.creationDisabled,
+    }),
+  );
+  // A workflow draft can also be saved and published in one go, if the publish mode allows it
+  const directPublish = $derived(
+    useWorkflow && isDirectPublishAllowed(collection, unpublishedEntry),
+  );
+  // The review prompt hands the entry over for review, or marks it ready when there’s no review
+  const reviewDialogLabel = $derived(
+    _(reviewStage === 'pending_publish' ? 'workflow.mark_as_ready' : 'workflow.send_for_review'),
+  );
   // The menu item either throws the pull request away or deletes the entry outright, depending on
   // whether it has been published
   const discardItemStrings = $derived(
     getDiscardDialogStrings({ pendingDeletion, publishedVersionExists }),
-  );
-  // The discard dialog is only opened for an entry with a published version. Its text is kept as it
-  // is when the discarded entry goes away, so it doesn’t change while the dialog is closing
-  const discardDialogStrings = $derived(
-    getDiscardDialogStrings({ pendingDeletion, publishedVersionExists: true }),
-  );
-  // What the deletion means for the entries referencing this one through Relation fields. Nothing
-  // on the configured branch can reference a draft that has never been published, and the scan is
-  // only worth doing while the dialog is open
-  const cascadePlan = $derived(
-    showDeleteDialog && collection && originalEntry && !discardsDraft
-      ? planCascadeDelete({ collection, collectionFile, entries: [originalEntry] })
-      : EMPTY_PLAN,
   );
 
   let deployed = $state(false);
@@ -281,131 +265,42 @@
   $effect(() => retainDeployPolling());
 
   /**
-   * Go back to the previous page. If the entry is a singleton file, go to the collections list.
-   * Otherwise, go to the collection entries list — the folder being browsed for a nested
-   * collection, so the user lands where they opened the entry from.
+   * Go back to the previous page: the search results if the entry was opened from them, or the
+   * path given by `getEntryEditorBackPath()` otherwise.
    */
   const _goBack = () => {
-    if (collectionName === '_singletons') {
-      goBack('/collections');
-
-      return;
-    }
-
     const dirPath = collection && isNestedCollection(collection) ? nestedFilterPath.current : '';
 
-    goBack(
-      dirPath
-        ? `/collections/${collectionName}/filter/${dirPath}`
-        : `/collections/${collectionName}`,
-    );
+    goBack(getEntryEditorBackPath({ collectionName, dirPath }), {
+      returnTo: isSearchResultsPath,
+    });
   };
 
   /**
-   * Run the given deletion action, then go back to the entry list. The action reports what happened
-   * by returning a toast state, which is shown by the content library page: the editor is closed by
-   * then, so a toast rendered here would go with it. Errors are reported with a toast and leave the
-   * editor open.
-   * @param {() => Promise<Partial<UpdateToastState> | undefined>} action Action to be performed.
-   * @param {string} progressKey I18n key of the message shown while the action is in flight.
+   * Ask whether the entry just saved should be moved to the given stage, e.g. handed over for
+   * review, and wait for the answer.
+   * @param {WorkflowStatus} stage Next stage.
+   * @returns {Promise<boolean>} `true` if the user wants to move it.
    */
-  const runDeletion = async (action, progressKey) => {
-    /** @type {Partial<UpdateToastState> | undefined} */
-    let toastState;
-
-    progressMessage = progressKey;
-    deleting = true;
-
-    try {
-      toastState = await action();
-    } catch (/** @type {any} */ ex) {
-      showDeleteErrorToast = true;
-      // eslint-disable-next-line no-console
-      console.error(ex);
-
-      return;
-    } finally {
-      deleting = false;
-    }
-
-    if (toastState) {
-      contentUpdatesToast.current = { ...UPDATE_TOAST_DEFAULT_STATE, count: 1, ...toastState };
-    }
-
-    _goBack();
-  };
-
-  /**
-   * Delete the entry. With Editorial Workflow the removal goes through a pull request like any
-   * other change, so the entry stays on the site until that is published. An unpublished entry that
-   * has never been published is discarded instead, because there’s nothing on the configured branch
-   * to remove.
-   */
-  const deleteEntry = async () => {
-    await runDeletion(async () => {
-      if (unpublishedEntry && !publishedVersionExists) {
-        await discardWorkflowEntry(unpublishedEntry);
-
-        // Nothing was published, so the entry really is gone
-        return { deleted: true };
-      }
-
-      if (originalEntry && useWorkflow && collection) {
-        await deleteWorkflowEntry(originalEntry, collection, collectionFile, associatedAssets);
-
-        return { deleted: true, deletionPending: true };
-      }
-
-      /* v8 ignore next 4 -- the option is only offered for an existing entry */
-      if (originalEntry) {
-        // `deleteEntries()` reports the outcome itself
-        await deleteEntries([originalEntry], associatedAssets);
-      }
-
-      return undefined;
-    }, 'workflow.deleting_entry');
-  };
-
-  /**
-   * Discard the unpublished changes by closing the pull request, leaving the published version of
-   * the entry untouched.
-   */
-  const discardChanges = async () => {
-    await runDeletion(
-      async () => {
-        /* v8 ignore next 3 -- the option is only offered for an unpublished entry */
-        if (unpublishedEntry) {
-          await discardWorkflowEntry(unpublishedEntry);
-        }
-
-        return pendingDeletion ? { deletionCancelled: true } : { discarded: true };
-      },
-      pendingDeletion ? 'workflow.cancelling_deletion' : 'workflow.discarding_changes',
-    );
-  };
-
-  /**
-   * Check whether the entry that has just been saved is complete enough to be handed over for
-   * review. Required fields aren’t enforced while an entry is a draft, so it may have been saved
-   * with some of them empty. The check leaves the editor state alone: nothing is wrong with the
-   * draft as saved, so no errors are shown for it.
-   * @returns {boolean} Result.
-   */
-  const isReadyForReview = () => {
-    const draft = entryDraft.current;
-
-    return !!draft && validateDraft({ draft }).valid;
-  };
-
-  /**
-   * Ask whether the entry just saved should be handed over for review, and wait for the answer.
-   * @returns {Promise<boolean>} `true` if the user wants to send it.
-   */
-  const askForReview = () =>
+  const askForReview = (stage) =>
     new Promise((resolve) => {
+      reviewStage = stage;
       resolveReviewPrompt = resolve;
       showReviewDialog = true;
     });
+
+  /**
+   * Check whether the entry is saved to a pull request. Read once the entry is saved, as saving it
+   * may have opened a pull request.
+   * @returns {boolean} Result.
+   */
+  const isWorkflowUsed = () => useWorkflow;
+
+  /**
+   * Check whether the editor is to be closed once the entry is saved.
+   * @returns {boolean} Result.
+   */
+  const isCloseOnSaveEnabled = () => prefs.closeOnSave ?? true;
 
   /**
    * Save the entry draft.
@@ -413,8 +308,10 @@
    * @param {boolean} [options.skipCI] Whether to disable automatic deployments for the change.
    * @param {boolean} [options.overwrite] Whether to save over someone else’s change to the entry,
    * once the user has been asked.
+   * @param {boolean} [options.publish] Whether to publish the entry along with the save, bypassing
+   * the review.
    */
-  const save = async ({ skipCI = undefined, overwrite = false } = {}) => {
+  const save = async ({ skipCI = undefined, overwrite = false, publish = false } = {}) => {
     const draft = entryDraft.current;
 
     if (!collection || !draft) {
@@ -422,82 +319,56 @@
     }
 
     saving = true;
+    publishing = publish;
 
     try {
-      const savedEntry = await saveEntry({ draft, skipCI, overwrite });
-      const savedDraft = /** @type {UnpublishedEntry} */ (savedEntry);
+      const outcome = await saveEntryDraftFlow({
+        entryDraft,
+        useWorkflow: isWorkflowUsed,
+        skipCI,
+        overwrite,
+        publish,
+        askForReview,
+        closeOnSave: isCloseOnSaveEnabled,
+      });
 
-      // Saving with Editorial Workflow leaves the entry as a draft, which nothing on screen says:
-      // it hasn’t been handed to anyone yet, and the status menu that would do it is easy to miss.
-      // Offer it as the next step instead, once, while the entry is still in the drafting stage
-      if (
-        useWorkflow &&
-        savedDraft.workflow?.status === 'draft' &&
-        // An incomplete entry isn’t ready to be handed over; the status menu is still there once
-        // the remaining fields have been filled in
-        isReadyForReview() &&
-        (await askForReview())
-      ) {
-        try {
-          await updateWorkflowStatus(savedDraft, 'pending_review');
-        } catch (/** @type {any} */ ex) {
+      if (outcome.type === 'saved') {
+        if (outcome.statusError !== undefined) {
           showErrorDialog = true;
-          errorMessage = _('workflow.status_change_failed');
-          // eslint-disable-next-line no-console
-          console.error(ex);
-
-          // The entry itself is saved, so leave the editor open rather than navigating away from a
-          // failure the user may want to retry from the status menu
-          return;
+          errorMessage = outcome.statusError;
         }
-      }
 
-      if (isNew) {
-        // Update the URL. A collection file is addressed by its name, while its `subPath` is the
-        // whole file path. This is done even when the editor is about to be closed, so the `new`
-        // route doesn’t stay in the session history: moving forward from the entry list then
-        // reopens the entry that was just created instead of a blank editor
-        goto(`/collections/${collectionName}/entries/${fileName ?? savedEntry.subPath}`, {
-          replaceState: true,
-          notifyChange: false,
-        });
-      }
+        if (outcome.path) {
+          goto(outcome.path, { replaceState: true, notifyChange: false });
+        }
 
-      if (prefs.closeOnSave ?? true) {
-        _goBack();
-        entryDraft.current = null;
-      } else {
-        // Reset the draft
-        createDraft({
-          entryDraft,
-          collection,
-          collectionFile,
-          originalEntry: savedEntry,
-          extraValues: draft.extraValues,
-          expanderStates: draft.expanderStates,
-        });
-      }
-    } catch (/** @type {any} */ ex) {
-      if (ex.message === 'validation_failed') {
-        errorCount = Object.values(draft.validities)
-          .flatMap((validity) => Object.values(validity).map(({ valid }) => !valid))
-          .filter(Boolean).length;
+        if (outcome.next === 'close') {
+          _goBack();
+          entryDraft.current = null;
+        } else if (outcome.next === 'reset') {
+          createDraft({
+            entryDraft,
+            collection,
+            collectionFile,
+            originalEntry: outcome.savedEntry,
+            extraValues: draft.extraValues,
+            expanderStates: draft.expanderStates,
+          });
+        }
+      } else if (outcome.type === 'invalid') {
+        errorCount = outcome.errorCount;
         showValidationToast = true;
-      } else if (ex.message === 'save_conflict') {
+      } else if (outcome.type === 'conflict') {
         // Someone else has changed the entry since it was opened; let the user decide
-        saveConflict = { conflict: ex.cause, skipCI };
+        saveConflict = { conflict: outcome.conflict, skipCI, publish };
         showConflictDialog = true;
-      } else if (ex.message === 'saving_failed') {
+      } else if (outcome.type === 'error') {
         showErrorDialog = true;
-        errorMessage = ex.cause?.message ?? ex.message;
-      } else {
-        showErrorDialog = true;
-        errorMessage = '';
-        // eslint-disable-next-line no-console
-        console.error(ex);
+        errorMessage = outcome.message;
       }
     } finally {
       saving = false;
+      publishing = false;
     }
   };
 </script>
@@ -533,7 +404,9 @@
           {#if isNew}
             {title}
           {:else}
-            <bdi>{collectionLabel}</bdi> › <bdi>{entrySummary}</bdi>
+            <bdi>{collectionLabel}</bdi>
+            ›
+            <bdi>{entrySummary}</bdi>
           {/if}
         </TruncatedText>
       {/if}
@@ -550,17 +423,20 @@
         showSendNewsletterDialog = true;
       }}
     >
-      <Icon slot="start-icon" name="send" />
+      {#snippet endIcon()}
+        <Icon name="send" />
+      {/snippet}
     </Button>
   {/if}
   {#if !env.isSmallScreen}
     {@render overflowButtons()}
   {/if}
-  {#if unpublishedEntry && !pendingDeletion}
+  {#if unpublishedEntry && !locked}
     <EntryStatusMenu entry={unpublishedEntry} disabled={controlsDisabled} />
   {/if}
-  {#if pendingDeletion}
-    <!-- Nothing to save: the entry is shown for reference until the deletion is carried out -->
+  {#if locked}
+    <!-- Nothing to save: the entry is read-only, or shown for reference until the deletion is
+    carried out -->
   {:else if skipCIConfigured.current && !useWorkflow}
     <SplitButton
       variant="primary"
@@ -585,6 +461,29 @@
         </Menu>
       {/snippet}
     </SplitButton>
+  {:else if directPublish}
+    <!-- Saving keeps the entry as a draft for review, while the popup item publishes it now -->
+    <SplitButton
+      variant="primary"
+      label={_(saving ? (publishing ? 'publishing' : 'saving') : 'save')}
+      disabled={controlsDisabled || !modified}
+      keyShortcuts="Accel+S"
+      onclick={() => {
+        save();
+      }}
+    >
+      {#snippet popup()}
+        <Menu>
+          <MenuItem
+            label={_('save_and_publish')}
+            onclick={() => {
+              // A change published directly has to be deployed, whatever the `skip_ci` option says
+              save({ publish: true, skipCI: false });
+            }}
+          />
+        </Menu>
+      {/snippet}
+    </SplitButton>
   {:else}
     <Button
       variant="primary"
@@ -596,7 +495,7 @@
       }}
     />
   {/if}
-  {#if unpublishedEntry}
+  {#if unpublishedEntry && !readonly}
     <PublishEntryButton entry={unpublishedEntry} disabled={controlsDisabled} {modified} />
   {/if}
   <MenuButton
@@ -605,6 +504,8 @@
     iconic
     popupPosition="bottom-right"
     aria-label={_('show_editor_options')}
+    onclick={resetMenu.update}
+    onkeydown={resetMenu.update}
     bind:this={menuButton}
   >
     {#snippet popup()}
@@ -627,11 +528,6 @@
           {/if}
         {/if}
         {#if !disabled && !isNew}
-          {@const canDuplicate =
-            !collectionFile &&
-            !isIndexFile &&
-            entryCollection?.duplicate !== false &&
-            !collectionState.current.creationDisabled}
           {#if canDuplicate}
             <MenuItem
               variant="ghost"
@@ -641,14 +537,13 @@
               onclick={async () => {
                 duplicating = true;
 
-                // The original’s own assets are copied along with the entry, so this can take a
-                // moment. The URL is updated only once the duplicate is in place
-                const duplicated = !!(await duplicateDraft(entryDraft));
+                // The URL is updated only once the duplicate is in place
+                const path = await duplicateEntryDraft(entryDraft);
 
                 duplicating = false;
 
-                if (duplicated) {
-                  goto(`/collections/${collectionName}/new`, {
+                if (path) {
+                  goto(path, {
                     replaceState: true,
                     notifyChange: false,
                     transitionType: 'forwards',
@@ -657,9 +552,7 @@
               }}
             />
           {/if}
-          <!-- A collection file is part of the collection definition, so it can only be
-            discarded -->
-          {#if publishedVersionExists || (canDeleteEntry && !collectionFile)}
+          {#if removalMenuItems.discard}
             <MenuItem
               variant="ghost"
               disabled={controlsDisabled}
@@ -667,19 +560,19 @@
               aria-label={discardItemStrings.title}
               onclick={() => {
                 if (publishedVersionExists) {
-                  showDiscardDialog = true;
+                  entryRemoval?.confirmDiscard();
                 } else {
-                  showDeleteDialog = true;
+                  entryRemoval?.confirmDelete();
                 }
               }}
             />
           {/if}
         {/if}
-        {#if publishedVersionExists && canDeleteEntry && !collectionFile && !pendingDeletion}
+        {#if removalMenuItems.delete}
           <MenuItem
             label={_('delete')}
             onclick={() => {
-              showDeleteDialog = true;
+              entryRemoval?.confirmDelete();
             }}
           />
         {/if}
@@ -694,15 +587,16 @@
             }}
           />
         {/if}
-        <MenuItem
-          label={_('revert_all_changes')}
-          disabled={!modified || pendingDeletion}
-          onclick={() => {
-            /* v8 ignore next 3 -- the menu is only offered while the draft is there */
-            if (entryDraft.current) {
-              revertChanges({ draft: entryDraft.current });
-            }
+        <!-- A small screen lists the sidebar panels above, ending with a separator of their own -->
+        <ResetMenuItems
+          scope="entry"
+          separator={!env.isSmallScreen || (!disabled && !isNew)}
+          available={{
+            revert: modified && !locked,
+            restore: resetMenu.availability.restore && !locked,
+            clear: resetMenu.availability.clear && !locked,
           }}
+          onSelect={resetMenu.select}
         />
         {#if deployPollTimedOut.current}
           <Divider />
@@ -714,61 +608,20 @@
           />
         {/if}
         {#if env.isLargeScreen}
-          <Divider />
-          <MenuItemCheckbox
-            label={_('show_second_pane')}
-            checked={showSecondPane}
-            disabled={!canShowSecondPane}
-            onChange={() => {
-              entryEditorSettings.current = {
-                ...entryEditorSettings.current,
-                showSecondPane: !(entryEditorSettings.current?.showSecondPane ?? true),
-              };
-            }}
-          />
-          <!-- The preview is rendered in the second pane, so it’s unavailable while hidden -->
-          <MenuItemCheckbox
-            label={_('show_preview')}
-            checked={entryEditorSettings.current?.showPreview}
-            disabled={!showSecondPane || !canPreview}
-            onChange={() => {
-              entryEditorSettings.current = {
-                ...entryEditorSettings.current,
-                showPreview: !entryEditorSettings.current?.showPreview,
-              };
-            }}
-          />
-          <MenuItemCheckbox
-            label={_('sync_scrolling')}
-            checked={entryEditorSettings.current?.syncScrolling}
-            disabled={!showSecondPane || (!canPreview && hasSingleLocale)}
-            onChange={() => {
-              entryEditorSettings.current = {
-                ...entryEditorSettings.current,
-                syncScrolling: !entryEditorSettings.current?.syncScrolling,
-              };
-            }}
-          />
+          <ViewMenuItems />
         {/if}
       </Menu>
     {/snippet}
   </MenuButton>
 </Toolbar>
 
-<Toast bind:show={showValidationToast}>
-  <Alert status="error">
-    {_('entry_validation_errors', { values: { count: errorCount } })}
-    <Button
-      variant="secondary"
-      size="small"
-      label={_('show_errors')}
-      onclick={() => {
-        showValidationToast = false;
-        showSidebarPanel('validation');
-      }}
-    />
-  </Alert>
-</Toast>
+<ValidationErrorsToast
+  bind:show={showValidationToast}
+  count={errorCount}
+  onShowErrors={() => {
+    showSidebarPanel('validation');
+  }}
+/>
 
 <Toast id={copyFromLocaleToast.current.id} bind:show={copyFromLocaleToast.current.show}>
   {@const { status, message, count, sourceLanguage } = copyFromLocaleToast.current}
@@ -782,10 +635,18 @@
   </Alert>
 </Toast>
 
+<ResetDialog
+  bind:open={resetMenu.dialogOpen}
+  action={resetMenu.action}
+  onClose={() => {
+    menuButton?.focus();
+  }}
+/>
+
 <ConfirmationDialog
   bind:open={showReviewDialog}
-  title={_('workflow.send_for_review')}
-  okLabel={_('workflow.send_for_review')}
+  title={reviewDialogLabel}
+  okLabel={reviewDialogLabel}
   cancelLabel={_('later')}
   onOk={() => {
     resolveReviewPrompt?.(true);
@@ -796,84 +657,42 @@
     resolveReviewPrompt?.(false);
   }}
 >
-  {_('workflow.confirm_sending_for_review')}
+  {_(
+    reviewStage === 'pending_publish'
+      ? 'workflow.confirm_marking_as_ready'
+      : 'workflow.confirm_sending_for_review',
+  )}
 </ConfirmationDialog>
 
-<ConfirmationDialog
-  bind:open={showDeleteDialog}
-  title={_('delete_entries', { values: { count: 1 } })}
-  okLabel={_('delete')}
-  okDisabled={!!cascadePlan.blockers.length}
-  onOk={async () => {
-    await deleteEntry();
+<EntryRemoval
+  bind:this={entryRemoval}
+  bind:deleting
+  {collection}
+  {collectionFile}
+  {originalEntry}
+  {unpublishedEntry}
+  {associatedAssets}
+  {discardsDraft}
+  {useWorkflow}
+  {pendingDeletion}
+  onDone={() => {
+    _goBack();
   }}
   onClose={() => {
     menuButton?.focus();
   }}
->
-  <!-- There’s nothing to confirm when the deletion is refused; the note explains why -->
-  {#if cascadePlan.blockers.length}
-    <CascadeDeleteNote plan={cascadePlan} count={1} />
-  {:else}
-    {#if unpublishedEntry && !publishedVersionExists}
-      {_('workflow.confirm_deleting_unpublished_entry')}
-    {:else if useWorkflow}
-      <!-- The removal is committed to a pull request rather than to the configured branch -->
-      {_('workflow.confirm_deleting_published_entry')}
-    {:else}
-      {_(
-        associatedAssets.length
-          ? 'confirm_deleting_this_entry_with_assets'
-          : 'confirm_deleting_this_entry',
-      )}
-    {/if}
-    <CascadeDeleteNote plan={cascadePlan} count={1} />
-  {/if}
-</ConfirmationDialog>
+/>
 
-<ConfirmationDialog
-  bind:open={showDiscardDialog}
-  title={discardDialogStrings.title}
-  okLabel={discardDialogStrings.label}
-  onOk={async () => {
-    await discardChanges();
-  }}
-  onClose={() => {
-    menuButton?.focus();
-  }}
->
-  {discardDialogStrings.message}
-</ConfirmationDialog>
-
-<ConfirmationDialog
+<SaveConflictDialog
   bind:open={showConflictDialog}
-  title={_('save_conflict.title')}
-  okLabel={_('save_conflict.save_anyway')}
-  onOk={async () => {
-    await save({ skipCI: saveConflict?.skipCI, overwrite: true });
+  conflict={saveConflict?.conflict}
+  onOverwrite={async () => {
+    await save({ skipCI: saveConflict?.skipCI, overwrite: true, publish: saveConflict?.publish });
   }}
   onClose={() => {
     menuButton?.focus();
   }}
->
-  {#if saveConflict}
-    {@const { description, warning } = describeConflict(saveConflict.conflict, appLocale.current)}
-    {description}
-    {warning}
-  {/if}
-</ConfirmationDialog>
-
-<!-- Shown while the request is in flight. The result is reported by the content library page,
-because this toast goes away with the editor once the deletion has completed -->
-{#if progressMessage}
-  <Toast id={progressMessage} show={deleting} duration={0}>
-    <Alert status="info">{_(progressMessage)}</Alert>
-  </Toast>
-{/if}
-
-<Toast bind:show={showDeleteErrorToast}>
-  <Alert status="error">{_('deleting_entry_failed')}</Alert>
-</Toast>
+/>
 
 <!-- @todo make the error message more informative -->
 <AlertDialog

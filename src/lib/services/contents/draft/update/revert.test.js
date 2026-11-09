@@ -2,15 +2,19 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { getField } from '$lib/services/contents/entry/fields';
+import { useActualDraftFieldArgs } from '$lib/test/fields';
 
 import {
   revertChanges as _revertChanges,
+  isFieldChanged,
   resolveOriginalKeyPath,
   revertFields,
   revertLocale,
 } from './revert';
 
 vi.mock('$lib/services/contents/entry/fields');
+
+await useActualDraftFieldArgs();
 
 describe('draft/update/revert', () => {
   let mockEntryDraft;
@@ -35,6 +39,7 @@ describe('draft/update/revert', () => {
       collectionName: 'posts',
       fileName: undefined,
       isIndexFile: false,
+      fields: [],
       currentValues: {
         en: {
           title: 'Modified Title',
@@ -302,6 +307,129 @@ describe('draft/update/revert', () => {
         revertChanges();
 
         expect(mockEntryDraft.currentValues).toEqual(mockEntryDraft.originalValues);
+      });
+    });
+    // https://github.com/sveltia/sveltia-cms/issues/1065
+    describe('with a paired List field', () => {
+      const residencesField = {
+        name: 'residences',
+        widget: 'list',
+        i18n: true,
+        fields: [
+          { name: 'name', widget: 'string', i18n: 'duplicate' },
+          { name: 'description', widget: 'text', i18n: true },
+        ],
+      };
+
+      const [nameField, descriptionField] = residencesField.fields;
+
+      beforeEach(() => {
+        mockEntryDraft.fields = [
+          { name: 'title', widget: 'string', i18n: true },
+          { name: 'details', widget: 'object', fields: [residencesField] },
+        ];
+
+        vi.mocked(getField).mockImplementation(({ keyPath }) => {
+          if (keyPath === 'title') {
+            return { name: 'title', widget: 'string', i18n: true };
+          }
+
+          if (keyPath === 'details') {
+            return mockEntryDraft.fields[1];
+          }
+
+          if (keyPath === 'details.residences') {
+            return residencesField;
+          }
+
+          if (/^details\.residences\.\d+\.name$/.test(keyPath)) {
+            return nameField;
+          }
+
+          if (/^details\.residences\.\d+\.description$/.test(keyPath)) {
+            return descriptionField;
+          }
+
+          return undefined;
+        });
+
+        // The first item has been removed in the default locale, and thus in the other locale
+        mockEntryDraft.currentValues = {
+          en: {
+            title: 'Title 2',
+            'details.residences.0.name': 'B',
+            'details.residences.0.description': 'B (en)',
+          },
+          ja: {
+            title: 'タイトル 2',
+            'details.residences.0.name': 'B',
+            'details.residences.0.description': 'B (ja)',
+          },
+        };
+
+        mockEntryDraft.originalValues = {
+          en: {
+            title: 'Title',
+            'details.residences.0.name': 'A',
+            'details.residences.0.description': 'A (en)',
+            'details.residences.1.name': 'B',
+            'details.residences.1.description': 'B (en)',
+          },
+          ja: {
+            title: 'タイトル',
+            'details.residences.0.name': 'A',
+            'details.residences.0.description': 'A (ja)',
+            'details.residences.1.name': 'B',
+            'details.residences.1.description': 'B (ja)',
+          },
+        };
+      });
+
+      it('should revert the items in every locale when reverted in the default locale', () => {
+        revertChanges({ locale: 'en', keyPath: 'details.residences' });
+
+        expect(mockEntryDraft.currentValues.en).toEqual({
+          ...mockEntryDraft.originalValues.en,
+          title: 'Title 2',
+        });
+        expect(mockEntryDraft.currentValues.ja).toEqual({
+          ...mockEntryDraft.originalValues.ja,
+          title: 'タイトル 2',
+        });
+      });
+
+      it('should revert the items nested in the field reverted in the default locale', () => {
+        revertChanges({ locale: 'en', keyPath: 'details' });
+
+        expect(mockEntryDraft.currentValues.ja).toEqual({
+          ...mockEntryDraft.originalValues.ja,
+          title: 'タイトル 2',
+        });
+      });
+
+      it('should revert the items but not the other fields in the other locales', () => {
+        revertChanges({ locale: 'en' });
+
+        expect(mockEntryDraft.currentValues.en).toEqual(mockEntryDraft.originalValues.en);
+        expect(mockEntryDraft.currentValues.ja).toEqual({
+          ...mockEntryDraft.originalValues.ja,
+          title: 'タイトル 2',
+        });
+      });
+
+      it('should leave the other locales alone for another field', () => {
+        revertChanges({ locale: 'en', keyPath: 'title' });
+        revertChanges({ locale: 'en', keyPath: 'unknown' });
+
+        expect(mockEntryDraft.currentValues.ja['details.residences.1.name']).toBeUndefined();
+      });
+
+      it('should skip a locale without content', () => {
+        delete mockEntryDraft.currentValues.ja;
+
+        revertChanges({ locale: 'en', keyPath: 'details.residences' });
+
+        expect(mockEntryDraft.currentValues.ja).toBeUndefined();
       });
     });
   });
@@ -838,6 +966,131 @@ describe('draft/update/revert', () => {
         currentPrefix: 'sections.0.items.1',
         originalPrefix: 'sections.0.items.0',
       });
+    });
+  });
+
+  describe('isFieldChanged', () => {
+    it('should compare the value of a simple field', () => {
+      expect(
+        isFieldChanged({
+          currentValueMap: { title: 'Hello', body: 'New' },
+          originalValueMap: { title: 'Hello', body: 'Old' },
+          keyPath: 'title',
+        }),
+      ).toBe(false);
+      expect(
+        isFieldChanged({
+          currentValueMap: { title: 'Hi' },
+          originalValueMap: { title: 'Hello' },
+          keyPath: 'title',
+        }),
+      ).toBe(true);
+      expect(
+        isFieldChanged({ currentValueMap: { title: '' }, originalValueMap: {}, keyPath: 'title' }),
+      ).toBe(true);
+    });
+
+    it('should treat a missing value and an undefined value alike', () => {
+      expect(
+        isFieldChanged({
+          currentValueMap: { title: undefined },
+          originalValueMap: {},
+          keyPath: 'title',
+        }),
+      ).toBe(false);
+    });
+
+    it('should compare the subfields of an object field', () => {
+      const originalValueMap = { 'author.name': 'Alice', 'author.email': 'a@example.com' };
+
+      expect(
+        isFieldChanged({
+          currentValueMap: { ...originalValueMap },
+          originalValueMap,
+          keyPath: 'author',
+        }),
+      ).toBe(false);
+      expect(
+        isFieldChanged({
+          currentValueMap: { ...originalValueMap, 'author.name': 'Bob' },
+          originalValueMap,
+          keyPath: 'author',
+        }),
+      ).toBe(true);
+      expect(
+        isFieldChanged({
+          currentValueMap: { 'author.name': 'Alice' },
+          originalValueMap,
+          keyPath: 'author',
+        }),
+      ).toBe(true);
+    });
+
+    it('should not match a sibling field sharing the key path as a prefix', () => {
+      expect(
+        isFieldChanged({
+          currentValueMap: { author: 'Alice', authors: 'Bob' },
+          originalValueMap: { author: 'Alice', authors: 'Carol' },
+          keyPath: 'author',
+        }),
+      ).toBe(false);
+    });
+
+    it('should ignore empty placeholders and internal props', () => {
+      expect(
+        isFieldChanged({
+          currentValueMap: {
+            author: {},
+            'author.name': 'Alice',
+            'author.tags': [],
+            'author.links.0.__sc_item_id': 'abc',
+          },
+          originalValueMap: { 'author.name': 'Alice' },
+          keyPath: 'author',
+        }),
+      ).toBe(false);
+    });
+
+    it('should compare the items of a list field', () => {
+      expect(
+        isFieldChanged({
+          currentValueMap: { tags: [], 'tags.0': 'a', 'tags.1': 'b' },
+          originalValueMap: { 'tags.0': 'a', 'tags.1': 'b' },
+          keyPath: 'tags',
+        }),
+      ).toBe(false);
+      expect(
+        isFieldChanged({
+          currentValueMap: { 'tags.0': 'b', 'tags.1': 'a' },
+          originalValueMap: { 'tags.0': 'a', 'tags.1': 'b' },
+          keyPath: 'tags',
+        }),
+      ).toBe(true);
+    });
+
+    it('should compare a field inside a reordered list item with its original value', () => {
+      const originalValueMap = {
+        'items.0.author.name': 'Alice',
+        'items.1.author.name': 'Bob',
+      };
+
+      const currentValueMap = {
+        'items.0.author.name': 'Bob',
+        'items.0.__sc_item_original_key_path': 'items.1',
+        'items.1.author.name': 'Alice',
+        'items.1.__sc_item_original_key_path': 'items.0',
+      };
+
+      expect(isFieldChanged({ currentValueMap, originalValueMap, keyPath: 'items.0.author' })).toBe(
+        false,
+      );
+      expect(
+        isFieldChanged({
+          currentValueMap: { ...currentValueMap, 'items.1.author.name': 'Carol' },
+          originalValueMap,
+          keyPath: 'items.1.author',
+        }),
+      ).toBe(true);
     });
   });
 

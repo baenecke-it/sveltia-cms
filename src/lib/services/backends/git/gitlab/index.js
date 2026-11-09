@@ -12,21 +12,25 @@ import {
   DEFAULT_API_ROOT,
   DEFAULT_AUTH_PATH,
   DEFAULT_AUTH_ROOT,
+  DEFAULT_PKCE_AUTH_PATH,
+  DEFAULT_PKCE_AUTH_ROOT,
 } from '$lib/services/backends/git/gitlab/constants';
 import { fetchBranchHeadSHA, fetchDeployments } from '$lib/services/backends/git/gitlab/deployment';
-import { fetchBlob, fetchFiles } from '$lib/services/backends/git/gitlab/files';
-import { getBaseURLs, repository } from '$lib/services/backends/git/gitlab/repository';
+import { fetchBlob, fetchDirSHA, fetchFiles } from '$lib/services/backends/git/gitlab/files';
+import {
+  getBaseURLs,
+  parseProjectPath,
+  repository,
+} from '$lib/services/backends/git/gitlab/repository';
 import { checkStatus, STATUS_DASHBOARD_URL } from '$lib/services/backends/git/gitlab/status';
 import workflow from '$lib/services/backends/git/gitlab/workflow';
-import { apiConfig, graphqlVars } from '$lib/services/backends/git/shared/api';
-import { initRepositoryInfo } from '$lib/services/backends/git/shared/repository';
+import { graphqlVars } from '$lib/services/backends/git/shared/api';
+import { initGitBackend } from '$lib/services/backends/git/shared/init';
 import { cmsConfig } from '$lib/services/config';
 
 /**
- * @import { ApiEndpointConfig, BackendService, RepositoryInfo } from '$lib/types/private';
+ * @import { BackendService, RepositoryInfo } from '$lib/types/private';
  */
-
-const REPO_PATH_REGEX = /(?<owner>.+)\/(?<repo>[^/]+)$/;
 
 /**
  * Initialize the GitLab backend.
@@ -43,8 +47,10 @@ export const init = () => {
   const {
     repo: projectPath,
     branch,
-    base_url: authRoot = DEFAULT_AUTH_ROOT,
-    auth_endpoint: authPath = DEFAULT_AUTH_PATH,
+    auth_type: authType = '',
+    // Like Decap CMS, sign in through Netlify unless the client-side PKCE flow is used
+    base_url: authRoot = authType === 'pkce' ? DEFAULT_PKCE_AUTH_ROOT : DEFAULT_AUTH_ROOT,
+    auth_endpoint: authPath = authType === 'pkce' ? DEFAULT_PKCE_AUTH_PATH : DEFAULT_AUTH_PATH,
     app_id: clientId = '',
     // https://HOSTNAME/api/v1 or https://HOSTNAME/PATH/api/v1
     api_root: restApiRoot = DEFAULT_API_ROOT,
@@ -53,18 +59,10 @@ export const init = () => {
     include_credentials: includeCredentials = false,
   } = backend;
 
-  /**
-   * In GitLab terminology, an owner is called a namespace, and a repository is called a project. A
-   * namespace can contain a group and a subgroup concatenated with a `/` so we cannot simply use
-   * `split('/')` here. A project name should not contain a `/`.
-   * @see https://docs.gitlab.com/user/namespace/
-   * @see https://gitlab.com/gitlab-org/gitlab/-/merge_requests/80055
-   */
-  const { owner, repo } = /** @type {string} */ (projectPath).match(REPO_PATH_REGEX)?.groups ?? {};
+  const { owner, repo } = parseProjectPath(/** @type {string} */ (projectPath));
   const repoPath = `${owner}/${repo}`;
-  const authURL = `${stripSlashes(authRoot)}/${stripSlashes(authPath)}`;
 
-  initRepositoryInfo(repository, {
+  initGitBackend(repository, {
     service: BACKEND_NAME,
     label: BACKEND_LABEL,
     owner,
@@ -74,21 +72,18 @@ export const init = () => {
     defaultApiRoot: DEFAULT_API_ROOT,
     getTokenPageURL,
     getBaseURLs,
-  });
-
-  Object.assign(
-    apiConfig,
-    /** @type {ApiEndpointConfig} */ ({
+    authRoot,
+    authPath,
+    tokenPath: '/token',
+    api: {
       clientId,
       authScope: 'api',
-      authURL,
-      tokenURL: authURL.replace('/authorize', '/token'),
       authScheme: 'Bearer',
       restBaseURL: stripSlashes(restApiRoot),
       graphqlBaseURL: stripSlashes(graphqlApiRoot),
       includeCredentials,
-    }),
-  );
+    },
+  });
 
   Object.assign(graphqlVars, {
     fullPath: repoPath,
@@ -114,6 +109,7 @@ export default {
   fetchFiles,
   fetchLastCommit,
   fetchBlob,
+  fetchDirSHA,
   commitChanges,
   fetchFileCommits,
   fetchBranchHeadSHA,

@@ -1,4 +1,5 @@
 /**
+ * @import { ComponentType } from 'react';
  * @import { Component } from 'svelte';
  * @import {
  * BackendName,
@@ -18,11 +19,13 @@
  * FileFormat,
  * FileFormatter,
  * FileParser,
+ * FrontMatterFormat,
  * GitBackendName,
  * I18nFileStructure,
  * LocaleCode,
  * MediaField,
  * RasterImageFormat,
+ * RawEntryContent,
  * RelationField,
  * S3MediaLibrary,
  * SelectField,
@@ -88,13 +91,15 @@
  * @property {boolean} [closeWithEscape] Whether to close the entry editor by pressing the Escape
  * key.
  * @property {boolean} [underlineLinks] Whether to always underline links.
- * @property {boolean} [beta] Whether to enable beta features.
  * @property {boolean} [devModeEnabled] Whether to enable the developer mode.
  * @property {string} [deployHookURL] Webhook URL to manually trigger a new deployment on any
  * connected CI/CD provider.
  * @property {string} [deployHookAuthHeader] Webhook `Authorization` request header value, including
  * the scheme and token, e.g. `Bearer <token>`.
  * @property {string} [defaultTranslationService] Default translation service ID, e.g. `google`.
+ * @property {boolean} [localGitCommits] Whether the local backend commits the saved changes to the
+ * current branch of the local Git repository, like the `MODE=git` option of Netlify/Decap CMS’s
+ * local proxy server. Default: `false`.
  */
 
 /**
@@ -151,6 +156,25 @@
  */
 
 /**
+ * How the user is asked for a commit message, as the `prompt_commit_messages` backend option sets
+ * it: `true` to write the whole message, `prefix` or `suffix` to add text before or after the
+ * message made from the template.
+ * @typedef {true | 'prefix' | 'suffix'} CommitMessagePromptMode
+ */
+
+/**
+ * An outstanding request for a commit message, which the UI turns into a prompt dialog.
+ * @typedef {object} CommitMessageRequest
+ * @property {CommitMessagePromptMode} mode How the text the user enters is used.
+ * @property {string} defaultMessage Message made from the template, shown as the initial value of
+ * the text box with the `true` mode, or around the text in the preview otherwise.
+ * @property {string} initialValue Initial value of the text box.
+ * @property {(message: string | null) => void} respond Function to answer the request with the
+ * text entered, or `null` if the user has cancelled the commit, which resolves the promise the
+ * save is waiting on.
+ */
+
+/**
  * API endpoint configuration.
  * @typedef {object} ApiEndpointConfig
  * @property {string} clientId OAuth client ID.
@@ -194,6 +218,10 @@
  * @property {string} [startBranch] Branch to create the `branch` from as part of the commit, which
  * saves the round trip of creating it beforehand. The commit is rejected if the branch already
  * exists. Used only for Git backends with Editorial Workflow enabled.
+ * @property {string} [userMessage] Text the user has entered when asked for a commit message, which
+ * replaces the message made from the template, or goes before or after it, depending on the
+ * `prompt_commit_messages` backend option. An empty string means the user has been asked and left
+ * it empty, so the message made from the template is used as is. Used only for Git backends.
  */
 
 /**
@@ -203,6 +231,10 @@
  * backend.
  * @property {CommitAuthor} [author] Git committer info for a Git backend.
  * @property {Date} [date] Commit date for a Git backend.
+ * @property {string} [parentSha] Git object ID of the commit’s parent, for a Git backend that may
+ * make the commit on top of someone else’s commit to another file rather than on the head the site
+ * data reflects: GitLab and Gitea/Forgejo only check the files being changed. `undefined` for a
+ * backend that refuses a commit unless the branch is still at that head, like GitHub.
  * @property {Record<string, { sha: string, file?: Blob }>} files Map of committed files. The key is
  * a file path, and the value is an object containing the Git object ID of the updated file. The
  * blob object is also included for the local backend.
@@ -333,14 +365,18 @@
  * @property {() => RepositoryInfo | undefined} init Function to initialize the backend.
  * @property {(options: SignInOptions) => Promise<User | void>} signIn Function to sign in.
  * @property {() => Promise<void>} signOut Function to sign out.
- * @property {() => Promise<void>} fetchFiles Function to fetch files. Calling it again once the
- * site data has been loaded brings the stores up to date with the repository, fetching only what
- * has changed.
+ * @property {(options?: { lastCommit?: { hash: string, message: string } }) => Promise<void>}
+ * fetchFiles Function to fetch files. Calling it again once the site data has been loaded brings
+ * the stores up to date with the repository, fetching only what has changed. A Git backend takes
+ * the branch’s last commit, if the caller has just fetched it, so it isn’t fetched again.
  * @property {() => Promise<{ hash: string, message: string }>} [fetchLastCommit] Function to fetch
  * the configured branch’s head commit, to tell whether the repository has changed since the site
  * data was loaded. Git backends only.
  * @property {(asset: Asset) => Promise<Blob>} [fetchBlob] Function to fetch an asset as a Blob. Git
  * backends only.
+ * @property {(ref: string, dirPath: string) => Promise<string | undefined>} [fetchDirSHA] Function
+ * to find the tree SHA of a directory at the given commit, or `undefined` if it doesn’t exist. It
+ * tells whether the configured root directory has changed between two commits. Git backends only.
  * @property {(changes: FileChange[], options: CommitOptions) => Promise<CommitResults>}
  * commitChanges Function to save file changes, including additions and deletions, and return the
  * commit hash and a map of committed files.
@@ -407,6 +443,9 @@
  * @property {string} [headSHA] Git object ID (SHA-1 hash) of the head commit on the pull request’s
  * branch. It’s used to look up the deploy preview created for the pull request.
  * @property {WorkflowFile[]} files Files changed in the pull request.
+ * @property {boolean} [canMerge] Whether the signed-in user can merge the pull request, which
+ * decides whether the entry can be published. `undefined` when the backend doesn’t tell, in which
+ * case the merge is offered and left to the backend to allow or refuse.
  */
 
 /**
@@ -427,6 +466,44 @@
  * {@link Entry} with extra Editorial Workflow information, so it can be passed to the existing
  * entry editor and list components as is.
  * @typedef {Entry & { workflow: UnpublishedEntryProps }} UnpublishedEntry
+ */
+
+/**
+ * Current state of the request an Open Authoring entry has, as read by a backend for
+ * `updateForkStatusWith`.
+ * @typedef {object} ForkRequestState
+ * @property {boolean} merged Whether the request has been merged.
+ * @property {boolean} isEntryRequest Whether the request is still the one the CMS manages for the
+ * contributor: opened by them, from their fork, to the configured branch.
+ * @property {() => Promise<string>} getMergedSHA Function to read the head commit the request was
+ * merged at. Only called for a merged request that is the entry’s.
+ * @property {string} [state] Request state in the service’s own terms, e.g. `open`.
+ * @property {boolean} [draft] Whether the service considers the request a draft.
+ */
+
+/**
+ * A file changed by a pull request, as read by {@link WorkflowBackendService.fetchMergeState}.
+ * @typedef {object} WorkflowChangedFile
+ * @property {string} path File path relative to the project’s root directory.
+ * @property {'added' | 'modified' | 'removed' | 'renamed'} status How the pull request changes the
+ * file.
+ * @property {string} [previousPath] Path a renamed file had before.
+ * @property {string} [mode] Git file mode at the head commit, as an octal string, e.g. `100644`
+ * for a regular file, `120000` for a symbolic link or `160000` for a submodule. Missing for a
+ * removed file.
+ */
+
+/**
+ * State of a pull request read right before it’s merged.
+ * @typedef {object} WorkflowMergeState
+ * @property {string | undefined} headSHA Git object ID of the commit the pull request’s branch
+ * points at.
+ * @property {boolean} onConfiguredBranches Whether the pull request goes from a branch of the
+ * configured repository, rather than a fork, to the configured branch, which its base branch can be
+ * changed from on the Git service.
+ * @property {WorkflowChangedFile[]} files Files the pull request changes as of `headSHA`.
+ * @property {boolean} complete Whether `files` lists every changed file. The Git services cap the
+ * list, and a pull request over the cap can’t be checked.
  */
 
 /**
@@ -454,10 +531,24 @@
  * @property {(pullRequest: WorkflowPullRequest, status: WorkflowStatus) =>
  * Promise<WorkflowPullRequest>} updateStatus Function to update the pull request’s status label and
  * draft state.
+ * @property {(branch: string) => Promise<string | undefined>} fetchBranchHead Function to fetch
+ * the commit the workflow branch points at, or `undefined` if the branch is gone. Two editors
+ * working on the same entry share its branch, so a save compares this with the head it last
+ * committed to find out whether someone else has written to it meanwhile.
+ * @property {(pullRequest: WorkflowPullRequest) => Promise<WorkflowMergeState>} fetchMergeState
+ * Function to read the pull request afresh right before it’s merged: where it goes, the commit its
+ * branch points at, and every file it changes as of that commit. Publishing checks this against
+ * what the CMS has shown for the entry, so a change it hasn’t shown can’t be merged along with it.
+ * @property {(args: { headSHA: string, paths: string[] }) => Promise<string[]>} fetchUnchangedPaths
+ * Function to find which of the given files are the same at the given commit as on the configured
+ * branch, missing from both counting as the same. A merge leaves such a file as it is, so it can’t
+ * publish anything; an answer the service can’t vouch for leaves the file out.
  * @property {(pullRequest: WorkflowPullRequest) => Promise<void>} publish Function to merge the
- * pull request and delete the workflow branch. The service may leave the merge to the Git service
- * when a required check is still running, in which case it resolves once the merge has landed, and
- * rejects if it won’t — the check has failed, say — so the entry isn’t taken for published.
+ * pull request and delete the workflow branch. The merge is pinned to the pull request’s
+ * `headSHA`, so it fails if the branch has moved on since. The service may leave the merge to the
+ * Git service when a required check is still running, in which case it resolves once the merge has
+ * landed, and rejects if it won’t — the check has failed, say — so the entry isn’t taken for
+ * published.
  * @property {(pullRequest: WorkflowPullRequest) => Promise<void>} discard Function to close the
  * pull request and delete the workflow branch.
  */
@@ -466,6 +557,8 @@
  * A single commit associated with one or more files.
  * @typedef {object} FileCommit
  * @property {string} sha Commit SHA hash.
+ * @property {string} message Headline of the commit message: its first line. GitHub shortens a
+ * long one with an ellipsis.
  * @property {string} authorName Author’s display name.
  * @property {string} [authorEmail] Author’s email address.
  * @property {string} [authorAvatarURL] Author’s avatar URL.
@@ -495,8 +588,9 @@
 
 /**
  * Resolved S3 configuration passed to core request helpers. Extends the public `S3MediaLibrary`
- * with internal fields that providers set in their `resolveConfig` functions.
- * @typedef {S3MediaLibrary & { acl?: string | false }} S3Config
+ * with internal fields that the service sets: `acl` is the canned ACL sent in the `x-amz-acl`
+ * header when creating an object, if the service needs one to make it publicly readable.
+ * @typedef {S3MediaLibrary & { acl?: string }} S3Config
  */
 
 /**
@@ -528,6 +622,10 @@
  * [search] Function to search files.
  * @property {(options: MediaLibraryFetchOptions) => Promise<ExternalAsset[]>} [list] Function to
  * list files. For stock asset services, it should return popular or curated images.
+ * @property {(asset: ExternalAsset, options: MediaLibraryFetchOptions) => Promise<void>}
+ * [trackDownload] Function to let the service know a file has been inserted into an entry, as the
+ * API guidelines of a stock asset service like Unsplash require. It’s called without being
+ * awaited, and should never reject, as a failure must not get in the way of the insertion.
  * @property {(files: File[], options: MediaLibraryFetchOptions) => Promise<ExternalAsset[]>}
  * [upload] Function to upload files to the cloud storage service.
  * @property {(assets: ExternalAsset[], options: MediaLibraryFetchOptions) => Promise<void>}
@@ -544,6 +642,11 @@
  * empty folders it keeps. The Asset Library and the asset picker then browse the service folder by
  * folder, reading the folders off the file paths in `description`. Omitted when the service has no
  * folders, like Uploadcare, or handles them in its own widget, like Cloudinary.
+ * @property {(dirPath: string, options: MediaLibraryFetchOptions) =>
+ * Promise<ExternalFolderListing>} [listFolder] Function to list every file and empty folder below
+ * a folder on a service with folder support, at any depth, however many there are. Unlike
+ * `browse`, which may stop short of the end on a large service, it lists the folder in full, so a
+ * folder rename or deletion leaves nothing behind.
  * @property {(dirPath: string, options: MediaLibraryFetchOptions) => Promise<void>}
  * [createFolder] Function to create an empty folder on the service, which keeps a placeholder
  * object for it, as object storage has no folders of its own. The path is relative to the
@@ -564,6 +667,8 @@
  * @property {string[]} folders Paths of the folders kept by a placeholder object, relative to the
  * configured prefix, e.g. `2024/summer`. The folders that hold files are read off the file paths
  * instead.
+ * @property {boolean} [truncated] Whether the listing stopped short of the end, as there are more
+ * files on the service than it lists at once, so some files are left out.
  */
 
 /**
@@ -573,12 +678,13 @@
  * @property {string} model Model name.
  * @property {string} systemPrompt System/instruction prompt.
  * @property {string} userMessage User message content.
- * @property {number} [temperature] Sampling temperature (0–1). Default is 0.3. GPT-6 does not
- * support this parameter, so it will be ignored for that model.
- * @property {number} [maxTokens] Maximum output tokens. Default is 4000.
+ * @property {number} [temperature] Sampling temperature (0–1). Default is 0.3. The OpenAI and
+ * Anthropic APIs don’t get this parameter, as GPT-6 and Claude Haiku 5.5 reject it.
+ * @property {number} [maxTokens] Maximum output tokens, including reasoning tokens. Default is
+ * 16,000.
  * @property {'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'} [reasoning]
- * Reasoning effort. Only supported by certain providers (e.g., DeepSeek, Mistral AI). Default
- * varies by provider.
+ * Reasoning effort. Only supported by certain providers (e.g., OpenAI, DeepSeek, Mistral AI).
+ * Default varies by provider. Anthropic Claude only supports `none`, which disables thinking.
  */
 
 /**
@@ -647,6 +753,18 @@
  * @property {RepositoryFileMetadata} [meta] Metadata from the repository. Missing while it’s still
  * being fetched separately from the text, or if that fetch failed; such a file counts as not fully
  * fetched yet.
+ * @property {ParsedFileContent} [parsed] Content parsed from the text of an entry file, cached so
+ * the file doesn’t have to be parsed again on the next load.
+ */
+
+/**
+ * Content parsed from the text of an entry file, along with what it was parsed for.
+ * @typedef {object} ParsedFileContent
+ * @property {string} key What the content was parsed for: the CMS version and the CMS configuration
+ * hash, either of which can change how a file is parsed.
+ * @property {RawEntryContent} content Parsed content.
+ * @property {FrontMatterFormat} [format] Front matter format detected in the text, for a file whose
+ * format is `frontmatter`.
  */
 
 /**
@@ -666,7 +784,10 @@
  * collection only.
  * @property {RegExp} [fullPathRegEx] Regular expression that matches full entry paths, taking the
  * i18n structure into account. Entry collection only.
- * @property {string} [fullPath] File path of the default locale. File/singleton collection only.
+ * @property {string} [fullPath] File path of the default locale. File/singleton collection, or
+ * entry collection storing all the entries in one file.
+ * @property {boolean} [arrayFile] Whether the entry collection stores all the entries in one file,
+ * defined with the `file` option, as an array of objects.
  * @property {[string, string]} [fmDelimiters] Front matter delimiters.
  * @property {BodyFieldOptions} [bodyField] Body field options for front matter formats.
  * @property {boolean} [yamlQuote] YAML quote configuration. DEPRECATED in favor of the global YAML
@@ -686,6 +807,8 @@
  * @property {number} size File size in bytes.
  * @property {string} [text] Raw text for a plaintext file, like HTML or Markdown.
  * @property {RepositoryFileMetadata} [meta] Metadata from the repository. Git backends only.
+ * @property {ParsedFileContent} [parsed] Content parsed from the text of an entry file, restored
+ * from the file cache. Git backends only.
  */
 
 /**
@@ -694,7 +817,8 @@
  * @property {string} collectionName Collection name.
  * @property {string} [fileName] Collection file name. File/singleton collection only.
  * @property {Record<InternalLocaleCode, string>} [filePathMap] File path map. The key is a locale,
- * and the value is the corresponding file path. File/singleton collection only.
+ * and the value is the corresponding file path. File/singleton collection, or entry collection
+ * storing all the entries in one file.
  * @property {string} [folderPath] Folder path. Entry collection only.
  * @property {Record<InternalLocaleCode, string>} [folderPathMap] Folder path map. Entry collection
  * only. Paths in `folderPathMap` are prefixed with a locale if the `multiple_root_folders` i18n
@@ -735,6 +859,9 @@
  * `/assets/images/{{slug}}`, which require special handling like `entryRelative`.
  * @property {string} [label] Label for the asset folder. Asset collections only.
  * @property {string} [icon] Icon for the asset folder. Asset collections only.
+ * @property {boolean} [readonly] Whether the folder is read-only, because the collection or
+ * collection file it belongs to is, or the whole CMS is. Assets can’t be uploaded to, changed or
+ * deleted from the folder then. Only set when `true`.
  * @property {boolean} [isAssetCollection] Whether the asset folder is for an asset collection.
  * @see https://decapcms.org/docs/collection-folder/#media-and-public-folder
  * @see https://sveltiacms.app/en/docs/media/internal#configuring-folder-paths
@@ -831,7 +958,7 @@
  * @typedef {object} InternalSlugOptions
  * @property {string} template Slug template to fill for a new entry. It’s the configured template,
  * the legacy `{{fields._slug}}` tag when the slug is only given with the slug editor, or the
- * identifier field tag by default.
+ * identifier field tag by default. An empty string when the slug is numbered automatically.
  * @property {boolean} editorRequired Whether the template takes the slug from the slug editor, in
  * which case the slug editor must be filled in. Otherwise, a filled-in slug editor takes over from
  * the template.
@@ -842,6 +969,8 @@
  * entry is created, and once it has been saved.
  * @property {boolean} localized Whether each locale has a slug editor of its own, and every field
  * tag in the template is filled with the locale’s own value.
+ * @property {boolean} autoIncrement Whether a new entry’s slug is the number after the highest one
+ * among the entries of the collection, instead of a filled template.
  * @property {string} [hint] Short description shown with the slug editor.
  * @property {[string | RegExp, string]} [pattern] Validation format of the slug.
  */
@@ -916,6 +1045,9 @@
  * @property {string} subPath File name for a file/singleton collection, or file path without an
  * extension for an entry collection. Same as `slug` in most cases.
  * @property {LocalizedEntryMap} locales Localized entry map.
+ * @property {number} [arrayIndex] Position of the entry in the array stored in the file, for an
+ * entry collection storing all the entries in one file. The `slug` and `subPath` are the same
+ * number as a string.
  */
 
 /**
@@ -959,6 +1091,21 @@
  * picker. Empty or `undefined` for the folder root.
  * @property {boolean} replace Whether to replace the existing file if there’s a file with the same
  * name in the target folder.
+ * @property {AssetNameTemplate} [nameTemplate] Template to name the file with when the entry is
+ * saved, if the `filename_template` media library option is set. It’s removed once the file is
+ * renamed by hand, and not set for a file replacing an existing one, which keeps its name.
+ */
+
+/**
+ * Template to name an uploaded file with, along with the values that must stay the same from the
+ * name shown while editing to the one saved.
+ * @typedef {object} AssetNameTemplate
+ * @property {string} template The `filename_template` media library option.
+ * @property {boolean} [slugificationEnabled] Whether the filled name is slugified, according to the
+ * `slugify_filename` media library option.
+ * @property {Map<string, string>} randomValues Random values generated for the tags so far, such
+ * as the one for a `{{uuid}}` tag.
+ * @property {Record<string, string>} dateTimeParts Date/time parts of the time the file was added.
  */
 
 /**
@@ -1024,6 +1171,14 @@
  */
 
 /**
+ * Expander states of a list’s items, in list order, which a List field manipulates along with its
+ * values. An existing item is represented by its index before the manipulation, which carries its
+ * own state and those of the objects and lists nested in it; a new item is represented by its own
+ * state, e.g. `true` to show it expanded.
+ * @typedef {(number | boolean)[]} ExpanderStateList
+ */
+
+/**
  * Entry draft.
  * @typedef {object} EntryDraft
  * @property {string} id Unique draft ID. For a new entry, it’s a randomly-generated UUID. For an
@@ -1079,7 +1234,8 @@
  * edited. It’s kept on that entry’s draft and saved in the same commit as the entry, rather than on
  * its own, so the two never go out of sync. Everything needed to commit it is prepared as soon as
  * it’s added, because the preparation replaces the blob URLs in the content with asset paths, which
- * can only be done once.
+ * can only be done once. The `preSave` event hooks are the exception: they’re only called when the
+ * entry is committed, so they don’t run for an entry that is discarded along with the draft.
  * @typedef {object} PendingEntry
  * @property {string} collectionName Name of the collection the entry belongs to.
  * @property {Entry} entry Entry as it will be saved.
@@ -1126,6 +1282,227 @@
  * @property {string | File} [data] File data. `undefined` for a deleted file, or a file object for
  * a new or updated file. It can also be a string for a text file like Markdown or HTML, which is
  * automatically converted to a Blob.
+ * @property {ArrayItemTarget} [arrayItem] Item that an `update` or `delete` change applies to, in
+ * a file storing all the entries of an entry collection. The `data` of an `update` or `create`
+ * change is then the item alone, and a `create` change adds it to the end of the array. The changes
+ * made to the same file are combined into one before being committed.
+ * @property {ArrayItemTarget[]} [arrayOrder] Items in a file storing all the entries of an entry
+ * collection, in their new order. The items take the positions the listed items occupy now.
+ */
+
+/**
+ * Item in a file storing all the entries of an entry collection, which a {@link FileChange} applies
+ * to.
+ * @typedef {object} ArrayItemTarget
+ * @property {number} index Position of the item in the array, as the user has seen it.
+ * @property {LocalizedEntryMap} [locales] Content of the item as the user has seen it. The change
+ * is refused if the item at the position has been changed since, e.g. by someone else, so that it
+ * doesn’t overwrite another item. `undefined` to skip the check.
+ */
+
+/**
+ * Subset of the promise-based API of Node’s `fs` module that isomorphic-git uses, implemented on
+ * top of the File System Access API for the local backend’s Git commits. The paths are relative to
+ * the repository root.
+ * @typedef {object} GitFileSystem
+ * @property {(path: string, options?: string | { encoding?: string }) => Promise<any>} readFile
+ * Read a file, as a `Buffer`, or a string if the `utf8` encoding is given.
+ * @property {(path: string, data: string | Uint8Array) => Promise<void>} writeFile Write a file.
+ * The parent directory must exist.
+ * @property {(path: string, data: string) => Promise<void>} appendFile Add to the end of a file.
+ * Not used by isomorphic-git.
+ * @property {(path: string) => Promise<void>} mkdir Create a directory. The parent directory must
+ * exist.
+ * @property {(path: string) => Promise<void>} rmdir Remove an empty directory.
+ * @property {(path: string) => Promise<void>} unlink Remove a file.
+ * @property {(path: string) => Promise<string[]>} readdir List the names in a directory.
+ * @property {(path: string) => Promise<GitFileStats>} stat Get the stats of a file or directory.
+ * @property {(path: string) => Promise<GitFileStats>} lstat Same as `stat`, as there are no
+ * symbolic links.
+ * @property {(path: string) => Promise<never>} readlink Not supported.
+ * @property {(target: string, path: string) => Promise<never>} symlink Not supported.
+ */
+
+/**
+ * Stats of a file or directory in a {@link GitFileSystem}.
+ * @typedef {object} GitFileStats
+ * @property {number} mode File mode.
+ * @property {number} size Size in bytes.
+ * @property {number} mtimeMs Last modified time.
+ * @property {number} ctimeMs Same as `mtimeMs`, as the File System API doesn’t tell.
+ * @property {number} ino Always `0`.
+ * @property {number} uid Always `0`.
+ * @property {number} gid Always `0`.
+ * @property {number} dev Always `0`.
+ * @property {() => boolean} isFile Whether it’s a file.
+ * @property {() => boolean} isDirectory Whether it’s a directory.
+ * @property {() => boolean} isSymbolicLink Always `false`.
+ */
+
+/**
+ * Type of a Git object.
+ * @typedef {'commit' | 'tree' | 'blob' | 'tag'} GitObjectType
+ */
+
+/**
+ * Git object read from a repository.
+ * @typedef {object} GitObject
+ * @property {GitObjectType} type Type.
+ * @property {Uint8Array} content Content, without the header.
+ */
+
+/**
+ * Parsed Git pack index file.
+ * @typedef {object} GitPackIndex
+ * @property {number[]} fanout Number of objects whose ID starts with a byte up to each value.
+ * @property {Uint8Array} oids Sorted object IDs, 20 bytes each.
+ * @property {Float64Array} offsets Offset of each object in the pack file, in the order of `oids`.
+ */
+
+/**
+ * Git pack file along with its index.
+ * @typedef {object} GitPack
+ * @property {GitPackIndex} index Index.
+ * @property {File} file Pack file.
+ * @property {Float64Array} [sortedOffsets] Offsets of the objects in the order they appear in the
+ * file, to find where an object ends.
+ */
+
+/**
+ * Entry in a Git index file.
+ * @typedef {object} GitIndexEntry
+ * @property {string} path File path, relative to the repository root.
+ * @property {number} mode File mode, e.g. `0o100644`.
+ * @property {string} oid Object ID of the file content.
+ * @property {number} stage Merge stage: `0` normally, or `1` to `3` for a file with a conflict.
+ * @property {Uint8Array} raw The entry as stored in the file, including its stats and padding.
+ */
+
+/**
+ * Parsed Git index file.
+ * @typedef {object} GitIndex
+ * @property {number} version Format version.
+ * @property {GitIndexEntry[]} entries Entries. Empty if the version isn’t 2.
+ * @property {string[]} extensions Signatures of the extensions.
+ * @property {Map<string, string>} [cacheTree] Object IDs of the trees Git has cached in the
+ * index, keyed by directory path, which is an empty string for the root. Only the trees still
+ * valid are included.
+ */
+
+/**
+ * Entry in a Git tree object.
+ * @typedef {object} GitTreeEntry
+ * @property {string} mode Mode, e.g. `100644`, or `40000` for a subtree.
+ * @property {string} path Name.
+ * @property {string} oid Object ID.
+ * @property {'blob' | 'tree' | 'commit'} type Object type.
+ */
+
+/**
+ * Directory in the tree that index entries make up, before the tree objects are built.
+ * @typedef {object} GitTreeDirectory
+ * @property {GitTreeEntry[]} files Entries for the files in the directory.
+ * @property {Map<string, GitTreeDirectory>} dirs Subdirectories, keyed by name.
+ */
+
+/**
+ * Rule in a `.gitattributes` file that sets or unsets the `filter` attribute, which Git LFS uses
+ * with the `lfs` value.
+ * @typedef {object} GitFilterRule
+ * @property {RegExp} regex Regular expression matching the paths the rule applies to, relative to
+ * the directory of the file.
+ * @property {boolean} lfs Whether the rule makes the files tracked with Git LFS.
+ */
+
+/**
+ * Git tree built from index entries.
+ * @typedef {object} GitTreeNode
+ * @property {string} oid Object ID.
+ * @property {GitTreeEntry[]} entries Entries, in Git’s order.
+ * @property {Map<string, GitTreeNode>} subtrees Subtrees, keyed by name.
+ */
+
+/**
+ * Reason the local backend can’t commit the user’s changes to Git.
+ * - `unsupported_repository`: The repository uses a format the CMS doesn’t support, e.g. a linked
+ * worktree, SHA-256 object IDs, the reftable format, or an index version other than 2.
+ * - `missing_identity`: The repository’s configuration doesn’t have `user.name` and `user.email`.
+ * - `locked`: Another Git process is using the index.
+ * - `operation_in_progress`: An operation that has to be finished or aborted is in progress, or a
+ * file has a conflict; the detail is the {@link LocalGitOperation}.
+ * - `detached_head`: No branch is checked out.
+ * - `staged_changes`: The user has staged changes of their own.
+ * - `lfs`: A saved file is tracked with Git LFS.
+ * - `error`: An unexpected error occurred.
+ * @typedef {'unsupported_repository' | 'missing_identity' | 'locked' | 'operation_in_progress' |
+ * 'detached_head' | 'staged_changes' | 'lfs' | 'error'} LocalGitSkipReason
+ */
+
+/**
+ * Git operation in progress that keeps the local backend from committing: `merge`, `rebase`,
+ * `cherry_pick`, `revert`, `am` (`git am`), or `conflict` for files with a conflict left by any of
+ * them.
+ * @typedef {'merge' | 'rebase' | 'cherry_pick' | 'revert' | 'am' | 'conflict'} LocalGitOperation
+ */
+
+/**
+ * Git author identity.
+ * @typedef {object} LocalGitAuthor
+ * @property {string} name Name.
+ * @property {string} email Email address.
+ */
+
+/**
+ * Author and time of a Git commit, in the shape isomorphic-git takes.
+ * @typedef {object} LocalGitSignature
+ * @property {string} name Name.
+ * @property {string} email Email address.
+ * @property {number} timestamp Time in seconds since the epoch.
+ * @property {number} timezoneOffset Time zone offset in minutes, as returned by
+ * `Date.prototype.getTimezoneOffset()`.
+ */
+
+/**
+ * Whether the local backend can commit the user’s changes to Git right now.
+ * @typedef {object} LocalGitStatus
+ * @property {boolean} ready Whether the changes can be committed.
+ * @property {LocalGitSkipReason} [reason] Why they can’t be.
+ * @property {string} [detail] Details on the reason, e.g. the path of a file tracked with Git LFS,
+ * or an error message.
+ * @property {LocalGitAuthor} [author] Author of the commits, if known.
+ * @property {string} [branch] Full name of the current branch, e.g. `refs/heads/main`, if known.
+ */
+
+/**
+ * Repository the local backend commits to, as inspected before the changes are saved.
+ * @typedef {object} LocalGitRepository
+ * @property {any} git Isomorphic-git module, from the `git` chunk.
+ * @property {GitFileSystem} fs File system.
+ * @property {FileSystemDirectoryHandle} gitDirHandle Handle of the `.git` directory.
+ * @property {{ readObject: (oid: string) => Promise<GitObject | undefined> }} reader Object
+ * reader.
+ * @property {string} branch Full name of the current branch.
+ * @property {LocalGitAuthor} author Author of the commit.
+ * @property {string} [headOid] ID of the current commit. `undefined` if the branch has no commits.
+ * @property {string} [headTreeOid] ID of the current commit’s tree.
+ * @property {GitIndex} index Index as inspected.
+ * @property {ArrayBuffer} [indexBuffer] Content of the index file as inspected, to put it back if
+ * the commit fails. `undefined` if the repository had no index.
+ * @property {GitTreeNode} indexTree Tree built from the index as inspected.
+ * @property {boolean} autocrlf Whether `core.autocrlf` is `true` or `input`, which makes Git store
+ * text with LF line endings.
+ */
+
+/**
+ * Result of inspecting a repository the local backend commits to.
+ * @typedef {LocalGitStatus & { repository?: LocalGitRepository }} LocalGitInspection
+ */
+
+/**
+ * Notice for the user when their changes have been saved but not committed.
+ * @typedef {object} LocalGitNotice
+ * @property {LocalGitSkipReason} reason Reason.
+ * @property {string} [detail] Details on the reason.
  */
 
 /**
@@ -1145,6 +1522,8 @@
  * leaving the published version on the site.
  * @property {boolean} [deletionCancelled] Whether a pending removal has been called off, leaving
  * the items on the site.
+ * @property {boolean} [alreadyPublished] Whether an Open Authoring contributor’s entry turned out
+ * to have been published by a maintainer when its status was changed, which closes the editor.
  * @property {boolean} published Whether the items have been published. This is `true` only when
  * automatic deployments are enabled and triggered.
  */
@@ -1212,6 +1591,23 @@
  * @property {string} label Folder name.
  * @property {() => void} [onClick] Called when the folder is selected. Not needed for the current
  * folder, which is shown as text.
+ */
+
+/**
+ * What the folder info panel in the Asset Library describes: the listed subfolder focused with a
+ * click or the keyboard, if any, or else the folder being browsed.
+ * @typedef {object} AssetFolderSummary
+ * @property {string} name Folder name.
+ * @property {string} [path] Folder path. Omitted for a location without a path, like the All Assets
+ * folder.
+ * @property {number} [folderCount] Number of subfolders. Omitted for a location that isn’t browsed
+ * by subfolder, which lists every asset below it at once.
+ * @property {number} assetCount Number of assets.
+ */
+
+/**
+ * Direction to move in between the listed assets in the asset details overlay.
+ * @typedef {'previous' | 'next'} AssetNavigationDirection
  */
 
 /**
@@ -1283,6 +1679,9 @@
  * @property {AssetKind} kind Basic file type.
  * @property {string} [credit] Attribution HTML string, including the photographer name/link and
  * service name/link.
+ * @property {string} [downloadTrackingURL] URL to request once the asset has been used, for a
+ * stock asset service that counts the downloads, like Unsplash. See
+ * {@link MediaLibraryService.trackDownload}.
  */
 
 /**
@@ -1359,14 +1758,15 @@
  */
 
 /**
- * Entry/Asset list view type.
- * @typedef {'grid' | 'list'} ViewType
+ * Entry/Asset list view type. The `table` view is only available in the entry list.
+ * @typedef {'grid' | 'list' | 'table'} ViewType
  */
 
 /**
  * Entry list view settings.
  * @typedef {object} EntryListView
- * @property {ViewType} type View type.
+ * @property {ViewType} [type] View type the user has picked. Not set until then, so the default
+ * applies.
  * @property {SortingConditions} [sort] Sorting conditions.
  * @property {FilteringConditions} [filter] Filtering conditions. Deprecated in favour of `filters`.
  * @property {FilteringConditions[]} [filters] One or more filtering conditions.
@@ -1383,6 +1783,15 @@
  * @property {InternalLocaleCode} locale Locale.
  * @property {number} [width] Percentage width of the pane in the editor layout. The sum of the
  * widths of all panes should be 100.
+ */
+
+/**
+ * Column of the entry list’s table view, resolved from the `table_columns` collection option.
+ * @typedef {object} EntryTableColumn
+ * @property {string} key Field key path, or one of the special keys: `_summary`, `slug`,
+ * `commit_author` and `commit_date`.
+ * @property {string} label Column header.
+ * @property {Field} [fieldConfig] Field configuration, if the key is a field key path.
  */
 
 /**
@@ -1426,6 +1835,18 @@
  * @property {string} extension File extension.
  * @property {FileParser} [parser] Parser method.
  * @property {FileFormatter} [formatter] Formatter method.
+ */
+
+/**
+ * Custom page registered with the `CMS.registerCustomPage()` API, normalized for the UI.
+ * @typedef {object} CustomPage
+ * @property {string} id Page ID, used in the page’s URL path.
+ * @property {string} label Page label.
+ * @property {string} icon Material Symbols icon name.
+ * @property {ComponentType} [component] React component rendering the page content.
+ * @property {string} [url] Absolute URL of the web page to show, embedded in an iframe unless
+ * `newTab` is `true`.
+ * @property {boolean} newTab Whether the page is a link opening `url` in a new browser tab.
  */
 
 /**
@@ -1590,6 +2011,12 @@
  * @property {Map<string, string>} [randomValues] Random values generated for the entry so far,
  * such as the one for a `{{uuid}}` tag, to be reused instead of generating new ones. It keeps a new
  * entry’s slug the same between the one shown while editing and the one saved.
+ * @property {string} [assetFileName] Original name of the asset file being named with the
+ * `filename_template` media library option. The `{{filename}}` and `{{extension}}` tags then stand
+ * for its name without the extension and its extension.
+ * @property {string} [dirPath] Folder within the collection folder a new entry goes to, as chosen
+ * with the path editor of a nested collection. A filled slug then only has to be unique among the
+ * entries in that folder.
  */
 
 /**
@@ -1613,6 +2040,10 @@
  * @property {number} [width] Width. Default: original width.
  * @property {number} [height] Height. Default: original height.
  * @property {ImageFitOption} [fit] Fit option. Default: `scale-down`.
+ * @property {boolean} [nativeOnly] Whether to use a format the browser encodes natively when it
+ * can’t encode the given `format`, such as WebP in Safari, rather than load an encoder for it:
+ * JPEG, or PNG for an image with transparency. For an image that’s only shown in the CMS, like a
+ * thumbnail. Default: `false`.
  * @see https://developers.cloudflare.com/images/transform-images/transform-via-url/
  * @see https://developer.mozilla.org/en-US/docs/Web/Media/Guides/Formats/Image_types
  */
@@ -1807,7 +2238,10 @@
  * Parsed transformation descriptor used by template placeholders and summary rendering.
  * @typedef {object} StringTransformation
  * @property {string} method The transformation name.
- * @property {Record<string, string>} args Transformation arguments.
+ * @property {Record<string, string>} args Named arguments of a built-in transformation.
+ * @property {readonly (string | number)[]} [customArgs] Arguments of a transformation that isn’t
+ * built-in, which may be a custom one registered with `CMS.registerStringTransformation()`. Only
+ * present if the arguments are given in parentheses and can be parsed.
  */
 
 export {};

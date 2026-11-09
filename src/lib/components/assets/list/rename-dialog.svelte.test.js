@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
-import { page } from 'vitest/browser';
+import { page, userEvent } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
 import { showAssetOverlay } from '$lib/services/assets/view';
-import { waitForRenameDialog } from '$lib/test/dialog';
+import { expectFileNameSelected } from '$lib/test/dialog';
 
 import RenameDialog from './rename-dialog.svelte';
 
@@ -44,12 +44,74 @@ describe('RenameDialog', () => {
       .toHaveTextContent('Enter a new name below. 2 entries using the asset will also be updated.');
     // Nothing has changed yet
     await expect.element(dialog.getByRole('button', { name: 'Rename' })).toBeDisabled();
-    await waitForRenameDialog(dialog.getByRole('textbox'), 'photo.png');
+    await expectFileNameSelected(dialog.getByRole('textbox'), 'photo.png');
 
     await dialog.getByRole('textbox').fill('picture.png');
     await dialog.getByRole('button', { name: 'Rename' }).click();
 
     // The handler runs once the dialog is closed
+    await vi.waitFor(() => expect(onRename).toHaveBeenCalledWith('picture.png'));
+  });
+
+  test('slugifies the new name, showing it below the input', async () => {
+    const { onRename } = await renderDialog({
+      slugificationEnabled: true,
+      otherNames: ['logo.png', 'old-logo.png'],
+    });
+
+    const dialog = page.getByRole('dialog');
+    const textbox = dialog.getByRole('textbox');
+    const button = dialog.getByRole('button', { name: 'Rename' });
+
+    await expectFileNameSelected(textbox, 'photo.png');
+    // The current name is already a slug, so there’s nothing to show
+    await expect.element(dialog.getByRole('status')).not.toBeInTheDocument();
+
+    // A name that slugifies to the current one doesn’t change anything
+    await textbox.fill('Photo.PNG');
+    await expect
+      .element(dialog.getByRole('status'))
+      .toHaveTextContent('The file will be saved as “\u2068photo.png\u2069”.');
+    await expect.element(button).toBeDisabled();
+
+    await textbox.fill(' ');
+    await expect.element(dialog.getByText('File name cannot be empty.')).toBeInTheDocument();
+
+    // Nor can it take the name of another asset once slugified
+    await textbox.fill('Old Logo.png');
+    await expect
+      .element(dialog.getByText('This file name is used for another asset.'))
+      .toBeInTheDocument();
+    await expect.element(dialog.getByRole('status')).not.toBeInTheDocument();
+    await expect.element(button).toBeDisabled();
+
+    await textbox.fill('Blog Photo 1.png');
+    await expect
+      .element(dialog.getByRole('status'))
+      .toHaveTextContent('The file will be saved as “\u2068blog-photo-1.png\u2069”.');
+    await button.click();
+
+    await vi.waitFor(() => expect(onRename).toHaveBeenCalledWith('blog-photo-1.png'));
+  });
+
+  test('explains why the asset can’t be renamed, and refuses the rename', async () => {
+    await renderDialog({ blockedMessage: 'A read-only entry uses it.' });
+
+    const dialog = page.getByRole('dialog');
+
+    await expect.element(dialog.getByRole('alert')).toHaveTextContent('A read-only entry uses it.');
+    await expect.element(dialog.getByRole('textbox')).toBeDisabled();
+    await expect.element(dialog.getByRole('button', { name: 'Rename' })).toBeDisabled();
+  });
+
+  test('shows a warning without keeping the asset from being renamed', async () => {
+    const { onRename } = await renderDialog({ warning: 'Links will break.' });
+    const dialog = page.getByRole('dialog');
+
+    await expect.element(dialog.getByRole('alert')).toHaveTextContent('Links will break.');
+    await expectFileNameSelected(dialog.getByRole('textbox'), 'photo.png');
+    await dialog.getByRole('textbox').fill('picture.png');
+    await dialog.getByRole('button', { name: 'Rename' }).click();
     await vi.waitFor(() => expect(onRename).toHaveBeenCalledWith('picture.png'));
   });
 
@@ -61,7 +123,7 @@ describe('RenameDialog', () => {
     const button = dialog.getByRole('button', { name: 'Rename' });
 
     // The input is filled in once the dialog is open
-    await waitForRenameDialog(textbox, 'photo.png');
+    await expectFileNameSelected(textbox, 'photo.png');
     await textbox.fill(' ');
     await expect.element(textbox).toHaveAttribute('aria-invalid', 'true');
     await expect.element(dialog.getByText('File name cannot be empty.')).toBeInTheDocument();
@@ -82,13 +144,66 @@ describe('RenameDialog', () => {
     await expect.element(button).toBeEnabled();
   });
 
+  test('refuses a name taken in another case, a folder name and a leading dot', async () => {
+    await renderDialog({ folderNames: ['sub'] });
+
+    const dialog = page.getByRole('dialog');
+    const textbox = dialog.getByRole('textbox');
+    const button = dialog.getByRole('button', { name: 'Rename' });
+
+    await expectFileNameSelected(textbox, 'photo.png');
+
+    // `LOGO.png` and `logo.png` clash on a case-insensitive file system like macOS’s or Windows’s
+    await textbox.fill('LOGO.png');
+    await expect
+      .element(dialog.getByText('This file name is used for another asset.'))
+      .toBeInTheDocument();
+    await expect.element(button).toBeDisabled();
+
+    // A Git tree can’t hold a file and a folder under one name
+    await textbox.fill('Sub');
+    await expect
+      .element(dialog.getByText('A folder with this name already exists here.'))
+      .toBeInTheDocument();
+    await expect.element(button).toBeDisabled();
+
+    // A dot file is hidden, so the asset would no longer be listed
+    await textbox.fill('.photo.png');
+    await expect
+      .element(dialog.getByText('File name cannot start with a dot.'))
+      .toBeInTheDocument();
+    await expect.element(button).toBeDisabled();
+
+    // Nor can a name be left with nothing once sanitized
+    await textbox.fill('???');
+    await expect
+      .element(dialog.getByText('File name cannot contain special characters.'))
+      .toBeInTheDocument();
+    await expect.element(button).toBeDisabled();
+  });
+
+  test('sanitizes the new name like an uploaded file’s, showing it below the input', async () => {
+    const { onRename } = await renderDialog();
+    const dialog = page.getByRole('dialog');
+    const textbox = dialog.getByRole('textbox');
+
+    await expectFileNameSelected(textbox, 'photo.png');
+    await textbox.fill('pic:ture.png');
+    await expect
+      .element(dialog.getByRole('status'))
+      .toHaveTextContent('The file will be saved as “\u2068picture.png\u2069”.');
+    await dialog.getByRole('button', { name: 'Rename' }).click();
+
+    await vi.waitFor(() => expect(onRename).toHaveBeenCalledWith('picture.png'));
+  });
+
   test('asks for confirmation when the extension changes', async () => {
     const { onRename, onClose } = await renderDialog();
     const dialog = page.getByRole('dialog', { name: 'Rename \u2068photo.png\u2069' });
 
     // Filling the input before the dialog has narrowed the initial selection to the file name would
     // replace that part alone, leaving the extension in place
-    await waitForRenameDialog(dialog.getByRole('textbox'), 'photo.png');
+    await expectFileNameSelected(dialog.getByRole('textbox'), 'photo.png');
     await dialog.getByRole('textbox').fill('photo.webp');
     await dialog.getByRole('button', { name: 'Rename' }).click();
 
@@ -100,7 +215,7 @@ describe('RenameDialog', () => {
 
     // Going back keeps the entered name
     await confirmation.getByRole('button', { name: 'Cancel' }).click();
-    await waitForRenameDialog(dialog.getByRole('textbox'), 'photo.webp');
+    await expectFileNameSelected(dialog.getByRole('textbox'), 'photo.webp');
     expect(onClose).not.toHaveBeenCalled();
 
     await dialog.getByRole('button', { name: 'Rename' }).click();
@@ -115,11 +230,25 @@ describe('RenameDialog', () => {
 
     const textbox = page.getByRole('dialog').getByRole('textbox');
 
-    // The dialog selects the whole input value, which is then narrowed to the file name
     await expect.element(textbox).toHaveFocus();
     await expect
       .poll(() => /** @type {HTMLInputElement} */ (textbox.element()).selectionEnd)
       .toBe('photo'.length);
+  });
+
+  test('leaves a selection made by the user alone', async () => {
+    await renderDialog();
+
+    const textbox = page.getByRole('dialog').getByRole('textbox');
+    const input = /** @type {HTMLInputElement} */ (textbox.element());
+
+    // A quick user selects the whole name and types over it as soon as the dialog opens, before
+    // the browser has reported the selection
+    await expect.element(textbox).toHaveValue('photo.png');
+    input.focus();
+    input.select();
+    await userEvent.keyboard('picture.png');
+    await expect.element(textbox).toHaveValue('picture.png');
   });
 
   test('closes along with the asset details overlay', async () => {

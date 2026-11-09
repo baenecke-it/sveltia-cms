@@ -11,8 +11,9 @@
     getAssetDetails,
     getAssetUsedEntries,
   } from '$lib/services/assets/details';
-  import { isMediaKind } from '$lib/services/assets/kinds';
+  import { isMediaKind, isPDF } from '$lib/services/assets/kinds';
   import { formatDate } from '$lib/services/utils/date';
+  import { createLatestGuard } from '$lib/services/utils/scheduling';
 
   /**
    * @import { Asset, AssetDetails } from '$lib/types/private';
@@ -39,19 +40,45 @@
   const { path, size, kind, commitAuthor, commitDate } = $derived(asset);
   const { publicURL, repoBlobURL, dimensions, duration, createdDate, coordinates, usedEntries } =
     $derived(details);
-  const canPreview = $derived(isMediaKind(kind) || path.endsWith('.pdf'));
+  const canPreview = $derived(isMediaKind(kind) || isPDF(path));
+
+  /**
+   * Guard for {@link updateProps}. The panel stays mounted while the focus moves from one asset
+   * to another, so a slow lookup for an asset focused earlier must not overwrite the details of the
+   * one focused now.
+   */
+  const requestGuard = createLatestGuard();
 
   /**
    * Update the properties above.
    */
   const updateProps = async () => {
+    const _asset = asset;
+    const isLatest = requestGuard.next();
+
+    // Don’t leave the previous asset’s details on show while this one’s are being retrieved. The
+    // used entries are being looked up as well
+    details = { ...defaultAssetDetails, usedEntries: undefined };
+
     try {
-      details = asset ? await getAssetDetails(asset) : { ...defaultAssetDetails };
-      details.usedEntries = asset ? await getAssetUsedEntries(asset) : [];
+      const _details = _asset ? await getAssetDetails(_asset) : { ...defaultAssetDetails };
+
+      if (!isLatest()) {
+        return;
+      }
+
+      details = _details;
+      // A late result lands on the object replaced since, so it needs no check
+      details.usedEntries = _asset ? await getAssetUsedEntries(_asset) : [];
     } catch (/** @type {any} */ ex) {
       // The file couldn’t be downloaded, so only the basic info is shown
       // eslint-disable-next-line no-console
       console.error(ex);
+
+      if (isLatest()) {
+        // Stop showing the used entries as being loaded
+        details.usedEntries = [];
+      }
     }
   };
 

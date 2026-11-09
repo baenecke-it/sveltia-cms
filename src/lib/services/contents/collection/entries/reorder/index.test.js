@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { buildRenumberChanges, reorderEntries, sortEntriesByOrderField } from '.';
+import { buildRenumberChanges, reorderEntries } from '.';
 
 vi.mock('$lib/services/backends', () => ({
   backend: { current: null },
@@ -21,10 +21,11 @@ vi.mock('$lib/services/contents/collection/entries', () => ({
 
 vi.mock('$lib/services/contents/collection/entries/index-file', () => ({
   getIndexFile: vi.fn(() => undefined),
+  isCollectionIndexFile: vi.fn(() => false),
 }));
 
 vi.mock('$lib/services/contents/draft/save/changes', () => ({
-  getPreviousSha: vi.fn().mockResolvedValue('sha-1'),
+  getArrayItemTarget: vi.fn(() => ({})),
 }));
 
 vi.mock('$lib/services/contents/draft/save/serialize', () => ({
@@ -36,7 +37,15 @@ vi.mock('$lib/services/contents/file/format', () => ({
 }));
 
 vi.mock('@sveltia/utils/storage', () => ({
-  IndexedDB: vi.fn(),
+  // The file cache database the previous SHA of each file is looked up in
+  IndexedDB: vi.fn(
+    /**
+     *
+     */
+    class {
+      get = vi.fn(async () => ({ sha: 'sha-1' }));
+    },
+  ),
 }));
 
 /**
@@ -70,6 +79,33 @@ const makeEntry = (id, content) => ({
   subPath: id,
   locales: {
     _default: { slug: id, path: `content/${id}.md`, content },
+  },
+});
+
+/**
+ * Build a minimal entry collection mock storing all the entries in one file.
+ * @returns {any} Mock collection.
+ */
+const makeArrayFileCollection = () =>
+  makeCollection({
+    _type: 'entry',
+    file: 'data/items.json',
+    _file: { format: 'json', arrayFile: true, fullPath: 'data/items.json' },
+  });
+
+/**
+ * Build a minimal entry mock stored in a file with the other entries.
+ * @param {string} id Entry id.
+ * @param {number | undefined} arrayIndex Position in the array.
+ * @returns {any} Mock entry.
+ */
+const makeArrayEntry = (id, arrayIndex) => ({
+  id,
+  slug: id,
+  subPath: id,
+  arrayIndex,
+  locales: {
+    _default: { slug: id, path: 'data/items.json', content: { title: id } },
   },
 });
 
@@ -328,6 +364,49 @@ describe('reorderEntries()', () => {
     expect(formatted.ja).toMatchObject({ title: 'あ', order: 1 });
   });
 
+  test('builds one change rewriting the array file in the new order', async () => {
+    const collection = makeArrayFileCollection();
+    const a = makeArrayEntry('a', 0);
+    const b = makeArrayEntry('b', 1);
+    const c = makeArrayEntry('c', 2);
+    const result = await reorderEntries(collection, [b, a, c]);
+
+    expect(result).toBe(2);
+
+    const { saveChanges } = await import('$lib/services/backends/save');
+
+    expect(saveChanges).toHaveBeenCalledWith({
+      changes: [
+        {
+          action: 'update',
+          path: 'data/items.json',
+          arrayOrder: [
+            { index: 1, locales: b.locales },
+            { index: 0, locales: a.locales },
+            { index: 2, locales: c.locales },
+          ],
+        },
+      ],
+      savingEntries: [b, a],
+      options: { commitType: 'update', collection },
+    });
+  });
+
+  test('does nothing when no entry has moved in the array file', async () => {
+    const collection = makeArrayFileCollection();
+
+    const result = await reorderEntries(collection, [
+      makeArrayEntry('a', 0),
+      makeArrayEntry('b', 1),
+    ]);
+
+    expect(result).toBe(0);
+
+    const { saveChanges } = await import('$lib/services/backends/save');
+
+    expect(saveChanges).not.toHaveBeenCalled();
+  });
+
   test('initializes the file cache database when the backend has a databaseName', async () => {
     const { backend } = /** @type {any} */ (await import('$lib/services/backends'));
     const { IndexedDB } = await import('@sveltia/utils/storage');
@@ -391,6 +470,35 @@ describe('buildRenumberChanges()', () => {
     expect(saveChanges).not.toHaveBeenCalled();
   });
 
+  test('leaves out the collection’s own index file only, not another one with the same slug', async () => {
+    const { getEntriesByCollection } = await import('$lib/services/contents/collection/entries');
+
+    const { getIndexFile, isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
+
+    const collection = makeCollection({ _type: 'entry' });
+    const ownIndex = { ...makeEntry('own', { title: 'Home' }), slug: '_index' };
+    // Another collection’s index file within this collection’s folder carries the same slug
+    const innerIndex = { ...makeEntry('inner', { title: 'Posts', order: 3 }), slug: '_index' };
+
+    vi.mocked(getIndexFile).mockReturnValueOnce(/** @type {any} */ ({ name: '_index' }));
+    vi.mocked(isCollectionIndexFile).mockImplementation((_collection, entry) => entry.id === 'own');
+    vi.mocked(getEntriesByCollection).mockReturnValueOnce([
+      ownIndex,
+      makeEntry('a', { title: 'A', order: 1 }),
+      innerIndex,
+    ]);
+
+    const result = await buildRenumberChanges(collection);
+
+    expect(result.savingEntries.map((e) => [e.id, e.locales._default.content.order])).toEqual([
+      ['inner', 2],
+    ]);
+
+    vi.mocked(isCollectionIndexFile).mockReset();
+    vi.mocked(isCollectionIndexFile).mockReturnValue(false);
+  });
+
   test('reuses a caller-provided cacheDB instead of opening a new one', async () => {
     const { IndexedDB } = await import('@sveltia/utils/storage');
     const { getEntriesByCollection } = await import('$lib/services/contents/collection/entries');
@@ -424,42 +532,6 @@ describe('buildRenumberChanges()', () => {
     expect(result.savingEntries.map((e) => e.locales._default.content)).toEqual([
       { title: 'A', order: 1 },
       { title: 'B', order: 2, tag: '' },
-    ]);
-  });
-});
-
-describe('sortEntriesByOrderField()', () => {
-  test('returns a shallow copy unchanged when no order field is configured', () => {
-    const entries = [makeEntry('a', { title: 'A' }), makeEntry('b', { title: 'B' })];
-    const collection = /** @type {any} */ ({ _i18n: { defaultLocale: '_default' } });
-    const sorted = sortEntriesByOrderField(entries, collection);
-
-    expect(sorted).toEqual(entries);
-    expect(sorted).not.toBe(entries);
-  });
-
-  test('sorts by the order value, with entries lacking one at the end in their input order', () => {
-    const unorderedA = makeEntry('x', { title: 'X' });
-    const second = makeEntry('b', { title: 'B', order: '2' });
-    const unorderedB = makeEntry('y', { title: 'Y', order: 'n/a' });
-    const first = makeEntry('a', { title: 'A', order: 1 });
-
-    expect(
-      sortEntriesByOrderField([unorderedA, second, unorderedB, first], makeCollection()),
-    ).toEqual([first, second, unorderedA, unorderedB]);
-  });
-
-  test('moves an entry without an order value after one that comes later with a value', () => {
-    // Laid out so the V8 comparator is called with (unordered, ordered), which is the branch the
-    // previous test doesn’t reach
-    const five = makeEntry('a', { title: 'A', order: 5 });
-    const unordered = makeEntry('n', { title: 'N' });
-    const three = makeEntry('b', { title: 'B', order: 3 });
-
-    expect(sortEntriesByOrderField([five, unordered, three], makeCollection())).toEqual([
-      three,
-      five,
-      unordered,
     ]);
   });
 });

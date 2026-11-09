@@ -10,7 +10,7 @@
   import Subsection from '$lib/components/contents/details/fields/object/subsection.svelte';
   import FieldPreview from '$lib/components/contents/details/preview/field-preview.svelte';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
-  import { getValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
+  import { getFieldValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
   import { getKeysByPrefix } from '$lib/services/contents/entry/key-paths';
 
   /**
@@ -42,7 +42,7 @@
 
   const { fields } = $derived(/** @type {ObjectFieldWithSubFields} */ (fieldConfig));
   const { types, typeKey = 'type' } = $derived(/** @type {ObjectFieldWithTypes} */ (fieldConfig));
-  const valueMap = $derived(getValueMapSnapshot(entryDraft.current, locale));
+  const valueMap = $derived(getFieldValueMapSnapshot(entryDraft.current, locale, keyPath));
   // Ask the shared key path index rather than scanning the whole value map; see the same check in
   // the Object field editor
   const hasValues = $derived(
@@ -65,16 +65,20 @@
     <Subsection {label}>
       {#each subFields as subField (subField.name)}
         {@const subFieldKeyPath = `${keyPath}.${subField.name}`}
-        <VisibilityObserver>
-          <FieldPreview
-            keyPath={subFieldKeyPath}
-            typedKeyPath={hasVariableTypes && typeConfig?.name
-              ? `${typedKeyPath}<${typeConfig.name}>.${subField.name}`
-              : subFieldKeyPath}
-            {locale}
-            fieldConfig={subField}
-          />
-        </VisibilityObserver>
+        <!-- Mark the subfield outside its observer, so that focusing it can scroll the preview to
+          it even before it’s rendered -->
+        <div role="none" data-lazy-key-path={subFieldKeyPath}>
+          <VisibilityObserver>
+            <FieldPreview
+              keyPath={subFieldKeyPath}
+              typedKeyPath={hasVariableTypes && typeConfig?.name
+                ? `${typedKeyPath}<${typeConfig.name}>.${subField.name}`
+                : `${typedKeyPath}.${subField.name}`}
+              {locale}
+              fieldConfig={subField}
+            />
+          </VisibilityObserver>
+        </div>
       {/each}
     </Subsection>
   {/if}

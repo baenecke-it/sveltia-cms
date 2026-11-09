@@ -1,9 +1,10 @@
-import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { fetchLastCommit } from '$lib/services/backends/git/github/commits';
 import {
   fetchBlob,
   fetchBlobText,
+  fetchDirSHA,
   fetchFileContents,
   fetchFileList,
   fetchFileMetadata,
@@ -19,6 +20,7 @@ import {
   isOpenAuthoringConfigured,
 } from '$lib/services/backends/git/github/fork';
 import {
+  checkBranchAccess,
   checkRepositoryAccess,
   fetchDefaultBranchName,
   repository,
@@ -27,7 +29,7 @@ import { fetchAPI, fetchGraphQL } from '$lib/services/backends/git/shared/api';
 import { MAX_CONCURRENT_REQUESTS } from '$lib/services/backends/git/shared/concurrency';
 import { fetchAndParseFiles } from '$lib/services/backends/git/shared/fetch';
 import { startSimulatedProgress } from '$lib/services/backends/git/shared/progress';
-import { openAuthoringInitialized } from '$lib/services/workflow/open-authoring';
+import { forkedRepository, openAuthoringInitialized } from '$lib/services/workflow/open-authoring';
 
 // Mock dependencies
 vi.mock('$lib/services/backends/git/github/commits');
@@ -36,6 +38,7 @@ vi.mock('$lib/services/backends/git/github/repository');
 vi.mock('$lib/services/backends/git/shared/api');
 vi.mock('$lib/services/backends/git/shared/fetch');
 vi.mock('$lib/services/workflow/open-authoring', () => ({
+  forkedRepository: { current: undefined },
   openAuthoringInitialized: { current: false },
 }));
 
@@ -46,6 +49,13 @@ vi.mock('$lib/services/backends/git/shared/progress', () => ({
   startSimulatedProgress: vi.fn(() => stopProgress),
 }));
 vi.mock('mime', () => ({ default: { getType: vi.fn() } }));
+
+const mockGetRootDir = vi.hoisted(() => vi.fn(() => ''));
+
+vi.mock('$lib/services/backends/root-dir', () => ({ getRootDir: mockGetRootDir }));
+vi.mock('@sveltia/i18n', async () =>
+  (await import('$lib/test/i18n')).createI18nMock({ values: true }),
+);
 
 describe('GitHub files service', () => {
   beforeEach(() => {
@@ -82,6 +92,17 @@ describe('GitHub files service', () => {
       ]);
     });
 
+    test('encodes the branch name', async () => {
+      repository.branch = 'release#1';
+      vi.mocked(fetchAPI).mockResolvedValue({ tree: [] });
+
+      await fetchFileList();
+
+      expect(fetchAPI).toHaveBeenCalledWith(
+        '/repos/test-owner/test-repo/git/trees/release%231?recursive=1',
+      );
+    });
+
     test('fetches file list with custom hash', async () => {
       const mockTree = { tree: [] };
       const customHash = 'custom-hash';
@@ -93,6 +114,188 @@ describe('GitHub files service', () => {
       expect(fetchAPI).toHaveBeenCalledWith(
         `/repos/test-owner/test-repo/git/trees/${customHash}?recursive=1`,
       );
+    });
+
+    test('walks the subtrees when the recursive tree is truncated', async () => {
+      const prefix = '/repos/test-owner/test-repo/git/trees';
+
+      /** @type {Record<string, any>} */
+      const responses = {
+        // The full tree is too big, so only part of it comes back
+        [`${prefix}/main?recursive=1`]: {
+          tree: [{ type: 'blob', path: 'a.md', sha: 'a', size: 1 }],
+          truncated: true,
+        },
+        [`${prefix}/main`]: {
+          tree: [
+            { type: 'blob', path: 'a.md', sha: 'a', size: 1 },
+            { type: 'tree', path: 'content', sha: 't1' },
+            { type: 'tree', path: 'static', sha: 't2' },
+          ],
+          truncated: false,
+        },
+        [`${prefix}/t1?recursive=1`]: {
+          tree: [
+            { type: 'blob', path: 'post.md', sha: 'b', size: 2 },
+            { type: 'tree', path: 'sub', sha: 't3' },
+            { type: 'blob', path: 'sub/x.md', sha: 'c', size: 3 },
+          ],
+          truncated: false,
+        },
+        // A subtree that is too big as well is walked in turn
+        [`${prefix}/t2?recursive=1`]: { tree: [], truncated: true },
+        [`${prefix}/t2`]: {
+          tree: [
+            { type: 'blob', path: 'img.png', sha: 'd', size: 4 },
+            { type: 'tree', path: 'icons', sha: 't4' },
+          ],
+          truncated: false,
+        },
+        [`${prefix}/t4?recursive=1`]: {
+          tree: [{ type: 'blob', path: 'logo.svg', sha: 'e', size: 5 }],
+          truncated: false,
+        },
+      };
+
+      vi.mocked(fetchAPI).mockImplementation(async (path) => responses[path]);
+
+      const result = await fetchFileList();
+
+      expect(result).toEqual([
+        { path: 'a.md', sha: 'a', size: 1, name: 'a.md' },
+        { path: 'content/post.md', sha: 'b', size: 2, name: 'post.md' },
+        { path: 'content/sub/x.md', sha: 'c', size: 3, name: 'x.md' },
+        { path: 'static/img.png', sha: 'd', size: 4, name: 'img.png' },
+        { path: 'static/icons/logo.svg', sha: 'e', size: 5, name: 'logo.svg' },
+      ]);
+    });
+
+    describe('with a root directory', () => {
+      beforeEach(() => {
+        mockGetRootDir.mockReturnValue('apps/site');
+      });
+
+      afterEach(() => {
+        mockGetRootDir.mockReturnValue('');
+      });
+
+      test('lists only the root directory, with paths relative to the repository root', async () => {
+        vi.mocked(fetchAPI).mockResolvedValue({
+          tree: [
+            { type: 'blob', path: 'content/a.md', sha: 'a', size: 1 },
+            { type: 'tree', path: 'content', sha: 't1' },
+          ],
+          truncated: false,
+        });
+
+        await expect(fetchFileList('abc')).resolves.toEqual([
+          { path: 'apps/site/content/a.md', sha: 'a', size: 1, name: 'a.md' },
+        ]);
+        expect(fetchAPI).toHaveBeenCalledWith(
+          '/repos/test-owner/test-repo/git/trees/abc%3Aapps/site?recursive=1',
+        );
+      });
+
+      test('walks the subtrees of a root directory too big to list at once', async () => {
+        const prefix = '/repos/test-owner/test-repo/git/trees';
+
+        /** @type {Record<string, any>} */
+        const responses = {
+          [`${prefix}/abc%3Aapps/site?recursive=1`]: { tree: [], truncated: true },
+          [`${prefix}/abc%3Aapps/site`]: {
+            tree: [{ type: 'tree', path: 'content', sha: 't1' }],
+            truncated: false,
+          },
+          [`${prefix}/t1?recursive=1`]: {
+            tree: [{ type: 'blob', path: 'a.md', sha: 'a', size: 1 }],
+            truncated: false,
+          },
+        };
+
+        vi.mocked(fetchAPI).mockImplementation(async (path) => responses[path]);
+
+        await expect(fetchFileList('abc')).resolves.toEqual([
+          { path: 'apps/site/content/a.md', sha: 'a', size: 1, name: 'a.md' },
+        ]);
+      });
+
+      test('throws a localized error when the root directory doesn’t exist', async () => {
+        vi.mocked(fetchAPI).mockRejectedValue(
+          new Error('Not Found', { cause: { status: 404, message: 'Not Found' } }),
+        );
+
+        await expect(fetchFileList('abc')).rejects.toThrow(
+          expect.objectContaining({
+            message: 'Failed to list the files.',
+            cause: expect.objectContaining({
+              message: 'root_dir_not_found:{"repo":"test-owner/test-repo","dir":"apps/site"}',
+            }),
+          }),
+        );
+      });
+
+      test('passes any other error on', async () => {
+        const error = new Error('Server error', { cause: { status: 500 } });
+
+        vi.mocked(fetchAPI).mockRejectedValue(error);
+
+        await expect(fetchFileList('abc')).rejects.toBe(error);
+      });
+
+      test('passes on a 404 error for a subtree of the root directory', async () => {
+        const error = new Error('Not Found', { cause: { status: 404 } });
+
+        vi.mocked(fetchAPI).mockImplementation(async (path) => {
+          if (path.includes('/t1')) {
+            throw error;
+          }
+
+          return path.endsWith('?recursive=1')
+            ? { tree: [], truncated: true }
+            : { tree: [{ type: 'tree', path: 'content', sha: 't1' }], truncated: false };
+        });
+
+        await expect(fetchFileList('abc')).rejects.toBe(error);
+      });
+    });
+
+    test('passes on a 404 error without a root directory', async () => {
+      const error = new Error('Not Found', { cause: { status: 404 } });
+
+      vi.mocked(fetchAPI).mockRejectedValue(error);
+
+      await expect(fetchFileList('abc')).rejects.toBe(error);
+    });
+
+    test('throws when a single directory is too big to list', async () => {
+      vi.mocked(fetchAPI).mockResolvedValue({ tree: [], truncated: true });
+
+      await expect(fetchFileList()).rejects.toThrow('too many files to list');
+    });
+  });
+
+  describe('fetchDirSHA', () => {
+    test('looks the tree of a directory up with a tree-ish expression', async () => {
+      vi.mocked(fetchGraphQL).mockResolvedValue({ repository: { object: { oid: 'tree-sha' } } });
+
+      await expect(fetchDirSHA('abc', 'apps/site')).resolves.toBe('tree-sha');
+      expect(fetchGraphQL).toHaveBeenCalledWith(expect.stringContaining('object(expression:'), {
+        owner: 'test-owner',
+        repo: 'test-repo',
+        expression: 'abc:apps/site',
+      });
+    });
+
+    test('returns `undefined` for a directory that doesn’t exist', async () => {
+      vi.mocked(fetchGraphQL).mockResolvedValue({ repository: { object: null } });
+
+      await expect(fetchDirSHA('abc', 'apps/site')).resolves.toBeUndefined();
+    });
+
+    test('returns `undefined` for a repository that can’t be read', async () => {
+      vi.mocked(fetchGraphQL).mockResolvedValue({ repository: null });
+
+      await expect(fetchDirSHA('abc', 'apps/site')).resolves.toBeUndefined();
     });
   });
 
@@ -244,6 +447,41 @@ describe('GitHub files service', () => {
             login: undefined,
           },
           commitDate: new Date('2023-01-02T00:00:00Z'),
+        },
+      });
+    });
+
+    test('skips a file without a commit and tolerates a missing author', () => {
+      const fetchingFiles = /** @type {any[]} */ ([
+        { path: 'deleted.md', sha: 'sha1', size: 100 },
+        { path: 'missing.md', sha: 'sha2', size: 100 },
+        { path: 'anonymous.md', sha: 'sha3', size: 100 },
+        { path: 'file.md', sha: 'sha4', size: 100 },
+      ]);
+
+      const results = [
+        // A file deleted between the tree fetch and the metadata pass
+        { target: { history: { nodes: [] } } },
+        null,
+        {
+          target: { history: { nodes: [{ author: null, committedDate: '2023-01-03T00:00:00Z' }] } },
+        },
+        createCommit('Author 1', { id: 'user1', login: 'author1' }, '2023-01-01T00:00:00Z'),
+      ];
+
+      expect(parseFileMetadata(fetchingFiles, results)).toEqual({
+        'anonymous.md': {
+          commitAuthor: undefined,
+          commitDate: new Date('2023-01-03T00:00:00Z'),
+        },
+        'file.md': {
+          commitAuthor: {
+            name: 'Author 1',
+            email: 'Author 1@example.com',
+            id: 'user1',
+            login: 'author1',
+          },
+          commitDate: new Date('2023-01-01T00:00:00Z'),
         },
       });
     });
@@ -455,6 +693,7 @@ describe('GitHub files service', () => {
       expect(fetchAndParseFiles).toHaveBeenCalledWith({
         repository,
         checkAccess: checkRepositoryAccess,
+        checkBranchAccess,
         fetchDefaultBranchName,
         fetchLastCommit,
         fetchFileList,
@@ -479,6 +718,23 @@ describe('GitHub files service', () => {
       );
     });
 
+    test('skips the branch check for a contributor, whose changes go to their fork', async () => {
+      vi.mocked(isOpenAuthoringConfigured).mockReturnValue(true);
+      vi.mocked(fetchAndParseFiles).mockResolvedValue();
+      openAuthoringInitialized.current = true;
+      forkedRepository.current = { owner: 'mona', repo: 'site' };
+
+      try {
+        await fetchFiles();
+
+        expect(fetchAndParseFiles).toHaveBeenCalledWith(
+          expect.objectContaining({ checkBranchAccess: undefined }),
+        );
+      } finally {
+        forkedRepository.current = undefined;
+      }
+    });
+
     test('leaves the fork alone once it has been set up', async () => {
       vi.mocked(isOpenAuthoringConfigured).mockReturnValue(true);
       vi.mocked(fetchAndParseFiles).mockResolvedValue();
@@ -501,6 +757,7 @@ describe('GitHub files service', () => {
       });
 
       const mockResponse = {
+        ok: true,
         headers: new Map([['Content-Type', 'application/octet-stream']]),
         blob: vi.fn().mockResolvedValue(new Blob(['binary data'])),
       };
@@ -527,6 +784,7 @@ describe('GitHub files service', () => {
       });
 
       vi.mocked(fetchAPI).mockResolvedValue({
+        ok: true,
         headers: new Map([['Content-Type', 'application/octet-stream']]),
         blob: vi.fn().mockResolvedValue(new Blob(['binary data'])),
       });
@@ -546,6 +804,7 @@ describe('GitHub files service', () => {
       });
 
       const mockResponse = {
+        ok: true,
         headers: new Map([['Content-Type', 'image/svg+xml']]),
         text: vi.fn().mockResolvedValue('<svg></svg>'),
       };
@@ -570,6 +829,7 @@ describe('GitHub files service', () => {
       });
 
       const mockResponse = {
+        ok: true,
         headers: new Map([['Content-Type', 'text/plain']]),
         text: vi.fn().mockResolvedValue('text content'),
       };
@@ -592,6 +852,7 @@ describe('GitHub files service', () => {
       });
 
       const mockResponse = {
+        ok: true,
         headers: new Map([['Content-Type', 'application/json']]),
         text: vi.fn().mockResolvedValue('{"key":"value"}'),
       };
@@ -614,6 +875,7 @@ describe('GitHub files service', () => {
       });
 
       const mockResponse = {
+        ok: true,
         headers: new Map([['Content-Type', 'text/markdown']]),
         text: vi.fn().mockResolvedValue('# Readme'),
       };
@@ -629,6 +891,26 @@ describe('GitHub files service', () => {
       expect(result.type).toBe('text/markdown');
     });
 
+    test('throws instead of returning an error response as the file content', async () => {
+      const asset = /** @type {any} */ ({ sha: 'test-sha', path: 'image.jpg' });
+
+      const mockResponse = {
+        ok: false,
+        status: 404,
+        headers: new Map([['Content-Type', 'application/json']]),
+        text: vi.fn().mockResolvedValue('{"message":"Not Found"}'),
+        blob: vi.fn(),
+      };
+
+      vi.mocked(fetchAPI).mockResolvedValue(mockResponse);
+
+      await expect(fetchBlob(asset)).rejects.toMatchObject({
+        message: 'Failed to fetch the blob',
+        cause: { status: 404 },
+      });
+      expect(mockResponse.text).not.toHaveBeenCalled();
+    });
+
     test('calls fetchAPI with correct repository and asset SHA', async () => {
       const asset = /** @type {any} */ ({
         sha: 'custom-sha-123',
@@ -636,6 +918,7 @@ describe('GitHub files service', () => {
       });
 
       const mockResponse = {
+        ok: true,
         headers: new Map([['Content-Type', 'application/octet-stream']]),
         blob: vi.fn().mockResolvedValue(new Blob()),
       };

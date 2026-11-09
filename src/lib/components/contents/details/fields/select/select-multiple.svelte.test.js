@@ -1,10 +1,13 @@
-import { sleep } from '@sveltia/utils/misc';
 import { describe, expect, test } from 'vitest';
 import { page, userEvent } from 'vitest/browser';
 
 import { createMockDraft, renderWithDraft } from '$lib/test/draft';
 
 import SelectMultiple from './select-multiple.svelte';
+
+/**
+ * @import { SelectField } from '$lib/types/public';
+ */
 
 /**
  * Render the control within a draft.
@@ -37,7 +40,6 @@ const renderControl = async (config, values, props = {}) => {
       ...props,
     },
   });
-  await sleep(150);
 
   return draft;
 };
@@ -68,7 +70,6 @@ describe('SelectMultiple', () => {
     );
 
     await page.getByRole('combobox').click();
-    await sleep(150);
     await page.getByRole('option', { name: 'd' }).click();
     expect(draft.currentValues._default).toEqual({ 'tags.0': 'a', 'tags.1': 'b', 'tags.2': 'd' });
 
@@ -82,6 +83,72 @@ describe('SelectMultiple', () => {
     /** @type {HTMLElement} */ (document.querySelector('.select-tags .label[tabindex]')).focus();
     await userEvent.keyboard('{End}');
     await expect.poll(() => draft.currentValues._default).toEqual({ 'tags.0': 'd', 'tags.1': 'a' });
+  });
+
+  test('removes a value from a duplicated locale only if it’s there', async () => {
+    /** @type {SelectField & { options: string[] }} */
+    const fieldConfig = {
+      name: 'tags',
+      widget: 'select',
+      multiple: true,
+      i18n: 'duplicate',
+      options: ['a', 'b', 'c'],
+    };
+
+    const draft = createMockDraft({
+      fields: [fieldConfig],
+      i18n: { defaultLocale: 'en', allLocales: ['en', 'ja'] },
+      values: { en: { 'tags.0': 'a', 'tags.1': 'b' }, ja: { 'tags.0': 'a', 'tags.1': 'c' } },
+    });
+
+    await renderWithDraft(SelectMultiple, {
+      draft,
+      props: {
+        locale: 'en',
+        keyPath: 'tags',
+        fieldId: 'tags',
+        fieldConfig,
+        currentValue: ['a', 'b'],
+        options: fieldConfig.options.map((value) => ({ label: value, value, searchValue: value })),
+      },
+    });
+
+    await page.getByRole('checkbox', { name: 'b' }).click();
+    expect(draft.currentValues.en).toEqual({ 'tags.0': 'a' });
+    expect(draft.currentValues.ja).toEqual({ 'tags.0': 'a', 'tags.1': 'c' });
+  });
+
+  test('localizes a locale-prefixed Relation value for a duplicated locale', async () => {
+    const fieldConfig = /** @type {any} */ ({
+      name: 'tags',
+      widget: 'relation',
+      collection: 'tags',
+      multiple: true,
+      i18n: 'duplicate',
+      value_field: '{{locale}}/{{slug}}',
+    });
+
+    const draft = createMockDraft({
+      fields: [fieldConfig],
+      i18n: { defaultLocale: 'en', allLocales: ['en', 'ja'] },
+      values: { en: { 'tags.0': 'en/a' }, ja: { 'tags.0': 'ja/a' } },
+    });
+
+    await renderWithDraft(SelectMultiple, {
+      draft,
+      props: {
+        locale: 'en',
+        keyPath: 'tags',
+        fieldId: 'tags',
+        fieldConfig,
+        currentValue: ['en/a'],
+        options: ['en/a', 'en/b'].map((value) => ({ label: value, value, searchValue: value })),
+      },
+    });
+
+    await page.getByRole('checkbox', { name: 'en/b' }).click();
+    expect(draft.currentValues.en).toEqual({ 'tags.0': 'en/a', 'tags.1': 'en/b' });
+    expect(draft.currentValues.ja).toEqual({ 'tags.0': 'ja/a', 'tags.1': 'ja/b' });
   });
 
   test('can be read-only', async () => {

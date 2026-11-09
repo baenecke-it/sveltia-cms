@@ -2,9 +2,9 @@
 
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { allAssets } from '$lib/services/assets';
 import { getAssetFolder } from '$lib/services/assets/folders';
 import { getAssetBlob } from '$lib/services/assets/info';
+import { allAssets } from '$lib/services/assets/state';
 import { buildEntryAssetMoveChanges } from '$lib/services/contents/draft/save/asset-move';
 
 vi.mock('$lib/services/assets', () => ({ allAssets: { current: undefined } }));
@@ -91,6 +91,38 @@ describe('buildEntryAssetMoveChanges()', () => {
     expect(savingAssets.map(({ path }) => path)).toEqual([
       'content/pages/guides/our-history/photo.jpg',
       'content/pages/guides/our-history/images/logo.svg',
+    ]);
+  });
+
+  test('leaves out a file another pull request put in the entry’s folder', async () => {
+    const published = createAsset('content/pages/about/our-history/photo.jpg');
+
+    setAssets([
+      // Someone else’s pull request replaced the published photo and added a file of its own
+      {
+        ...createAsset('content/pages/about/our-history/photo.jpg'),
+        sha: 'pending',
+        workflow: { branch: 'cms/pages/other', replacedAsset: published },
+      },
+      {
+        ...createAsset('content/pages/about/our-history/extra.js'),
+        workflow: { branch: 'cms/pages/other' },
+      },
+    ]);
+
+    const { changes } = await buildEntryAssetMoveChanges({
+      collection,
+      originalEntry: createEntry({ _default: 'content/pages/about/our-history/_index.md' }),
+      savingEntry: createEntry({ _default: 'content/pages/guides/our-history/_index.md' }),
+      changes: [],
+    });
+
+    // Only the published version of the photo is moved
+    expect(changes).toEqual([
+      expect.objectContaining({
+        path: 'content/pages/guides/our-history/photo.jpg',
+        previousSha: 'sha-content/pages/about/our-history/photo.jpg',
+      }),
     ]);
   });
 
@@ -193,6 +225,7 @@ describe('buildEntryAssetMoveChanges()', () => {
       collection: {
         ...collection,
         folder: 'content/pages',
+        fields: [],
         nested: { subfolders: true },
         meta: { path: { index_file: '_index' } },
         _file: { subPath: undefined },

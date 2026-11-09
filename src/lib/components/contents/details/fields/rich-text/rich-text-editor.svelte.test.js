@@ -1,17 +1,20 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { page, userEvent } from 'vitest/browser';
 
+import { customComponentRegistry } from '$lib/services/api/registries';
 import { globalAssetFolder } from '$lib/services/assets/folders';
 import { cmsConfig } from '$lib/services/config';
 import { trackPendingFieldUpdate } from '$lib/services/contents/editor/pending';
 import { createMockImageFile, initTestConfig } from '$lib/test/config';
-import { createMockDraft, renderWithDraft } from '$lib/test/draft';
+import { createMockDraft } from '$lib/test/draft';
+import { renderFieldEditor } from '$lib/test/field.svelte';
 
 import RichTextEditor from './rich-text-editor.svelte';
 
 vi.mock('$lib/services/contents/editor/pending', () => ({
   trackPendingFieldUpdate: vi.fn(),
   awaitPendingFieldUpdates: vi.fn(),
+  afterPendingFieldUpdates: vi.fn(async (fn) => fn()),
 }));
 
 /**
@@ -37,17 +40,6 @@ const renderEditor = async (
   /** @type {RichTextField} */
   const fieldConfig = { name: 'body', widget: 'richtext', ...config };
 
-  const props = $state({
-    locale: 'en',
-    keyPath: 'body',
-    typedKeyPath: 'body',
-    fieldId: 'body',
-    fieldLabel: 'Body',
-    fieldConfig,
-    currentValue,
-    ...extra,
-  });
-
   const draft = createMockDraft({
     collectionName,
     fields: [fieldConfig],
@@ -55,9 +47,12 @@ const renderEditor = async (
     values: { en: { body: currentValue } },
   });
 
-  const { container } = await renderWithDraft(RichTextEditor, {
+  const { props, container } = await renderFieldEditor(RichTextEditor, {
+    fieldConfig,
+    fieldLabel: 'Body',
+    currentValue,
+    props: extra,
     draft,
-    props,
     // The editor is always rendered within a field editor
     context: {
       'field-editor': { parentComponentNames: [], valueStoreKey: 'currentValues', ...context },
@@ -82,6 +77,35 @@ describe('RichTextEditor', () => {
     await expect.element(page.getByRole('button', { name: 'Bold' })).toBeVisible();
   });
 
+  test('lets each paragraph take the direction of its own text without i18n', async () => {
+    // An Arabic paragraph, “Hello”, followed by an English one
+    const value = 'مرحبا\n\nHello'; // cspell:disable-line
+    const { container } = await renderEditor(value, {}, { props: { locale: '_default' } });
+    const editor = page.getByRole('textbox');
+
+    await expect
+      .poll(() =>
+        [...editor.element().querySelectorAll('p')].map((p) => getComputedStyle(p).direction),
+      )
+      .toEqual(['rtl', 'ltr']);
+
+    const textarea = /** @type {HTMLTextAreaElement} */ (container.querySelector('textarea'));
+
+    // The hidden `<textarea>` gets the value on every change, which `dir="auto"` would make slow
+    expect(textarea.dir).toBe('');
+  });
+
+  test('applies the direction of the locale', async () => {
+    const { container } = await renderEditor('Hello', {}, { props: { locale: 'ar' } });
+    const editor = page.getByRole('textbox');
+
+    await expect.poll(() => editor.element().getAttribute('dir')).toBe('rtl');
+
+    const textarea = /** @type {HTMLTextAreaElement} */ (container.querySelector('textarea'));
+
+    expect(textarea.dir).toBe('rtl');
+  });
+
   test('stores the edited content as Markdown', async () => {
     const { props } = await renderEditor('Hello');
     const editor = page.getByRole('textbox');
@@ -89,6 +113,68 @@ describe('RichTextEditor', () => {
     await expect.poll(() => editor.element().textContent).toBe('Hello');
     await editor.fill('Hello, world!');
     await expect.poll(() => props.currentValue).toBe('Hello, world!');
+  });
+
+  test('shows an HTML value as rich text, and stores the edited content as HTML', async () => {
+    const { props } = await renderEditor('<h2>Title</h2><p>Some <strong>bold</strong> text.</p>', {
+      format: 'html',
+    });
+
+    const editor = page.getByRole('textbox');
+
+    await expect.poll(() => editor.element().querySelector('h2')?.textContent).toBe('Title');
+    expect(editor.element().querySelector('strong')).toHaveTextContent('bold');
+
+    // Replacing the whole content keeps the block type of the first block
+    await editor.fill('Hello, world!');
+    await expect.poll(() => props.currentValue).toBe('<h2>Hello, world!</h2>');
+  });
+
+  test('offers only the components with HTML syntax in the HTML format', async () => {
+    customComponentRegistry.set('youtube', {
+      id: 'youtube',
+      label: 'YouTube',
+      trigger: 'button',
+      fields: [{ name: 'id', label: 'ID' }],
+      pattern: /^youtube (\S+)$/,
+      // eslint-disable-next-line jsdoc/require-jsdoc
+      toBlock: ({ id }) => `youtube ${id}`,
+    });
+
+    try {
+      await renderEditor('<p>Hello</p>', { format: 'html' });
+      await expect.element(page.getByRole('button', { name: /Image/ })).toBeVisible();
+      expect(page.getByRole('button', { name: /YouTube/ }).elements()).toHaveLength(0);
+    } finally {
+      customComponentRegistry.delete('youtube');
+    }
+  });
+
+  test('reads and writes images as HTML in the HTML format', async () => {
+    const { props } = await renderEditor(
+      '<p>Hello <a href="/about"><img src="/a.png" alt="A &amp; B"></a></p>',
+      { format: 'html' },
+    );
+
+    const editor = page.getByRole('textbox');
+
+    // The linked image is shown as a component, not as a link
+    await expect
+      .poll(() => editor.element().querySelector('[data-key-path-prefix]'))
+      .not.toBeNull();
+    expect(editor.element().querySelector('a')).toBeNull();
+
+    // An image from another site is inserted as HTML, keeping the existing one
+    const dataTransfer = new DataTransfer();
+
+    dataTransfer.setData('text/html', '<img src="https://example.com/photo.png" alt="Photo">');
+    editor
+      .element()
+      .dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer }));
+    await expect
+      .poll(() => props.currentValue)
+      .toContain('<img src="https://example.com/photo.png" alt="Photo">');
+    expect(props.currentValue).toContain('<a href="/about"><img src="/a.png" alt="A &amp; B"></a>');
   });
 
   test('follows an external change to the value', async () => {
@@ -112,37 +198,73 @@ describe('RichTextEditor', () => {
   });
 
   test('tracks a pending update while typing', async () => {
-    await renderEditor('Hello');
-
+    const { props } = await renderEditor('Hello');
     const editor = page.getByRole('textbox');
 
     await expect.poll(() => editor.element().textContent).toBe('Hello');
     await editor.click();
-    await userEvent.keyboard('!');
+    await userEvent.keyboard('{End}!');
 
-    await vi.waitFor(() => expect(trackPendingFieldUpdate).toHaveBeenCalled());
-
-    // The update is settled once the Markdown is written back
-    const promise = vi.mocked(trackPendingFieldUpdate).mock.calls[0][0];
-
-    await expect(promise).resolves.toBeUndefined();
-
-    // A change that doesn’t alter the Markdown is settled after a while
-    await new Promise((resolve) => {
-      setTimeout(resolve, 500);
-    });
-    vi.mocked(trackPendingFieldUpdate).mockClear();
-
-    const start = Date.now();
-
-    // A synthetic event doesn’t change the content, so nothing writes the value back and the
-    // update stays pending: a second change in the meantime isn’t tracked twice
-    editor.element().dispatchEvent(new InputEvent('beforeinput', { bubbles: true }));
-    editor.element().dispatchEvent(new InputEvent('beforeinput', { bubbles: true }));
-    await vi.waitFor(() => expect(trackPendingFieldUpdate).toHaveBeenCalled());
+    // A save waits for the update, which is settled once the Markdown is written back
+    await vi.waitFor(() => expect(trackPendingFieldUpdate).toHaveBeenCalledOnce());
     await expect(vi.mocked(trackPendingFieldUpdate).mock.calls[0][0]).resolves.toBeUndefined();
-    expect(Date.now() - start).toBeGreaterThanOrEqual(900);
-    expect(trackPendingFieldUpdate).toHaveBeenCalledTimes(1);
+    expect(props.currentValue).toBe('Hello!');
+  });
+
+  test('tracks a pending update for a change made with the toolbar', async () => {
+    const { props } = await renderEditor('Hello');
+    const editor = page.getByRole('textbox');
+
+    await expect.poll(() => editor.element().textContent).toBe('Hello');
+
+    // An attribute change on the editor’s root element doesn’t change the content
+    props.invalid = true;
+    await expect.poll(() => editor.element().getAttribute('aria-invalid')).toBe('true');
+
+    // Select the text, and let the editor pick up the selection, then make it bold with the toolbar
+    const range = document.createRange();
+
+    range.selectNodeContents(editor.element());
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+    document.dispatchEvent(new Event('selectionchange'));
+    await new Promise((resolve) => {
+      requestAnimationFrame(resolve);
+    });
+    expect(trackPendingFieldUpdate).not.toHaveBeenCalled();
+    await page.getByRole('button', { name: 'Bold' }).click();
+
+    await vi.waitFor(() => expect(trackPendingFieldUpdate).toHaveBeenCalledOnce());
+    await expect(vi.mocked(trackPendingFieldUpdate).mock.calls[0][0]).resolves.toBeUndefined();
+    expect(props.currentValue).toBe('**Hello**');
+  });
+
+  test('neither tracks an update nor writes back a value in another style when it’s loaded', async () => {
+    const { props } = await renderEditor('Some *italic* text.');
+    const editor = page.getByRole('textbox');
+
+    await expect.poll(() => editor.element().textContent).toBe('Some italic text.');
+    // Give the editor time to convert the content, which it would write as `_italic_`
+    await new Promise((resolve) => {
+      setTimeout(resolve, 300);
+    });
+    expect(trackPendingFieldUpdate).not.toHaveBeenCalled();
+    expect(props.currentValue).toBe('Some *italic* text.');
+
+    // A change made by the user is written, in the editor’s style
+    await editor.click();
+    await userEvent.keyboard('{End}!');
+    await expect.poll(() => props.currentValue).toBe('Some _italic_ text.!');
+  });
+
+  test('writes a change typed in the Markdown mode', async () => {
+    const { props } = await renderEditor('Hello', { modes: ['raw'] });
+    const source = page.getByRole('textbox');
+
+    await expect.element(source).toHaveValue('Hello');
+    await source.click();
+    await userEvent.keyboard('{End}!');
+    await expect.poll(() => props.currentValue).toBe('Hello!');
   });
 
   test('inserts a dropped image', async () => {
@@ -221,32 +343,43 @@ describe('RichTextEditor', () => {
     await expect.poll(() => props.currentValue).not.toContain('plain');
   });
 
-  test('offers no components when nested ones are disabled by the parent field', async () => {
-    await initTestConfig({
-      collections: [
+  // A List with a single subfield gives it a context of its own, which mustn’t hide the component
+  test.each([
+    ['rich-text-editor-component', 'nested-off', 'body:c1:content', 'body:c1:content'],
+    ['single-subfield-list-field', 'nested-off-list', 'body:c1:notes.0', 'body:c1:notes.*'],
+  ])(
+    'offers no components when nested ones are disabled by the parent field (%s)',
+    async (fieldContext, collectionName, keyPath, typedKeyPath) => {
+      await initTestConfig({
+        collections: [
+          {
+            name: collectionName,
+            label: 'Posts',
+            folder: 'content/posts',
+            fields: [{ name: 'body', widget: 'richtext', allow_nested_components: false }],
+          },
+        ],
+      });
+
+      await renderEditor(
+        'Hi',
+        {},
         {
-          name: 'nested-off',
-          label: 'Posts',
-          folder: 'content/posts',
-          fields: [{ name: 'body', widget: 'richtext', allow_nested_components: false }],
+          // The field config is cached per collection, so each test uses its own one
+          collectionName,
+          context: {
+            fieldContext,
+            parentComponentNames: ['card'],
+            valueStoreKey: 'extraValues',
+          },
+          props: { keyPath, typedKeyPath },
         },
-      ],
-    });
+      );
 
-    await renderEditor(
-      'Hi',
-      {},
-      {
-        // The field config is cached per collection, so each test uses its own one
-        collectionName: 'nested-off',
-        context: { fieldContext: 'rich-text-editor-component', parentComponentNames: ['card'] },
-        props: { keyPath: 'body:c1:content', typedKeyPath: 'body:c1:content' },
-      },
-    );
-
-    await expect.element(page.getByRole('button', { name: 'Bold' })).toBeVisible();
-    expect(page.getByRole('button', { name: /Insert/ }).elements()).toHaveLength(0);
-  });
+      await expect.element(page.getByRole('button', { name: 'Bold' })).toBeVisible();
+      expect(page.getByRole('button', { name: /Insert|Image/ }).elements()).toHaveLength(0);
+    },
+  );
 
   test('leaves the current component out of the nested ones', async () => {
     await initTestConfig({
@@ -265,7 +398,13 @@ describe('RichTextEditor', () => {
       {},
       {
         collectionName: 'nested-self',
-        context: { fieldContext: 'rich-text-editor-component', parentComponentNames: ['image'] },
+        // The parent component name is the definition ID, which is `linked-image` for an image
+        // while linked images are enabled
+        context: {
+          fieldContext: 'rich-text-editor-component',
+          parentComponentNames: ['linked-image'],
+          valueStoreKey: 'extraValues',
+        },
         props: { keyPath: 'body:c1:content', typedKeyPath: 'body:c1:content' },
       },
     );
@@ -289,6 +428,54 @@ describe('RichTextEditor', () => {
       .element()
       .dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer }));
     await expect.poll(() => editor.element().textContent).toBe('Hi');
+  });
+
+  test('leaves the current custom component out of the nested ones', async () => {
+    customComponentRegistry.set('youtube', {
+      id: 'youtube',
+      label: 'YouTube',
+      // Show a toolbar button instead of an item in the Insert menu
+      trigger: 'button',
+      fields: [{ name: 'id', label: 'ID' }],
+      pattern: /^youtube (\S+)$/,
+      // eslint-disable-next-line jsdoc/require-jsdoc
+      toBlock: ({ id }) => `youtube ${id}`,
+    });
+
+    try {
+      await initTestConfig({
+        collections: [
+          {
+            name: 'nested-self-custom',
+            label: 'Posts',
+            folder: 'content/posts',
+            fields: [{ name: 'body', widget: 'richtext', allow_nested_components: 'exclude_self' }],
+          },
+        ],
+      });
+
+      await renderEditor(
+        'Hi',
+        {},
+        {
+          collectionName: 'nested-self-custom',
+          // The parent component name is the prefixed definition ID
+          context: {
+            fieldContext: 'rich-text-editor-component',
+            parentComponentNames: ['x-youtube'],
+            valueStoreKey: 'extraValues',
+          },
+          props: { keyPath: 'body:c1:content', typedKeyPath: 'body:c1:content' },
+        },
+      );
+
+      await expect.element(page.getByRole('button', { name: 'Bold' })).toBeVisible();
+      // The image component is still offered
+      await expect.element(page.getByRole('button', { name: /Image/ })).toBeVisible();
+      expect(page.getByRole('button', { name: /YouTube/ }).elements()).toHaveLength(0);
+    } finally {
+      customComponentRegistry.delete('youtube');
+    }
   });
 
   test('cleans up the values of removed components', async () => {

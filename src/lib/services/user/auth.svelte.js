@@ -4,14 +4,19 @@ import { LocalStorage } from '@sveltia/utils/storage';
 
 import { goto, parseLocation } from '$lib/services/app/navigation';
 import { backend, backendName, selectBackend } from '$lib/services/backends';
-import { repositoryHead } from '$lib/services/backends/git/shared/fetch';
+import { lockedBranch, mergeLockedBranch } from '$lib/services/backends/branch-access';
+import { NOT_COLLABORATOR_ERROR_MESSAGE } from '$lib/services/backends/git/shared/errors';
+import { dataGeneration, repositoryHead } from '$lib/services/backends/git/shared/head';
 import { startRemoteChangePolling, stopRemoteChangePolling } from '$lib/services/backends/poll';
 import { cmsConfig } from '$lib/services/config';
 import { dataLoaded } from '$lib/services/contents';
+import { arrayFileItems } from '$lib/services/contents/file/process';
 import { resetDeployments } from '$lib/services/deployments';
 import { resetPageLiveness } from '$lib/services/deployments/ping';
 import { initDeployments } from '$lib/services/deployments/resolve';
 import { user } from '$lib/services/user/account.svelte';
+import { LEGACY_USER_STORAGE_KEYS, USER_STORAGE_KEY } from '$lib/services/user/constants';
+import { decodeMagicLinkData } from '$lib/services/user/magic-link';
 import { prefs } from '$lib/services/user/prefs.svelte';
 import {
   publishingBranches,
@@ -20,6 +25,11 @@ import {
 } from '$lib/services/workflow';
 import { resetDeployingEntries } from '$lib/services/workflow/deploy';
 import { loadUnpublishedEntries, startLoadingPullRequests } from '$lib/services/workflow/load';
+import {
+  forkedRepository,
+  forkPermissionRequest,
+  openAuthoringInitialized,
+} from '$lib/services/workflow/open-authoring';
 
 /**
  * @import { BackendService, InternalCmsConfig, User } from '$lib/types/private';
@@ -48,12 +58,31 @@ export const auth = $state({
 });
 
 /**
- * Clear the cached user token so the sign-in form is shown on next load.
+ * Clear the cached user token so the sign-in form is shown on next load. The user caches left by
+ * Netlify/Decap CMS, which may also hold a token, are removed as well.
  */
 const clearUserCache = async () => {
-  await LocalStorage.set('sveltia-cms.user', {});
+  await Promise.all([
+    LocalStorage.set(USER_STORAGE_KEY, {}),
+    ...LEGACY_USER_STORAGE_KEYS.map((key) => LocalStorage.delete(key)),
+  ]);
   user.account = undefined;
   auth.unauthenticated = true;
+};
+
+/**
+ * Remove the API keys and log-in credentials for integrations, such as translation services and
+ * cloud storage, from the user preferences, so they don’t remain on the device once the user has
+ * signed out. The deploy hook URL and its `Authorization` header go too, as either can carry a
+ * secret that triggers a deployment. Other preferences, like the theme and language, are kept. This
+ * is only done on an explicit sign-out, not when an expired or revoked token sends the user back to
+ * the sign-in form.
+ */
+const clearIntegrationCredentials = () => {
+  prefs.apiKeys = {};
+  delete prefs.logins;
+  delete prefs.deployHookURL;
+  delete prefs.deployHookAuthHeader;
 };
 
 /**
@@ -65,7 +94,7 @@ const clearUserCache = async () => {
 const clearUserCacheIfNeeded = async (error) => {
   const isAuthError =
     typeof (/** @type {any} */ (error?.cause)?.status) === 'number' ||
-    error?.message === 'Not a collaborator of the repository';
+    error?.message === NOT_COLLABORATOR_ERROR_MESSAGE;
 
   if (isAuthError) {
     await clearUserCache();
@@ -126,7 +155,7 @@ export const parseMagicLink = () => {
   let copiedPrefs = undefined;
 
   try {
-    const data = JSON.parse(atob(encodedData));
+    const data = decodeMagicLinkData(encodedData);
 
     if (isObject(data) && typeof data.token === 'string') {
       _user = { token: data.token };
@@ -147,10 +176,11 @@ export const parseMagicLink = () => {
  * @returns {Promise<Record<string, any> | undefined>} Cached user info, or undefined if not found.
  */
 export const getUserCache = async () => {
-  const userCache =
-    (await LocalStorage.get('sveltia-cms.user')) ||
-    (await LocalStorage.get('decap-cms-user')) ||
-    (await LocalStorage.get('netlify-cms-user'));
+  // Read the keys one at a time, stopping at the first hit
+  const userCache = await [USER_STORAGE_KEY, ...LEGACY_USER_STORAGE_KEYS].reduce(
+    async (previous, key) => (await previous) || LocalStorage.get(key),
+    /** @type {Promise<any>} */ (Promise.resolve(undefined)),
+  );
 
   return isObject(userCache) && typeof userCache.backendName === 'string' ? userCache : undefined;
 };
@@ -239,13 +269,19 @@ export const copyMagicLinkPrefs = (copiedPrefs) => {
  * @param {BackendService} _backend Backend.
  */
 const loadRepositoryData = async (_backend) => {
-  // The pull requests don’t depend on the files, so they’re requested at the same time
-  const pullRequests = startLoadingPullRequests();
+  // The pull requests don’t depend on the files, so they’re requested at the same time. That needs
+  // the branch they target, though: without one configured, the default branch is only known once
+  // the files are being fetched, and every pull request would be dropped as targeting another
+  // branch. They’re then requested once the files are there
+  const branchKnown = !_backend.repository || !!_backend.repository.branch;
+  const pullRequests = branchKnown ? startLoadingPullRequests() : undefined;
 
   await _backend.fetchFiles();
   await loadUnpublishedEntries(pullRequests);
-  // The deploy state is a nicety, so it’s resolved in the background rather than delaying the UI
-  initDeployments();
+  // The deploy state is a nicety, so it’s resolved in the background rather than delaying the UI.
+  // The files were loaded from the branch head, which is the commit the production site is built
+  // from, so it isn’t fetched again
+  initDeployments({ head: repositoryHead.current });
   // From here on, someone else’s commits are picked up as they land
   startRemoteChangePolling();
 };
@@ -339,6 +375,9 @@ export const signInManually = async (_backendName, token) => {
 
   let _user;
 
+  // An account may be left in the store from a previous session whose data failed to load. It may
+  // be someone else’s, so its tokens mustn’t be picked up while signing in, e.g. as renewed ones
+  user.account = undefined;
   auth.signingIn = true;
 
   try {
@@ -382,15 +421,35 @@ export const signInManually = async (_backendName, token) => {
  */
 export const signOut = async () => {
   stopRemoteChangePolling();
-  await backend.current?.signOut();
+  // A check for remote changes, or a load, still on its way belongs to this session, so it mustn’t
+  // put its results back into the stores once they have been reset below
+  dataGeneration.current += 1;
+
+  // A failure, e.g. an IndexedDB error, mustn’t keep the user signed in
+  try {
+    await backend.current?.signOut();
+  } catch (/** @type {any} */ ex) {
+    // eslint-disable-next-line no-console
+    console.error(ex);
+  }
+
   await clearUserCache();
+  clearIntegrationCredentials();
 
   selectBackend(undefined);
   dataLoaded.current = false;
+  // The items of the files storing all the entries of a collection belong to this repository
+  arrayFileItems.clear();
   repositoryHead.current = '';
+  lockedBranch.current = undefined;
+  mergeLockedBranch.current = undefined;
   unpublishedEntries.current = [];
   unpublishedEntriesLoaded.current = false;
   publishingBranches.current = [];
+  // The fork belongs to the signed-out user, so the next user needs Open Authoring set up again
+  forkPermissionRequest.current?.respond(false);
+  forkedRepository.current = undefined;
+  openAuthoringInitialized.current = false;
   resetDeployingEntries();
   resetDeployments();
   resetPageLiveness();

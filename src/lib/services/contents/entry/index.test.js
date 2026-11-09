@@ -3,7 +3,6 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 import {
   extractDateTime,
   fillEntryPathTemplate,
-  getAssociatedCollections,
   getEntryPreviewURL,
   getEntryRepoBlobURL,
 } from '$lib/services/contents/entry/index';
@@ -17,6 +16,7 @@ vi.mock('$lib/services/config');
 vi.mock('$lib/services/contents/collection/entries/index-file');
 vi.mock('$lib/services/common/template');
 vi.mock('$lib/services/contents');
+vi.mock('$lib/services/contents/folders');
 vi.mock('$lib/services/contents/collection');
 vi.mock('$lib/services/backends', () => ({
   backend: {
@@ -26,6 +26,30 @@ vi.mock('$lib/services/backends', () => ({
       },
     },
   },
+}));
+
+// The real implementation caches its formatter for the browser’s time zone, which a test changing
+// `process.env.TZ` would otherwise keep reading the first zone from
+vi.mock('@sveltia/utils/datetime', () => ({
+  getDateTimeParts: vi.fn(({ date = new Date(), timeZone = undefined } = {}) => {
+    /** @type {Intl.DateTimeFormatOptions} */
+    const options = {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      timeZoneName: 'longOffset',
+    };
+
+    return Object.fromEntries(
+      new Intl.DateTimeFormat('en-US', { ...options, hourCycle: 'h23', timeZone })
+        .formatToParts(date)
+        .filter(({ type }) => type in options)
+        .map(({ type, value }) => [type, value]),
+    );
+  }),
 }));
 
 describe('Test getEntryPreviewURL()', () => {
@@ -729,6 +753,103 @@ describe('Test getEntryPreviewURL()', () => {
     expect(result).toBe('https://preview.example.com/posts/test-entry');
   });
 
+  test('links to the root of the site without preview_path when asked to', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = { current: { show_preview_links: true } };
+
+    const collectionWithoutPreviewPath = { ...mockCollection };
+
+    delete collectionWithoutPreviewPath.preview_path;
+
+    const result = getEntryPreviewURL(mockEntry, 'en', collectionWithoutPreviewPath, undefined, {
+      baseURL: 'https://preview.example.com/',
+      fallbackToRoot: true,
+    });
+
+    expect(result).toBe('https://preview.example.com/');
+  });
+
+  test('links to the root of the site without preview_path on the collection file', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = { current: { show_preview_links: true } };
+
+    const collectionFile = /** @type {InternalCollectionFile} */ ({
+      name: 'about',
+      file: 'content/about.md',
+      fields: [],
+      _file: { extension: 'md', format: 'yaml-frontmatter' },
+      _i18n: mockCollection._i18n,
+    });
+
+    const result = getEntryPreviewURL(mockEntry, 'en', mockCollection, collectionFile, {
+      baseURL: 'https://preview.example.com',
+      fallbackToRoot: true,
+    });
+
+    // The collection’s own `preview_path` doesn’t apply to its files
+    expect(result).toBe('https://preview.example.com/');
+  });
+
+  test('uses preview_path rather than the root when both are possible', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = { current: { show_preview_links: true } };
+
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
+
+    vi.mocked(isCollectionIndexFile).mockReturnValue(false);
+
+    const { fillTemplate } = await import('$lib/services/common/template');
+
+    vi.mocked(fillTemplate).mockReturnValue('posts/test-entry');
+
+    const result = getEntryPreviewURL(mockEntry, 'en', mockCollection, undefined, {
+      baseURL: 'https://preview.example.com',
+      fallbackToRoot: true,
+    });
+
+    expect(result).toBe('https://preview.example.com/posts/test-entry');
+  });
+
+  test('gives no root link when preview_path cannot be filled in', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = { current: { show_preview_links: true } };
+
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
+
+    vi.mocked(isCollectionIndexFile).mockReturnValue(false);
+
+    const { fillTemplate } = await import('$lib/services/common/template');
+
+    vi.mocked(fillTemplate).mockImplementation(() => {
+      throw new Error('Unresolvable template tag');
+    });
+
+    const result = getEntryPreviewURL(mockEntry, 'en', mockCollection, undefined, {
+      baseURL: 'https://preview.example.com',
+      fallbackToRoot: true,
+    });
+
+    expect(result).toBeUndefined();
+  });
+
+  test('ignores fallbackToRoot when show_preview_links is false', async () => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = { current: { show_preview_links: false } };
+
+    const collectionWithoutPreviewPath = { ...mockCollection };
+
+    delete collectionWithoutPreviewPath.preview_path;
+
+    const result = getEntryPreviewURL(mockEntry, 'en', collectionWithoutPreviewPath, undefined, {
+      baseURL: 'https://preview.example.com',
+      fallbackToRoot: true,
+    });
+
+    expect(result).toBeUndefined();
+  });
+
   test('ignores the base URL override when show_preview_links is false', async () => {
     // @ts-ignore
     (await import('$lib/services/config')).cmsConfig = {
@@ -816,7 +937,7 @@ describe('Test getEntryPreviewURL()', () => {
 
     const collectionWithDotLocaleInPath = {
       ...mockCollection,
-      preview_path: '/posts/{{locale}}.{{slug}}',
+      preview_path: '/posts/{{slug}}.{{locale}}.html',
       _i18n: {
         ...mockCollection._i18n,
         defaultLocale: 'en',
@@ -837,14 +958,55 @@ describe('Test getEntryPreviewURL()', () => {
 
     const result = getEntryPreviewURL(mockEntry, 'en', collectionWithDotLocaleInPath);
 
-    // Verify that fillTemplate was called with the modified template (locale. segment removed)
+    // Verify that fillTemplate was called with the modified template (.locale segment removed)
     expect(fillTemplate).toHaveBeenCalledWith(
-      '/posts/{{slug}}',
+      '/posts/{{slug}}.html',
       expect.objectContaining({
         type: 'preview_path',
       }),
     );
     expect(result).toBe('https://example.com/test-entry');
+  });
+
+  test.each([
+    ['/{{locale}}', '/'],
+    ['/blog/{{locale}}', '/blog'],
+    ['/posts/{{locale}}.{{slug}}', '/posts/{{slug}}'],
+    // The placeholder can’t be removed without breaking the rest of the path, so it’s filled in
+    ['/{{locale}}.html', '/{{locale}}.html'],
+    ['/posts/{{locale}}-{{slug}}', '/posts/{{locale}}-{{slug}}'],
+  ])('omits locale from preview path %s where possible', async (previewPath, expected) => {
+    // @ts-ignore
+    (await import('$lib/services/config')).cmsConfig = {
+      current: {
+        show_preview_links: true,
+        _baseURL: 'https://example.com',
+      },
+    };
+
+    const { isCollectionIndexFile } =
+      await import('$lib/services/contents/collection/entries/index-file');
+
+    vi.mocked(isCollectionIndexFile).mockReturnValue(false);
+
+    const { fillTemplate } = await import('$lib/services/common/template');
+
+    vi.mocked(fillTemplate).mockReturnValue('test-entry');
+
+    getEntryPreviewURL(mockEntry, 'en', {
+      ...mockCollection,
+      preview_path: previewPath,
+      _i18n: {
+        ...mockCollection._i18n,
+        defaultLocale: 'en',
+        omitDefaultLocaleFromPreviewPath: true,
+      },
+    });
+
+    expect(fillTemplate).toHaveBeenCalledWith(
+      expected,
+      expect.objectContaining({ type: 'preview_path' }),
+    );
   });
 
   test('preserves locale in preview path for non-default locales even when omitDefaultLocaleFromPreviewPath is true', async () => {
@@ -930,130 +1092,6 @@ describe('Test getEntryPreviewURL()', () => {
       }),
     );
     expect(result).toBe('https://example.com/en/posts/test-entry');
-  });
-});
-
-describe('Test getAssociatedCollections()', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  test('should return collections for entry path', async () => {
-    const mockEntry = {
-      id: 'test-entry',
-      slug: 'test-entry',
-      subPath: 'test-entry',
-      locales: {
-        en: {
-          slug: 'test-entry',
-          path: 'content/posts/test-entry.md',
-          content: { title: 'Test Entry' },
-        },
-      },
-    };
-
-    // Mock the dependencies
-    const { getEntryFoldersByPath } = await import('$lib/services/contents');
-    const { getCollection } = await import('$lib/services/contents/collection');
-
-    vi.mocked(getEntryFoldersByPath).mockReturnValue([
-      { collectionName: 'posts' },
-      { collectionName: 'blog' },
-    ]);
-
-    /** @type {import('$lib/types/private').InternalCollection} */
-    const mockCollection = {
-      name: 'posts',
-      _type: /** @type {'entry'} */ ('entry'),
-      folder: 'content/posts',
-      fields: [],
-      _file: {
-        extension: 'md',
-        format: 'yaml-frontmatter',
-        basePath: 'content/posts',
-      },
-      _i18n: {
-        i18nEnabled: false,
-        saveAllLocales: false,
-        allLocales: ['en'],
-        initialLocales: ['en'],
-        defaultLocale: 'en',
-        structure: 'single_file',
-        structureMap: {
-          i18nSingleFile: true,
-          i18nSingleFileDefaultRoot: false,
-          i18nMultiFile: false,
-          i18nMultiFolder: false,
-          i18nMultiRootFolder: false,
-        },
-        canonicalSlug: { key: 'translationKey', value: '{{slug}}' },
-        omitDefaultLocaleFromFilePath: false,
-        omitDefaultLocaleFromPreviewPath: false,
-      },
-      _thumbnailFieldNames: [],
-    };
-
-    // blog collection doesn't exist
-    vi.mocked(getCollection).mockReturnValueOnce(mockCollection).mockReturnValueOnce(undefined);
-
-    const result = getAssociatedCollections(mockEntry);
-
-    expect(result).toHaveLength(1);
-    expect(result[0]).toBe(mockCollection);
-    expect(getEntryFoldersByPath).toHaveBeenCalledWith('content/posts/test-entry.md');
-  });
-
-  test('should return empty array when no collections found', async () => {
-    const mockEntry = {
-      id: 'test-entry',
-      slug: 'test-entry',
-      subPath: 'test-entry',
-      locales: {
-        en: {
-          slug: 'test-entry',
-          path: 'content/posts/test-entry.md',
-          content: { title: 'Test Entry' },
-        },
-      },
-    };
-
-    const { getEntryFoldersByPath } = await import('$lib/services/contents');
-
-    vi.mocked(getEntryFoldersByPath).mockReturnValue([]);
-
-    const result = getAssociatedCollections(mockEntry);
-
-    expect(result).toEqual([]);
-  });
-
-  test('should look up the folders once per entry until the entry folders change', async () => {
-    const mockEntry = {
-      id: 'cached-entry',
-      slug: 'cached-entry',
-      subPath: 'cached-entry',
-      locales: {
-        en: { slug: 'cached-entry', path: 'content/posts/cached-entry.md', content: {} },
-      },
-    };
-
-    const { allEntryFolders, getEntryFoldersByPath } = await import('$lib/services/contents');
-    const { getCollection } = await import('$lib/services/contents/collection');
-    const mockCollection = /** @type {InternalCollection} */ ({ name: 'posts' });
-
-    vi.mocked(getEntryFoldersByPath).mockReturnValue([{ collectionName: 'posts' }]);
-    vi.mocked(getCollection).mockReturnValue(mockCollection);
-
-    const getFolders = vi.spyOn(allEntryFolders, 'current', 'get').mockReturnValue([]);
-
-    expect(getAssociatedCollections(mockEntry)).toEqual([mockCollection]);
-    expect(getAssociatedCollections(mockEntry)).toEqual([mockCollection]);
-    expect(getEntryFoldersByPath).toHaveBeenCalledTimes(1);
-
-    // A configuration change replaces the folder list, which drops the cache
-    getFolders.mockReturnValue([]);
-
-    expect(getAssociatedCollections(mockEntry)).toEqual([mockCollection]);
-    expect(getEntryFoldersByPath).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -1252,6 +1290,91 @@ describe('Test extractDateTime()', () => {
   });
 });
 
+describe('Test extractDateTime() in different time zones', () => {
+  /**
+   * Run a function in each of the given browser time zones.
+   * @param {(timeZone: string) => void} fn Function.
+   */
+  const inTimeZones = (fn) => {
+    const { TZ } = process.env;
+
+    ['UTC', 'America/New_York', 'Asia/Tokyo', 'Etc/GMT+12', 'Pacific/Kiritimati'].forEach(
+      (timeZone) => {
+        process.env.TZ = timeZone;
+
+        try {
+          fn(timeZone);
+        } finally {
+          process.env.TZ = TZ;
+        }
+      },
+    );
+  };
+
+  /**
+   * Get the date part of the parts extracted from the given field value.
+   * @param {Record<string, any>} options Field options.
+   * @param {string} value Field value.
+   * @returns {string | undefined} `YYYY-MM-DD`.
+   */
+  const getDatePart = (options, value) => {
+    const parts = extractDateTime({
+      fields: [{ name: 'date', widget: 'datetime', ...options }],
+      content: { date: value },
+    });
+
+    return parts ? `${parts.year}-${parts.month}-${parts.day}` : undefined;
+  };
+
+  test('keeps the date of a date-only field', () => {
+    inTimeZones(() => {
+      expect(getDatePart({ time_format: false }, '2026-01-15')).toBe('2026-01-15');
+      expect(getDatePart({ time_format: false, format: 'YYYY-MM-DD' }, '2026-01-15')).toBe(
+        '2026-01-15',
+      );
+      expect(getDatePart({ time_format: false, format: 'DD/MM/YYYY' }, '15/01/2026')).toBe(
+        '2026-01-15',
+      );
+      expect(
+        getDatePart({ time_format: false, format: 'YYYY-MM-DD', output_utc: true }, '2026-01-15'),
+      ).toBe('2026-01-15');
+      expect(
+        getDatePart({ time_format: false, input_timezone: 'America/New_York' }, '2026-01-15'),
+      ).toBe('2026-01-15');
+      expect(
+        getDatePart(
+          { time_format: false, format: 'YYYY-MM-DD', input_timezone: 'Asia/Tokyo' },
+          '2026-01-15',
+        ),
+      ).toBe('2026-01-15');
+    });
+  });
+
+  test('reads a date/time in the custom input time zone', () => {
+    inTimeZones(() => {
+      expect(getDatePart({ input_timezone: 'Asia/Tokyo' }, '2026-01-15T08:00:00+09:00')).toBe(
+        '2026-01-15',
+      );
+      expect(getDatePart({ input_timezone: 'Asia/Tokyo' }, '2026-01-15T08:00:00')).toBe(
+        '2026-01-15',
+      );
+      expect(
+        getDatePart(
+          { input_timezone: 'Asia/Tokyo', format: 'YYYY-MM-DD HH:mm' },
+          '2026-01-15 08:00',
+        ),
+      ).toBe('2026-01-15');
+      expect(getDatePart({ input_timezone: 'America/New_York' }, '2026-01-15T22:00:00-05:00')).toBe(
+        '2026-01-15',
+      );
+      // A value stored in UTC is read in UTC
+      expect(
+        getDatePart({ input_timezone: 'Asia/Tokyo', output_utc: true }, '2026-01-14T23:00:00Z'),
+      ).toBe('2026-01-14');
+    });
+  });
+});
+
 describe('Test fillEntryPathTemplate()', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1363,6 +1486,16 @@ describe('Test getEntryRepoBlobURL()', () => {
     );
   });
 
+  test('should encode the characters in the path that have a meaning in a URL', () => {
+    const mockEntry = /** @type {any} */ ({
+      locales: { en: { path: 'content/posts/50% off #1.md' } },
+    });
+
+    expect(getEntryRepoBlobURL(mockEntry, 'en')).toBe(
+      'https://github.com/user/repo/blob/main/content/posts/50%25%20off%20%231.md?plain=1',
+    );
+  });
+
   test('should handle missing locale gracefully', () => {
     const mockEntry = {
       id: 'test-entry',
@@ -1379,6 +1512,6 @@ describe('Test getEntryRepoBlobURL()', () => {
 
     const result = getEntryRepoBlobURL(mockEntry, 'fr');
 
-    expect(result).toBe('https://github.com/user/repo/blob/main/undefined?plain=1');
+    expect(result).toBe('https://github.com/user/repo/blob/main/?plain=1');
   });
 });

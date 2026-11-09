@@ -477,13 +477,20 @@ entry_not_found: No s’ha trobat l’entrada.
 # Entry creation restrictions: tooltip and advisory messages
 creating_entries_disabled_by_admin: La creació d’entrades noves en aquesta col·lecció està desactivada per l’administrador.
 # {$quota} is the collection’s maximum entry count
-creating_entries_disabled_by_quota: No podeu afegir entrades noves a aquesta col·lecció perquè ha arribat al seu límit de {$quota} entrades.
+creating_entries_disabled_by_quota: |
+  .input {$quota :integer}
+  .match $quota
+    one {{ No podeu afegir entrades noves a aquesta col·lecció perquè ha arribat al seu límit de {$quota} entrada. }}
+    *   {{ No podeu afegir entrades noves a aquesta col·lecció perquè ha arribat al seu límit de {$quota} entrades. }}
 # {$quota} is the collection limit and {$remaining} is the number of entries that can still be created
 creating_entries_nearing_quota: |
+  .input {$quota :integer}
   .input {$remaining :integer}
-  .match $remaining
-    one {{ Aquesta col·lecció s’acosta al seu límit de {$quota} entrades. Només podeu crear {$remaining} entrada més. }}
-    *   {{ Aquesta col·lecció s’acosta al seu límit de {$quota} entrades. Només podeu crear {$remaining} entrades més. }}
+  .match $quota $remaining
+    one one {{ Aquesta col·lecció s’acosta al seu límit de {$quota} entrada. Només podeu crear {$remaining} entrada més. }}
+    one *   {{ Aquesta col·lecció s’acosta al seu límit de {$quota} entrada. Només podeu crear {$remaining} entrades més. }}
+    *   one {{ Aquesta col·lecció s’acosta al seu límit de {$quota} entrades. Només podeu crear {$remaining} entrada més. }}
+    *   *   {{ Aquesta col·lecció s’acosta al seu límit de {$quota} entrades. Només podeu crear {$remaining} entrades més. }}
 
 # Navigation: back links and list labels
 back_to_collection: Torna a la col·lecció
@@ -1558,7 +1565,7 @@ config:
     oauth_implicit_flow: El mètode d’autenticació configurat (flux implícit) no és compatible amb Sveltia CMS. Useu un <a>mètode d’autenticació</a> diferent.
     github_pkce_unsupported: L’autorització PKCE encara no és compatible a causa de les limitacions de GitHub. Useu un <a>mètode d’autenticació</a> diferent.
     oauth_no_app_id: No s’ha definit l’ID de l’aplicació OAuth.
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: L’opció `open_authoring` requereix el mode de publicació `editorial_workflow`. Consulteu la <a>documentació</a> per a més detalls.
     # Don’t localize `auth_methods`
     no_auth_methods: L’opció `auth_methods` ha de contenir almenys un mètode.
@@ -1680,8 +1687,6 @@ config:
   # Warning messages (logged to console)
   warning:
     oauth_no_app_id: No s’ha definit l’ID de l’aplicació OAuth. Es demanarà als usuaris que proporcioneu un testimoni d’accés per iniciar la sessió.
-    editorial_workflow_unsupported: El flux editorial encara no és compatible amb Sveltia CMS.
-    open_authoring_unsupported_backend: Actualment, l’Open Authoring només és compatible amb el backend de GitHub.
     # {$prop} is the unsupported option name that will be ignored
     unsupported_ignored_option: L’opció `{$prop}` no és compatible amb Sveltia CMS. S’ignorarà.
     # Don’t localize `picker_utc`, `input_timezone`, and `output_utc`
@@ -1821,8 +1826,6 @@ workflow:
     .match $count
       one {{ Una d’elles encara no s’ha publicat, de manera que els canvis no publicats es descartaran. Qualsevol versió publicada continuarà publicada. }}
       *   {{ {$count} d’elles encara no s’han publicat, de manera que els canvis no publicats es descartaran. Qualsevol versió publicada continuarà publicada. }}
-  # Confirmation dialog shown before merging the pull request. Keep the wording free of Git jargon.
-  confirm_publishing_entry: Segur que voleu publicar aquesta entrada? Els canvis tindran efecte immediatament.
   # Workflow page: toast notifications shown while an entry is being published from a card, and
   # once publishing has completed
   publishing_entry: S’està publicant l’entrada…
@@ -1976,13 +1979,23 @@ prefs:
       description: Mostra el subratllat dels enllaços a la previsualització de l’entrada i a les etiquetes de la interfície d’usuari.
       switch_label: Subratlla sempre els enllaços
 
-  # Advanced panel
-  advanced:
-    title: Avançat
-    beta:
-      title: Funcionalitats beta
-      description: Habilita algunes funcionalitats beta que poden ser inestables o no localitzades.
-      switch_label: Uneix-te al programa beta
+  # Data Management panel
+  data:
+    clear_data:
+      title: Esborra les dades
+      # Clear File Cache button
+      file_cache:
+        description: Suprimeix el contingut dels fitxers i les miniatures d’imatges desats a la memòria cau local per alliberar espai d’emmagatzematge o resoldre problemes causats per dades obsoletes.
+        button_label: Esborra la memòria cau de fitxers
+        confirmation: Se suprimiran el contingut dels fitxers i les miniatures d’imatges desats a la memòria cau local. Els esborranys no desats i la configuració es conservaran, i les dades suprimides es tornaran a baixar o generar quan calgui. El CMS es tornarà a carregar quan acabi.
+      # Erase All Data button
+      all_data:
+        description: Suprimeix tot el que el CMS guarda en aquest navegador, inclosos els fitxers a la memòria cau, els esborranys no desats i la configuració. El que ja estigui desat al repositori no es veurà afectat.
+        button_label: Esborra totes les dades
+        confirmation: Se suprimiran totes les dades emmagatzemades en aquest navegador, inclosos el contingut dels fitxers a la memòria cau, les miniatures d’imatges, els esborranys no desats, la configuració i l’estat de la sessió. El repositori no es veurà afectat, però es perdrà qualsevol canvi que no hàgiu desat i haureu de tornar a iniciar la sessió. El CMS es tornarà a carregar quan acabi.
+
+  # Developer panel
+  developer:
     developer_mode:
       title: Mode de desenvolupador
       description: Habilita algunes funcionalitats orientades al desenvolupador, inclosos els registres detallats de la consola i els menús de context nadius.
@@ -2000,18 +2013,6 @@ prefs:
         field_label: Capçalera d’autorització (p. ex., Bearer <testimoni>) (opcional)
         saved: Capçalera d’autorització desada.
         removed: Capçalera d’autorització suprimida.
-    clear_data:
-      title: Esborra les dades
-      # Clear File Cache button
-      file_cache:
-        description: Suprimeix el contingut dels fitxers i les miniatures d’imatges desats a la memòria cau local per alliberar espai d’emmagatzematge o resoldre problemes causats per dades obsoletes.
-        button_label: Esborra la memòria cau de fitxers
-        confirmation: Se suprimiran el contingut dels fitxers i les miniatures d’imatges desats a la memòria cau local. Els esborranys no desats i la configuració es conservaran, i les dades suprimides es tornaran a baixar o generar quan calgui. El CMS es tornarà a carregar quan acabi.
-      # Erase All Data button
-      all_data:
-        description: Suprimeix tot el que el CMS guarda en aquest navegador, inclosos els fitxers a la memòria cau, els esborranys no desats i la configuració. El que ja estigui desat al repositori no es veurà afectat.
-        button_label: Esborra totes les dades
-        confirmation: Se suprimiran totes les dades emmagatzemades en aquest navegador, inclosos el contingut dels fitxers a la memòria cau, les miniatures d’imatges, els esborranys no desats, la configuració i l’estat de la sessió. El repositori no es veurà afectat, però es perdrà qualsevol canvi que no hàgiu desat i haureu de tornar a iniciar la sessió. El CMS es tornarà a carregar quan acabi.
 
 # ==============================================================================
 # Keyboard Shortcuts

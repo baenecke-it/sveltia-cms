@@ -12,18 +12,21 @@
 -->
 <script>
   import { _ } from '@sveltia/i18n';
-  import { Button, Icon, TextInput } from '@sveltia/ui';
+  import { TextInput } from '@sveltia/ui';
   import equal from 'fast-deep-equal';
   import { getContext, tick } from 'svelte';
   import { flip } from 'svelte/animate';
 
+  import RemoveButton from '$lib/components/common/remove-button.svelte';
   import ReorderControls from '$lib/components/common/reorder-controls.svelte';
   import AddItemButton from '$lib/components/contents/details/fields/object/add-item-button.svelte';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
   import { updateNonPrimitiveValue } from '$lib/services/contents/draft/update';
+  import { isSingleItemList } from '$lib/services/contents/fields/list/helpers';
   import { getDirection } from '$lib/services/contents/i18n';
-  import { focusReorderControl, moveListItem } from '$lib/services/utils/drag-sorting';
+  import { focusAfterRemoval } from '$lib/services/utils/drag-sorting';
   import { createDragSorter } from '$lib/services/utils/drag-sorting.svelte';
+  import { createKeyedRows } from '$lib/services/utils/keyed-rows.svelte';
   import { watch } from '$lib/services/utils/state.svelte';
 
   /**
@@ -56,18 +59,10 @@
   } = $props();
 
   /**
-   * Item values shown in the editor, one per row. Unlike the stored value, this can hold blank rows
-   * and always has at least one entry.
-   * @type {string[]}
+   * Rows shown in the editor, one per item. Unlike the stored value, the rows can be blank, and
+   * there is always at least one.
    */
-  let items = $state(['']);
-  /**
-   * Stable identifiers for the rows, so that the `each` block below keeps following a row as the
-   * list is reordered rather than following its position.
-   * @type {number[]}
-   */
-  let itemIds = $state([0]);
-  let nextItemId = 1;
+  const rows = createKeyedRows(['']);
   /**
    * @type {HTMLElement | undefined}
    */
@@ -76,27 +71,16 @@
   const { i18n, max = Infinity } = $derived(fieldConfig);
   const canEdit = $derived(!readonly);
   // Removing or reordering the only row would leave nothing to type into, and has nothing to do
-  const hasMultipleItems = $derived(items.length > 1);
+  const hasMultipleItems = $derived(rows.values.length > 1);
+  // A list limited to one item is shown like a single input, without the controls to reorder or
+  // remove the item, which can’t do anything with one row anyway
+  const singleItem = $derived(isSingleItemList({ fieldConfig, itemCount: rows.values.length }));
 
   /**
    * Get the rows as they should be stored: trimmed, with the blank ones dropped.
    * @returns {string[]} List value.
    */
-  const getStoredValue = () => items.map((item) => item.trim()).filter(Boolean);
-
-  /**
-   * Replace all the rows, giving each a fresh identifier.
-   * @param {string[]} value Item values.
-   */
-  const setItems = (value) => {
-    items = value;
-
-    itemIds = value.map(() => {
-      nextItemId += 1;
-
-      return nextItemId - 1;
-    });
-  };
+  const getStoredValue = () => rows.values.map((item) => item.trim()).filter(Boolean);
 
   /**
    * Adopt a value that changed outside the editor, such as a locale switch or a restored backup.
@@ -112,25 +96,25 @@
       return;
     }
 
-    setItems(value.length ? [...value] : ['']);
+    rows.replace(value.length ? [...value] : ['']);
   };
 
   /**
-   * Write the rows to the draft.
+   * Write the rows to the draft, unless they already hold the stored value. Rewriting an unchanged
+   * value isn’t harmless: it adds the placeholder of a non-empty list, which the loaded content
+   * doesn’t have, so merely opening an entry would count as a change.
    */
   const updateValue = () => {
     const draft = entryDraft.current;
+    const value = getStoredValue();
 
-    /* v8 ignore next 10 -- the editor is only rendered while the draft is there */
-    if (draft) {
-      updateNonPrimitiveValue({
-        draft,
-        valueStoreKey,
-        locale,
-        keyPath,
-        i18n,
-        value: getStoredValue(),
-      });
+    /* v8 ignore next 3 -- the editor is only rendered while the draft is there */
+    if (!draft) {
+      return;
+    }
+
+    if (!equal(value, currentValue ?? [])) {
+      updateNonPrimitiveValue({ draft, valueStoreKey, locale, keyPath, i18n, value });
     }
   };
 
@@ -146,9 +130,7 @@
    * @param {number} index Index to insert at.
    */
   const addItem = async (index) => {
-    items.splice(index, 0, '');
-    itemIds.splice(index, 0, nextItemId);
-    nextItemId += 1;
+    rows.insert(index, '');
 
     await tick();
     getInput(index)?.focus();
@@ -159,26 +141,19 @@
    * @param {number} index Target index.
    */
   const removeItem = async (index) => {
-    items.splice(index, 1);
-    itemIds.splice(index, 1);
+    rows.remove(index);
 
     await tick();
-    getInput(Math.min(index, items.length - 1))?.focus();
+    focusAfterRemoval({ index, getTarget: getInput });
   };
 
   /**
    * Move a row to another position in the list.
    * @param {number} from Source index.
    * @param {number} to Destination index.
-   * @param {string} [action] `data-action` of the reorder control that triggered the move, so the
-   * focus can be restored to the matching control on the row once it has moved.
    */
-  const moveItem = async (from, to, action = 'reorder') => {
-    items = moveListItem(items, from, to);
-    itemIds = moveListItem(itemIds, from, to);
-
-    await tick();
-    focusReorderControl({ listElement: itemList, index: to, action });
+  const moveItem = (from, to) => {
+    rows.move(from, to);
   };
 
   const sorter = createDragSorter({
@@ -186,13 +161,19 @@
      * Get the number of items in the list.
      * @returns {number} Item count.
      */
-    getItemCount: () => items.length,
+    getItemCount: () => rows.values.length,
     /**
      * Get the list element.
      * @returns {HTMLElement | undefined} Element.
      */
     getListElement: () => itemList,
     onMove: moveItem,
+    /**
+     * Get the value of a row, to be attached to its drag.
+     * @param {number} index Row index.
+     * @returns {string} Value.
+     */
+    getItemData: (index) => rows.values[index],
   });
 
   watch(
@@ -203,7 +184,7 @@
   );
 
   watch(
-    () => $state.snapshot(items),
+    () => $state.snapshot(rows.values),
     () => {
       updateValue();
     },
@@ -217,38 +198,36 @@
   ondragovercapture={sorter.onDragOver}
   ondropcapture={sorter.onDrop}
 >
-  {#each sorter.displayOrder as index (itemIds[index])}
+  {#each sorter.displayOrder as index (rows.ids[index])}
     <div
       role="none"
       class="item"
       class:dragging={sorter.dragIndex === index}
-      draggable={sorter.grabbedIndex === index}
-      ondragstart={(event) => sorter.onDragStart(index, event, items[index])}
-      ondragend={sorter.onDragEnd}
+      {...sorter.itemProps(index)}
       animate:flip={{ duration: 200 }}
     >
-      {#if canEdit}
+      {#if canEdit && !singleItem}
         <ReorderControls
           {index}
-          itemCount={items.length}
+          itemCount={rows.values.length}
           disabled={!hasMultipleItems}
           onGrab={() => sorter.grab(index)}
           onRelease={sorter.release}
-          onMove={(to, action) => moveItem(index, to, action)}
+          onMove={(to, action) => sorter.move(index, to, action)}
         />
       {/if}
       <TextInput
         dir={getDirection(locale)}
         flex
-        bind:value={items[index]}
+        bind:value={rows.values[index]}
         {readonly}
         {invalid}
-        required={required && items.length === 1}
+        required={required && rows.values.length === 1}
         ariaLabel={_('list_item_value')}
         aria-errormessage="{fieldId}-error"
         onkeydown={(/** @type {KeyboardEvent} */ event) => {
-          // Ignore the Enter key while the user is typing with an IME
-          if (event.key !== 'Enter' || event.isComposing || items.length >= max) {
+          // Ignore the Enter key while the user is typing with an IME, or in a read-only field
+          if (event.key !== 'Enter' || event.isComposing || !canEdit || rows.values.length >= max) {
             return;
           }
 
@@ -256,28 +235,21 @@
           addItem(index + 1);
         }}
       />
-      {#if canEdit}
-        <Button
+      {#if canEdit && !singleItem}
+        <RemoveButton
           variant="ghost"
-          size="small"
-          iconic
           disabled={!hasMultipleItems}
-          aria-label={_('remove')}
           onclick={() => {
             removeItem(index);
           }}
-        >
-          {#snippet startIcon()}
-            <Icon name="close" />
-          {/snippet}
-        </Button>
+        />
       {/if}
     </div>
   {/each}
 </div>
-{#if canEdit}
+{#if canEdit && rows.values.length < max}
   <div role="none" class="toolbar">
-    <AddItemButton {fieldConfig} {items} addItem={() => addItem(items.length)} />
+    <AddItemButton {fieldConfig} items={rows.values} addItem={() => addItem(rows.values.length)} />
   </div>
 {/if}
 

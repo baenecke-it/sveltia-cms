@@ -1,10 +1,9 @@
-import { sleep } from '@sveltia/utils/misc';
 import { beforeAll, beforeEach, describe, expect, test } from 'vitest';
 import { page } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
-import { focusedAsset } from '$lib/services/assets';
 import { globalAssetFolder, selectedAssetFolder } from '$lib/services/assets/folders';
+import { focusedAsset } from '$lib/services/assets/state';
 import {
   deletingSubfolder,
   focusedSubfolder,
@@ -81,8 +80,6 @@ describe('SubfolderListItem', () => {
       // Wait for the previous popup to be unmounted
       await expect.poll(() => document.querySelector('dialog.popup')).toBeNull();
       await row.getByRole('button', { name: 'Show Folder Options' }).click();
-      // A Sveltia UI menu starts handling clicks 100 ms after it’s opened
-      await sleep(150);
     };
 
     await openMenu();
@@ -98,6 +95,19 @@ describe('SubfolderListItem', () => {
 
   test('withholds renaming and deleting while contributing via a fork', async () => {
     forkedRepository.current = /** @type {any} */ ({ owner: 'me', repo: 'site' });
+
+    await render(SubfolderListItem, { subfolder, rowIndex: 0, viewType: 'grid' });
+
+    await page.getByRole('button', { name: 'Show Folder Options' }).click();
+    await expect.element(page.getByRole('menuitem', { name: 'Rename Folder' })).toBeDisabled();
+    await expect.element(page.getByRole('menuitem', { name: 'Delete Folder' })).toBeDisabled();
+  });
+
+  test('withholds renaming and deleting within a read-only folder', async () => {
+    selectedAssetFolder.current = /** @type {any} */ ({
+      ...globalAssetFolder.current,
+      readonly: true,
+    });
 
     await render(SubfolderListItem, { subfolder, rowIndex: 0, viewType: 'grid' });
 
@@ -149,5 +159,17 @@ describe('SubfolderListItem', () => {
     // click without a pointer opens the item right away
     /** @type {HTMLElement} */ (row.element()).click();
     await expect.poll(() => window.location.hash).toBe('#/assets/static/uploads/2024');
+  });
+
+  test('withholds renaming and deleting a folder the CMS is served from', async () => {
+    await render(SubfolderListItem, {
+      subfolder: { name: 'admin', path: 'static/uploads/admin' },
+      rowIndex: 0,
+      viewType: 'grid',
+    });
+
+    await page.getByRole('button', { name: 'Show Folder Options' }).click();
+    await expect.element(page.getByRole('menuitem', { name: 'Rename Folder' })).toBeDisabled();
+    await expect.element(page.getByRole('menuitem', { name: 'Delete Folder' })).toBeDisabled();
   });
 });

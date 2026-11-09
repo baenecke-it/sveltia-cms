@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { checkForRemoteChanges, MIN_CHECK_GAP } from '$lib/services/backends/refresh';
 import { isDraftModified } from '$lib/services/contents/draft';
-import { deleteBackup, getBackup } from '$lib/services/contents/draft/backup';
+import { cancelBackup, deleteBackup, getBackup } from '$lib/services/contents/draft/backup';
 import { createDraft } from '$lib/services/contents/draft/create';
 import { compareWithStore } from '$lib/services/contents/draft/save/conflict';
 import { isWorkflowDraft } from '$lib/services/workflow';
@@ -15,6 +15,7 @@ vi.mock('$lib/services/backends/refresh', () => ({
 }));
 vi.mock('$lib/services/contents/draft', () => ({ isDraftModified: vi.fn(() => false) }));
 vi.mock('$lib/services/contents/draft/backup', () => ({
+  cancelBackup: vi.fn(),
   deleteBackup: vi.fn(),
   getBackup: vi.fn(),
   getBackupSlug: vi.fn(({ originalEntry }) => originalEntry.slug),
@@ -48,13 +49,14 @@ const makeEntryDraft = (props = {}) => ({
 });
 
 describe('reloadDraft', () => {
-  test('drops the backup, then makes a new draft from the given entry', async () => {
+  test('drops the scheduled and saved backups, then makes a new draft from the given entry', async () => {
     const newDraft = { id: 'a' };
     const entryDraft = makeEntryDraft();
 
     vi.mocked(createDraft).mockReturnValue(/** @type {any} */ (newDraft));
 
     expect(await reloadDraft({ entryDraft, entry: /** @type {any} */ (entry) })).toBe(newDraft);
+    expect(cancelBackup).toHaveBeenCalledBefore(vi.mocked(deleteBackup));
     expect(deleteBackup).toHaveBeenCalledWith('posts', 'hello');
     expect(deleteBackup).toHaveBeenCalledBefore(vi.mocked(createDraft));
     expect(createDraft).toHaveBeenCalledWith({
@@ -74,6 +76,7 @@ describe('refreshOpenedDraft', () => {
     vi.mocked(isWorkflowDraft).mockReturnValue(false);
     vi.mocked(compareWithStore).mockReturnValue({
       type: 'modified',
+      canOverwrite: true,
       entry: /** @type {any} */ (entry),
     });
     vi.mocked(getBackup).mockResolvedValue(null);
@@ -103,7 +106,19 @@ describe('refreshOpenedDraft', () => {
     await refreshOpenedDraft(makeEntryDraft());
 
     // A deletion is reported by the notice in the editor instead
-    vi.mocked(compareWithStore).mockReturnValue({ type: 'deleted' });
+    vi.mocked(compareWithStore).mockReturnValue({ type: 'deleted', canOverwrite: true });
+    await refreshOpenedDraft(makeEntryDraft());
+
+    expect(createDraft).not.toHaveBeenCalled();
+  });
+
+  test('leaves the draft alone when another entry may have taken its position', async () => {
+    // An entry stored in a file with the other entries is told by its position
+    vi.mocked(compareWithStore).mockReturnValue({
+      type: 'modified',
+      canOverwrite: false,
+      entry: /** @type {any} */ (entry),
+    });
     await refreshOpenedDraft(makeEntryDraft());
 
     expect(createDraft).not.toHaveBeenCalled();
@@ -145,6 +160,21 @@ describe('refreshOpenedDraft', () => {
       entryDraft.current = { ...draft, originalEntry: { id: 'b' } };
 
       return undefined;
+    });
+
+    await refreshOpenedDraft(entryDraft);
+
+    expect(createDraft).not.toHaveBeenCalled();
+  });
+
+  test('leaves the draft alone when the user starts on it while the backup is looked up', async () => {
+    const entryDraft = makeEntryDraft();
+
+    vi.mocked(getBackup).mockImplementation(async () => {
+      // The user types something in the meantime
+      entryDraft.current.interacted = true;
+
+      return null;
     });
 
     await refreshOpenedDraft(entryDraft);

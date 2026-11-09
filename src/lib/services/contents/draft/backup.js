@@ -2,8 +2,10 @@ import { getBlobRegex } from '@sveltia/utils/file';
 import { toRaw } from '@sveltia/utils/object';
 import { IndexedDB } from '@sveltia/utils/storage';
 
+import { createDisplayBlobURL } from '$lib/services/assets/info';
 import { backend } from '$lib/services/backends';
 import { cmsConfigVersion } from '$lib/services/config';
+import { isDraftReadonly } from '$lib/services/config/readonly';
 import { getOrderFieldKey } from '$lib/services/contents/collection/entries/reorder/config';
 import { isDraftModified, suspendAutoDuplication } from '$lib/services/contents/draft';
 import { createProxy } from '$lib/services/contents/draft/create/proxy.svelte';
@@ -31,6 +33,11 @@ let backupTimeout = 0;
  * @type {IndexedDB | null | undefined}
  */
 let backupDB = undefined;
+/**
+ * Name of the database {@link backupDB} was opened for.
+ * @type {string | undefined}
+ */
+let backupDBName = undefined;
 
 /**
  * Default for {@link backupToastState}.
@@ -94,13 +101,27 @@ export const getBackup = async (collectionName, slug = '') => {
 export const getBackupSlug = ({ fileName, originalEntry }) => fileName ?? originalEntry?.slug ?? '';
 
 /**
+ * Check if the given draft is for an existing entry stored in a file with the other entries of the
+ * collection. Its slug is its position in the array, which another entry can take after a reorder
+ * or a deletion, so a backup stored under it could be restored to the wrong entry.
+ * @param {EntryDraft} draft Draft.
+ * @returns {boolean} Result.
+ */
+const isArrayItemDraft = ({ originalEntry }) => originalEntry?.arrayIndex !== undefined;
+
+/**
  * Backup the entry draft to IndexedDB.
  * @param {EntryDraft} draft Draft.
  */
 export const saveBackup = async (draft) => {
   // Skip if the user hasn’t manually interacted with the editor, so that only programmatic changes,
   // e.g. Lexical markdown reformatting, don’t trigger a backup
-  if (!(prefs.useDraftBackup ?? true) || !draft.interacted) {
+  if (
+    !(prefs.useDraftBackup ?? true) ||
+    !draft.interacted ||
+    isDraftReadonly(draft) ||
+    isArrayItemDraft(draft)
+  ) {
     return;
   }
 
@@ -128,14 +149,27 @@ export const saveBackup = async (draft) => {
       currentSlugs: /** @type {LocaleSlugMap} */ (toRaw(currentSlugs)),
       currentValues: /** @type {LocaleContentMap} */ (toRaw(currentValues)),
       files: Object.fromEntries(
-        Object.entries(files).map(([blobURL, { file, folder, replace }]) => [
-          blobURL,
-          {
-            file,
-            folder: folder ? /** @type {AssetFolderInfo} */ (toRaw(folder)) : folder,
-            replace,
-          },
-        ]),
+        Object.entries(files).map(
+          ([blobURL, { file, folder, replace, subfolderPath, nameTemplate }]) => [
+            blobURL,
+            {
+              file,
+              folder: folder ? /** @type {AssetFolderInfo} */ (toRaw(folder)) : folder,
+              replace,
+              subfolderPath,
+              // The random values are kept in a `Map`, which a JSON round trip would lose
+              ...(nameTemplate
+                ? {
+                    nameTemplate: {
+                      ...nameTemplate,
+                      randomValues: new Map(nameTemplate.randomValues),
+                      dateTimeParts: { ...nameTemplate.dateTimeParts },
+                    },
+                  }
+                : {}),
+            },
+          ],
+        ),
       ),
       // The entries hold `File` objects among their changes, so a JSON round trip won’t do
       pendingEntries: getSnapshot(pendingEntries),
@@ -152,14 +186,50 @@ export const saveBackup = async (draft) => {
 };
 
 /**
+ * Create a new blob URL for every file referenced in the given backup. The old URLs are dead once
+ * the page has been reloaded. A file can be a copy of an asset in the repository, e.g. an SVG image
+ * copied when the entry was duplicated, so the URLs are made for display.
+ * @param {EntryDraftBackup} backup Backup to restore.
+ * @returns {Promise<Map<File, string>>} New blob URLs keyed by file. A file referenced more than
+ * once gets one URL.
+ */
+const createFileURLs = async ({ currentValues, files }) => {
+  /** @type {Set<File>} */
+  const referencedFiles = new Set();
+
+  Object.values(currentValues).forEach((valueMap) => {
+    Object.values(valueMap).forEach((value) => {
+      if (typeof value === 'string') {
+        [...value.matchAll(getBlobRegex('g'))].forEach(([blobURL]) => {
+          const file = files[blobURL]?.file;
+
+          if (file) {
+            referencedFiles.add(file);
+          }
+        });
+      }
+    });
+  });
+
+  return new Map(
+    await Promise.all(
+      [...referencedFiles].map(
+        async (file) => /** @type {[File, string]} */ ([file, await createDisplayBlobURL(file)]),
+      ),
+    ),
+  );
+};
+
+/**
  * Restore a draft backup to the given entry draft.
  * @param {object} args Arguments.
  * @param {EntryDraftBackup} args.backup Backup to restore.
  * @param {EntryDraft} args.draft Entry draft to restore the backup to.
  */
-export const restoreBackup = ({ backup, draft }) => {
+export const restoreBackup = async ({ backup, draft }) => {
   const { currentLocales, currentSlugs, currentValues, files, pendingEntries = [] } = backup;
-  const fileURLs = new Map();
+  // Created up front, because the draft is updated in one go below
+  const fileURLs = await createFileURLs(backup);
 
   suspendAutoDuplication(() => {
     draft.currentLocales = currentLocales;
@@ -195,18 +265,10 @@ export const restoreBackup = ({ backup, draft }) => {
               return;
             }
 
-            let newURL = '';
+            const newURL = /** @type {string} */ (fileURLs.get(file));
 
-            if (fileURLs.has(file)) {
-              newURL = fileURLs.get(file);
-            } else {
-              // Regenerate a blob URL
-              newURL = URL.createObjectURL(file);
-
-              draft.files[newURL] = cache;
-              fileURLs.set(file, newURL);
-            }
-
+            // The first reference to the file decides its upload options
+            draft.files[newURL] ??= cache;
             value = value.replaceAll(blobURL, newURL);
           });
 
@@ -259,7 +321,8 @@ export const restoreBackup = ({ backup, draft }) => {
  * @param {EntryDraft} args.draft Entry draft to restore the backup to.
  */
 export const restoreBackupIfNeeded = async ({ draft }) => {
-  if (!(prefs.useDraftBackup ?? true)) {
+  // A read-only entry can’t be changed, so leave any backup alone until it can be edited again
+  if (!(prefs.useDraftBackup ?? true) || isDraftReadonly(draft) || isArrayItemDraft(draft)) {
     return;
   }
 
@@ -285,7 +348,7 @@ export const restoreBackupIfNeeded = async ({ draft }) => {
   }
 
   if (doRestore) {
-    restoreBackup({ backup, draft });
+    await restoreBackup({ backup, draft });
     draft.interacted = true;
   } else {
     await deleteBackup(collectionName, slug);
@@ -307,8 +370,7 @@ export const showBackupToastIfNeeded = async (draft) => {
     return;
   }
 
-  const { collectionName, originalEntry } = draft;
-  const backup = await getBackup(collectionName, originalEntry?.slug);
+  const backup = await getBackup(draft.collectionName, getBackupSlug(draft));
 
   if (backup) {
     backupToastState.current = { restored: false, deleted: false, saved: true };
@@ -323,22 +385,31 @@ export const resetBackupToastState = () => {
 };
 
 createRootEffect(() => {
-  const { current: _backend } = backend;
+  const { databaseName } = backend.current?.repository ?? {};
 
-  if (_backend && !backupDB) {
-    const { databaseName } = _backend.repository ?? {};
+  if (!databaseName) {
+    backupDB = null;
+    backupDBName = undefined;
 
-    if (databaseName) {
-      backupDB = new IndexedDB(databaseName, 'draft-backups', {
-        keyPath: ['collectionName', 'slug'], // Composite key
-      });
-
-      return;
-    }
+    return;
   }
 
-  backupDB = null;
+  // Reopen the database when the backend or repository has changed, e.g. when the user signs in
+  // with the local backend after the GitHub backend was selected
+  if (databaseName !== backupDBName) {
+    backupDBName = databaseName;
+    backupDB = new IndexedDB(databaseName, 'draft-backups', {
+      keyPath: ['collectionName', 'slug'], // Composite key
+    });
+  }
 });
+
+/**
+ * Drop the backup scheduled by {@link scheduleBackup}, if it hasn’t been made yet.
+ */
+export const cancelBackup = () => {
+  globalThis.clearTimeout(backupTimeout);
+};
 
 /**
  * Schedule a backup of the given entry draft, cancelling any backup scheduled before. The editor
@@ -347,7 +418,7 @@ createRootEffect(() => {
  * @param {EntryDraft | null | undefined} draft Entry draft.
  */
 export const scheduleBackup = (draft) => {
-  globalThis.clearTimeout(backupTimeout);
+  cancelBackup();
 
   if (draft && backupDB) {
     backupTimeout = globalThis.setTimeout(() => {

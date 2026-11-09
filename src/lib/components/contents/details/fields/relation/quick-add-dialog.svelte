@@ -12,22 +12,21 @@
 
   import EntryEditor from '$lib/components/contents/details/editor/entry-editor.svelte';
   import SlugEditor from '$lib/components/contents/details/editor/slug-editor.svelte';
+  import ValidationErrorsToast from '$lib/components/contents/details/editor/validation-errors-toast.svelte';
   import LocaleSwitcher from '$lib/components/contents/details/locale-switcher.svelte';
   import { getCollectionLabel } from '$lib/services/contents/collection';
   import { revokeDraftFileURLs } from '$lib/services/contents/draft';
   import { buildDraft } from '$lib/services/contents/draft/create';
-  import { getValueMapVersion } from '$lib/services/contents/draft/create/proxy.svelte';
+  import { initEntryDraftEditor } from '$lib/services/contents/draft/editor.svelte';
   import {
     EntryDraftState,
     getEntryDraftContext,
     setEntryDraftContext,
-    setEntryDraftRoot,
   } from '$lib/services/contents/draft/state.svelte';
-  import { updateComputedValues } from '$lib/services/contents/draft/update/compute';
-  import { validateEntry } from '$lib/services/contents/draft/validate';
-  import { awaitCustomFieldValidations } from '$lib/services/contents/draft/validate/custom-fields';
-  import { expandInvalidFields } from '$lib/services/contents/editor/fields';
-  import { awaitPendingFieldUpdates } from '$lib/services/contents/editor/pending';
+  import {
+    countInvalidFields,
+    validateAndRevealErrors,
+  } from '$lib/services/contents/draft/validate/reveal';
   import { needsSlugInput } from '$lib/services/contents/editor/slug';
   import {
     createPendingEntry,
@@ -137,17 +136,10 @@
     adding = true;
 
     try {
-      // Wait for a rich text editor to write what was just typed, and for custom validators to
-      // report, the same way a save does
-      await awaitPendingFieldUpdates();
-      await awaitCustomFieldValidations();
-
-      // The entry is committed along with the parent, so it has to be complete
-      if (!validateEntry({ draft, enforceRequired: true })) {
-        expandInvalidFields({ draft });
-        errorCount = Object.values(draft.validities)
-          .flatMap((validity) => Object.values(validity).map(({ valid }) => !valid))
-          .filter(Boolean).length;
+      // The entry is committed along with the parent, so it has to be complete. Wait for what was
+      // just typed and for custom validators to report, the same way a save does
+      if (!(await validateAndRevealErrors({ draft, enforceRequired: true }))) {
+        errorCount = countInvalidFields(draft.validities);
         showValidationToast = true;
 
         return;
@@ -158,6 +150,12 @@
         parentDraft: parentDraft.current,
         fieldConfig,
       });
+
+      // The dialog can be closed with the Escape key in the meantime, and even opened again. The
+      // draft is then discarded, along with the URLs of its files, so the entry is not to be added
+      if (!open || entryDraft.current !== draft) {
+        return;
+      }
 
       // The entries created from the new entry’s own Relation fields come along with it
       parentDraft.current.pendingEntries.push(
@@ -182,31 +180,11 @@
     }
   });
 
-  $effect(() => {
-    if (wrapper) {
-      // Rich text editor components are mounted outside the component tree, so they look the
-      // draft up through the DOM rather than the context
-      setEntryDraftRoot(wrapper, entryDraft);
-    }
-  });
-
-  $effect(() => {
-    const draft = entryDraft.current;
-
-    if (!draft) {
-      return;
-    }
-
-    // Resolve the Compute fields the same way the main editor does: depend on every field value
-    // through the value map versions rather than by walking the values
-    Object.values(draft.currentValues).forEach(getValueMapVersion);
-    Object.values(draft.extraValues).forEach((valueMap) => void $state.snapshot(valueMap));
-    void $state.snapshot(draft.currentLocales);
-
-    untrack(() => {
-      updateComputedValues(draft);
-    });
-  });
+  // Register the editor root and resolve the Compute fields the same way the main editor does
+  initEntryDraftEditor(
+    () => entryDraft,
+    () => wrapper,
+  );
 </script>
 
 <Dialog
@@ -261,11 +239,7 @@
   {/snippet}
 </Dialog>
 
-<Toast bind:show={showValidationToast}>
-  <Alert status="error">
-    {_('entry_validation_errors', { values: { count: errorCount } })}
-  </Alert>
-</Toast>
+<ValidationErrorsToast bind:show={showValidationToast} count={errorCount} />
 
 <Toast bind:show={showErrorToast}>
   <Alert status="error">

@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'vitest';
 import { page } from 'vitest/browser';
 
-import { createMockDraft, renderWithDraft } from '$lib/test/draft';
+import { createMockDraft } from '$lib/test/draft';
+import { renderFieldPreview } from '$lib/test/field.svelte';
 
 import ListPreviewComplex from './list-preview-complex.svelte';
 
@@ -15,20 +16,14 @@ import ListPreviewComplex from './list-preview-complex.svelte';
  * @param {Record<string, any>} values Flattened values.
  * @returns {Promise<HTMLElement>} Container.
  */
-const renderPreview = async (fieldConfig, values) => {
-  const { container } = await renderWithDraft(ListPreviewComplex, {
-    draft: createMockDraft({ fields: [fieldConfig], values: { _default: values } }),
-    props: {
-      locale: '_default',
-      keyPath: fieldConfig.name,
-      typedKeyPath: fieldConfig.name,
+const renderPreview = async (fieldConfig, values) =>
+  (
+    await renderFieldPreview(ListPreviewComplex, {
       fieldConfig,
-      currentValue: undefined,
-    },
-  });
-
-  return container;
-};
+      locale: '_default',
+      draft: createMockDraft({ fields: [fieldConfig], values: { _default: values } }),
+    })
+  ).container;
 
 describe('ListPreviewComplex', () => {
   test('previews the subfields of each item', async () => {
@@ -65,6 +60,16 @@ describe('ListPreviewComplex', () => {
       'data-typed-key-path',
       'authors.*.name',
     );
+    // Each item and subfield is marked outside its lazily rendered content, for the Edit Pane to
+    // scroll to it
+    expect(groups[1].closest('[data-lazy-key-path]')).toHaveAttribute(
+      'data-lazy-key-path',
+      'authors.1',
+    );
+    expect(groups[1].querySelector('section')?.parentElement).toHaveAttribute(
+      'data-lazy-key-path',
+      'authors.1.name',
+    );
   });
 
   test('previews a single subfield stored as the item itself', async () => {
@@ -77,6 +82,8 @@ describe('ListPreviewComplex', () => {
 
     expect(sections).toHaveLength(2);
     expect(sections[0]).toHaveAttribute('data-key-path', 'links.0');
+    // The subfield’s wrapper has the item’s key path, like the item’s own
+    expect(sections[0].parentElement).toHaveAttribute('data-lazy-key-path', 'links.0');
     expect(sections[0].querySelector('a')).toHaveAttribute('href', 'https://example.com/');
   });
 

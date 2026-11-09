@@ -3,8 +3,7 @@
   import { MenuItem } from '@sveltia/ui';
 
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
-  import { copyFromLocale } from '$lib/services/contents/draft/update/copy';
-  import { getValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
+  import { copyFromLocale, getCopyingFieldMap } from '$lib/services/contents/draft/update/copy';
   import { getLocaleLabel } from '$lib/services/contents/i18n';
   import { translator } from '$lib/services/integrations/translators';
 
@@ -47,11 +46,15 @@
   const isMenuDisabled = async ({ sourceLanguage, targetLanguage }) =>
     !entryDraft.current?.currentLocales[targetLanguage] ||
     !entryDraft.current.currentLocales[sourceLanguage] ||
-    (!!keyPath && !getValueMapSnapshot(entryDraft.current, sourceLanguage)[keyPath]) ||
-    (!translate &&
-      !!keyPath &&
-      getValueMapSnapshot(entryDraft.current, sourceLanguage)[keyPath] ===
-        getValueMapSnapshot(entryDraft.current, targetLanguage)[keyPath]) ||
+    // A List or Object field’s value is stored under its child key paths, so look for anything to
+    // copy within the field rather than for a value at the key path itself
+    (!!keyPath &&
+      !Object.keys(
+        getCopyingFieldMap({
+          draft: entryDraft.current,
+          options: { sourceLanguage, targetLanguage, keyPath, translate },
+        }),
+      ).length) ||
     (translate && !(await translator.current?.availability({ sourceLanguage, targetLanguage })));
 
   /**
@@ -59,11 +62,12 @@
    * @param {LanguagePair} languagePair Language pair.
    */
   const copy = (languagePair) => {
-    /* v8 ignore next 6 -- the menu is only offered while the draft is there */
+    /* v8 ignore next 7 -- the menu is only offered while the draft is there */
     if (entryDraft.current) {
       copyFromLocale({
         draft: entryDraft.current,
         options: { ...languagePair, keyPath, translate },
+        entryDraft,
       });
     }
   };
@@ -71,7 +75,7 @@
 
 {#snippet localeItems()}
   {#each otherLocales as otherLocale (otherLocale)}
-    {@const localeLabel = getLocaleLabel(otherLocale)}
+    {@const localeLabel = getLocaleLabel(otherLocale) ?? otherLocale}
     {@const languagePair = { sourceLanguage: otherLocale, targetLanguage: locale }}
     {#await isMenuDisabled(languagePair) then disabled}
       <MenuItem

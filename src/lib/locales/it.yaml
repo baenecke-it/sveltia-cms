@@ -477,13 +477,20 @@ entry_not_found: Voce non trovata.
 # Entry creation restrictions: tooltip and advisory messages
 creating_entries_disabled_by_admin: La creazione di nuove voci in questa collezione è stata disabilitata dall’amministratore.
 # {$quota} is the collection’s maximum entry count
-creating_entries_disabled_by_quota: Non puoi aggiungere nuove voci a questa collezione perché ha raggiunto il suo limite di {$quota} voci.
+creating_entries_disabled_by_quota: |
+  .input {$quota :integer}
+  .match $quota
+    one {{ Non puoi aggiungere nuove voci a questa collezione perché ha raggiunto il suo limite di {$quota} voce. }}
+    *   {{ Non puoi aggiungere nuove voci a questa collezione perché ha raggiunto il suo limite di {$quota} voci. }}
 # {$quota} is the collection limit and {$remaining} is the number of entries that can still be created
 creating_entries_nearing_quota: |
+  .input {$quota :integer}
   .input {$remaining :integer}
-  .match $remaining
-    one {{ Questa collezione si sta avvicinando al limite di {$quota} voci. Puoi creare ancora {$remaining} sola voce. }}
-    *   {{ Questa collezione si sta avvicinando al limite di {$quota} voci. Puoi creare ancora {$remaining} voci. }}
+  .match $quota $remaining
+    one one {{ Questa collezione si sta avvicinando al limite di {$quota} voce. Puoi creare ancora {$remaining} sola voce. }}
+    one *   {{ Questa collezione si sta avvicinando al limite di {$quota} voce. Puoi creare ancora {$remaining} voci. }}
+    *   one {{ Questa collezione si sta avvicinando al limite di {$quota} voci. Puoi creare ancora {$remaining} sola voce. }}
+    *   *   {{ Questa collezione si sta avvicinando al limite di {$quota} voci. Puoi creare ancora {$remaining} voci. }}
 
 # Navigation: back links and list labels
 back_to_collection: Torna alla Collezione
@@ -1558,7 +1565,7 @@ config:
     oauth_implicit_flow: Il metodo di autenticazione configurato (flusso implicito) non è supportato in Sveltia CMS. Usa un <a>metodo di autenticazione</a> diverso.
     github_pkce_unsupported: L’autorizzazione PKCE non è ancora supportata a causa delle limitazioni di GitHub. Usa un <a>metodo di autenticazione</a> diverso.
     oauth_no_app_id: L’ID dell’applicazione OAuth non è stato definito.
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: L’opzione `open_authoring` richiede la modalità di pubblicazione `editorial_workflow`. Consulta la <a>documentazione</a> per i dettagli.
     # Don’t localize `auth_methods`
     no_auth_methods: L’opzione `auth_methods` deve contenere almeno un metodo.
@@ -1680,8 +1687,6 @@ config:
   # Warning messages (logged to console)
   warning:
     oauth_no_app_id: L’ID dell’applicazione OAuth non è stato definito. Agli utenti è richiesto di fornire un token di accesso per accedere.
-    editorial_workflow_unsupported: Il Flusso Editoriale è attualmente supportato solo con i backend GitHub e GitLab.
-    open_authoring_unsupported_backend: L’Open Authoring è attualmente supportato solo con il backend GitHub.
     # {$prop} is the unsupported option name that will be ignored
     unsupported_ignored_option: L’opzione `{$prop}` non è supportata in Sveltia CMS. Verrà ignorata.
     # Don’t localize `picker_utc`, `input_timezone`, and `output_utc`
@@ -1821,8 +1826,6 @@ workflow:
     .match $count
       one {{ Una di queste non è ancora stata pubblicata, quindi le tue modifiche non pubblicate verranno scartate. Qualsiasi versione pubblicata rimarrà invariata. }}
       *   {{ {$count} di queste non sono ancora state pubblicate, quindi le tue modifiche non pubblicate verranno scartate. Qualsiasi versione pubblicata rimarrà invariata. }}
-  # Confirmation dialog shown before merging the pull request. Keep the wording free of Git jargon.
-  confirm_publishing_entry: Sei sicuro di voler pubblicare questa voce? Le tue modifiche avranno effetto immediato.
   # Workflow page: toast notifications shown while an entry is being published from a card, and
   # once publishing has completed
   publishing_entry: Pubblicazione Voce…
@@ -1976,13 +1979,23 @@ prefs:
       description: Mostra la sottolineatura per i link nell’anteprima della voce e nelle etichette dell’interfaccia utente.
       switch_label: Sottolinea Sempre i Link
 
-  # Advanced panel
-  advanced:
-    title: Avanzate
-    beta:
-      title: Funzionalità Beta
-      description: Abilita alcune funzionalità beta che potrebbero essere instabili o non tradotte.
-      switch_label: Partecipa al Programma Beta
+  # Data Management panel
+  data:
+    clear_data:
+      title: Cancella Dati
+      # Clear File Cache button
+      file_cache:
+        description: Elimina i contenuti dei file memorizzati nella cache locale e le miniature delle immagini per liberare spazio o risolvere problemi causati da dati obsoleti.
+        button_label: Svuota Cache File
+        confirmation: I contenuti dei file e le miniature delle immagini nella cache locale verranno eliminati. Le tue bozze non salvate e le impostazioni verranno mantenute, e qualsiasi dato eliminato verrà scaricato o generato di nuovo in base alle necessità. Il CMS verrà ricaricato al termine dell’operazione.
+      # Erase All Data button
+      all_data:
+        description: Elimina tutto ciò che il CMS conserva in questo browser, inclusi i file memorizzati nella cache, le bozze non salvate e le impostazioni. Tutto ciò che è già stato salvato nel tuo repository non verrà interessato.
+        button_label: Cancella Tutti i Dati
+        confirmation: Tutti i dati memorizzati in questo browser verranno eliminati, inclusi i contenuti dei file nella cache, le miniature, le bozze non salvate, le impostazioni e lo stato di accesso. Il tuo repository non verrà interessato, ma qualsiasi modifica non salvata andrà persa e dovrai accedere di nuovo. Il CMS verrà ricaricato al termine dell’operazione.
+
+  # Developer panel
+  developer:
     developer_mode:
       title: Modalità Sviluppatore
       description: Abilita alcune funzionalità orientate agli sviluppatori, inclusi log della console dettagliati e menu contestuali nativi.
@@ -2000,18 +2013,6 @@ prefs:
         field_label: Header di autorizzazione (es., Bearer <token>) (opzionale)
         saved: Header di autorizzazione salvato.
         removed: Header di autorizzazione rimosso.
-    clear_data:
-      title: Cancella Dati
-      # Clear File Cache button
-      file_cache:
-        description: Elimina i contenuti dei file memorizzati nella cache locale e le miniature delle immagini per liberare spazio o risolvere problemi causati da dati obsoleti.
-        button_label: Svuota Cache File
-        confirmation: I contenuti dei file e le miniature delle immagini nella cache locale verranno eliminati. Le tue bozze non salvate e le impostazioni verranno mantenute, e qualsiasi dato eliminato verrà scaricato o generato di nuovo in base alle necessità. Il CMS verrà ricaricato al termine dell’operazione.
-      # Erase All Data button
-      all_data:
-        description: Elimina tutto ciò che il CMS conserva in questo browser, inclusi i file memorizzati nella cache, le bozze non salvate e le impostazioni. Tutto ciò che è già stato salvato nel tuo repository non verrà interessato.
-        button_label: Cancella Tutti i Dati
-        confirmation: Tutti i dati memorizzati in questo browser verranno eliminati, inclusi i contenuti dei file nella cache, le miniature, le bozze non salvate, le impostazioni e lo stato di accesso. Il tuo repository non verrà interessato, ma qualsiasi modifica non salvata andrà persa e dovrai accedere di nuovo. Il CMS verrà ricaricato al termine dell’operazione.
 
 # ==============================================================================
 # Keyboard Shortcuts

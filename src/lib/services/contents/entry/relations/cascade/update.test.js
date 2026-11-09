@@ -2,6 +2,7 @@
 
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
+import { lockedBranch } from '$lib/services/backends/branch-access';
 import {
   buildCascadeChanges,
   createRenamedEntry,
@@ -38,7 +39,16 @@ vi.mock('$lib/services/contents/entry/changes', () => ({
     { action: 'update', slug: entry.slug, path: `content/posts/${entry.slug}.md`, data: '' },
   ]),
   createSyntheticDraft: vi.fn((args) => ({ synthetic: true, ...args })),
+}));
+
+vi.mock('$lib/services/contents/draft/save/file-changes', async (importOriginal) => ({
+  .../** @type {Record<string, any>} */ (await importOriginal()),
   resolveCacheDB: vi.fn(() => undefined),
+}));
+
+vi.mock('$lib/services/contents/entry/readonly', () => ({
+  isEntryReadonly: vi.fn(() => false),
+  getReadonlyEntryLabel: vi.fn((entry, collection) => `${collection.label} › ${entry.slug}`),
 }));
 
 vi.mock('$lib/services/contents/fields/relation/helpers', () => ({
@@ -53,9 +63,10 @@ const { getEntriesByCollection } = await import('$lib/services/contents/collecti
 const { isCollectionIndexFile } =
   await import('$lib/services/contents/collection/entries/index-file');
 
-const { buildEntryUpdateChanges, createSyntheticDraft, resolveCacheDB } =
+const { buildEntryUpdateChanges, createSyntheticDraft } =
   await import('$lib/services/contents/entry/changes');
 
+const { resolveCacheDB } = await import('$lib/services/contents/draft/save/file-changes');
 const { getEntryOptions } = await import('$lib/services/contents/fields/relation/helpers');
 
 const tagsCollection = {
@@ -369,6 +380,49 @@ describe('buildCascadeChanges()', () => {
     expect(changes).toEqual([
       { action: 'update', slug: 'my-trip', path: 'content/posts/my-trip.md', data: '' },
     ]);
+  });
+
+  test('refuses the rename when a referencing entry is read-only', async () => {
+    registerTagRelation();
+    getCollection.mockReturnValue({ ...postsCollection, readonly: true });
+    getEntriesByCollection.mockReturnValue([
+      createPost('my-trip', { title: 'My Trip', tag: 'travel' }),
+      createPost('food-review', { title: 'Food Review', tag: 'food' }),
+    ]);
+
+    await expect(buildCascadeChanges(baseArgs)).rejects.toThrow('cannot_rename_referenced_entry');
+    expect(buildEntryUpdateChanges).not.toHaveBeenCalled();
+  });
+
+  test('refuses the rename when another collection locks a referencing entry', async () => {
+    const { isEntryReadonly } = await import('$lib/services/contents/entry/readonly');
+
+    registerTagRelation();
+    getEntriesByCollection.mockReturnValue([
+      createPost('my-trip', { title: 'My Trip', tag: 'travel' }),
+    ]);
+    vi.mocked(isEntryReadonly).mockReturnValueOnce(true);
+
+    await expect(buildCascadeChanges(baseArgs)).rejects.toThrow('cannot_rename_referenced_entry');
+    expect(isEntryReadonly).toHaveBeenCalledWith(expect.objectContaining({ id: 'my-trip' }));
+    expect(buildEntryUpdateChanges).not.toHaveBeenCalled();
+  });
+
+  test('rewrites a referencing entry on a branch the user can’t push to', async () => {
+    registerTagRelation();
+    getEntriesByCollection.mockReturnValue([
+      createPost('my-trip', { title: 'My Trip', tag: 'travel' }),
+    ]);
+    lockedBranch.current = 'main';
+
+    try {
+      // Only a rename made through Editorial Workflow gets this far, and it commits the rewrite to
+      // its own branch
+      await expect(buildCascadeChanges(baseArgs)).resolves.toBeDefined();
+      expect(buildEntryUpdateChanges).toHaveBeenCalled();
+    } finally {
+      lockedBranch.current = undefined;
+    }
   });
 
   test('rewrites one item of a multi-value field', async () => {

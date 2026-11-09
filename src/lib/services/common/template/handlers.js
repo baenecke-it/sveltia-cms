@@ -1,16 +1,13 @@
 import { generateUUID } from '@sveltia/utils/crypto';
-import { stripSlashes } from '@sveltia/utils/string';
 
 import { DATE_TIME_FIELDS } from '$lib/services/common/template/constants';
+import { getFileNameParts } from '$lib/services/common/template/utils';
 import {
   getSharedEntryFileName,
   stripIndexFileName,
 } from '$lib/services/contents/collection/nested';
+import { getEntryDirName } from '$lib/services/contents/entry/paths';
 import { getEntrySummaryFromContent } from '$lib/services/contents/entry/summary';
-import {
-  hasLocalePlaceholder,
-  stripLocaleFolderPath,
-} from '$lib/services/contents/i18n/placeholder';
 
 /**
  * @import { ReplaceSubContext } from '$lib/services/common/template/replacers';
@@ -85,41 +82,31 @@ export const handleSlugTag = (tag, context) => {
  * @param {string} tag The template tag.
  * @param {string | undefined} entryFilePath Entry file path.
  * @param {string | undefined} basePath Base path.
+ * @param {string[]} [localeSuffixes] Locale codes that can follow the file name, with the
+ * `multiple_files` i18n structure.
+ * @param {RegExp} [fullPathRegEx] Entry collection’s entry path matcher, which tells the
+ * `{{dirname}}` tag where the locale folder is.
  * @returns {string | undefined} The file path value or undefined if not a file path tag.
  */
-export const handleFilePathTag = (tag, entryFilePath, basePath) => {
+export const handleFilePathTag = (
+  tag,
+  entryFilePath,
+  basePath,
+  localeSuffixes = [],
+  fullPathRegEx = undefined,
+) => {
   if (!entryFilePath) {
     return '';
   }
 
   switch (tag) {
-    case 'dirname': {
-      // The folder is relative to the collection folder, so it must not keep the slash left behind
-      // by the removed base path, or a template like `media/{{dirname}}` would produce `media//sub`
-      // A base path with the `{{locale}}` placeholder stands for a folder per locale
+    case 'dirname':
       // @see https://github.com/decaporg/decap-cms/issues/7752
-      const pathAfterBase = stripSlashes(
-        basePath && hasLocalePlaceholder(basePath)
-          ? stripLocaleFolderPath(entryFilePath, basePath)
-          : entryFilePath.replace(basePath ?? '', ''),
-      );
+      return getEntryDirName(entryFilePath, { basePath, fullPathRegEx });
 
-      const lastSlashIndex = pathAfterBase.lastIndexOf('/');
-
-      return lastSlashIndex > 0 ? pathAfterBase.substring(0, lastSlashIndex) : '';
-    }
-
-    case 'filename': {
-      const fileName = /** @type {string} */ (entryFilePath.split('/').pop());
-
-      return fileName.split('.').shift();
-    }
-
-    case 'extension': {
-      const fileName = /** @type {string} */ (entryFilePath.split('/').pop());
-
-      return fileName.split('.').pop();
-    }
+    case 'filename':
+    case 'extension':
+      return getFileNameParts(entryFilePath, localeSuffixes)[tag];
 
     default:
       return undefined;

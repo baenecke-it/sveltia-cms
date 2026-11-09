@@ -12,10 +12,16 @@
   import { listedEntryIndexMap } from '$lib/services/contents/collection/view';
   import { getEntrySummary } from '$lib/services/contents/entry/summary';
   import { toggleListItem } from '$lib/services/utils/array';
+  import { encodePathSegments } from '$lib/services/utils/url';
   import { openAuthoring } from '$lib/services/workflow/open-authoring';
 
   /**
-   * @import { Entry, InternalEntryCollection, ViewType } from '$lib/types/private';
+   * @import {
+   * Entry,
+   * EntryTableColumn,
+   * InternalEntryCollection,
+   * ViewType,
+   * } from '$lib/types/private';
    */
 
   /**
@@ -23,6 +29,7 @@
    * @property {InternalEntryCollection} collection Selected collection.
    * @property {Entry} entry Entry.
    * @property {ViewType} viewType View type.
+   * @property {EntryTableColumn[]} [columns] Columns of the table view.
    */
 
   /** @type {Props} */
@@ -31,6 +38,7 @@
     collection,
     entry,
     viewType,
+    columns = [],
     /* eslint-enable prefer-const */
   } = $props();
 
@@ -40,7 +48,12 @@
   const rowIndex = $derived.by(() => {
     const index = listedEntryIndexMap.current.get(entry.id);
 
-    return index === undefined ? undefined : index + 1;
+    if (index === undefined) {
+      return undefined;
+    }
+
+    // The table view’s header row comes first
+    return viewType === 'table' ? index + 2 : index + 1;
   });
 
   /* v8 ignore start -- the app locale is always set once the UI strings are loaded */
@@ -66,7 +79,7 @@
     updateSelection(event.detail.selected);
   }}
   onclick={() => {
-    goto(`/collections/${collection.name}/entries/${entry.subPath}`, {
+    goto(encodePathSegments(`/collections/${collection.name}/entries/${entry.subPath}`), {
       transitionType: 'forwards',
     });
   }}
@@ -77,6 +90,7 @@
     {collection}
     {entry}
     {viewType}
+    {columns}
     showCheckbox={!openAuthoring.current}
     onSelect={updateSelection}
   />

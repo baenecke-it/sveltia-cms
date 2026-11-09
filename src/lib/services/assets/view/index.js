@@ -1,10 +1,22 @@
-import { _ } from '@sveltia/i18n';
+import { _, locale as appLocale } from '@sveltia/i18n';
 import equal from 'fast-deep-equal';
 import { untrack } from 'svelte';
 
-import { publishedAssets, selectedAssets, uploadingAssets } from '$lib/services/assets';
+import { isAssetInFolder } from '$lib/services/assets';
 import { selectedAssetFolder } from '$lib/services/assets/folders';
-import { browsedDirPath, getDirName, getSubfolders } from '$lib/services/assets/subfolders';
+import {
+  focusedAsset,
+  publishedAssets,
+  selectedAssets,
+  uploadingAssets,
+} from '$lib/services/assets/state';
+import {
+  browsedDirPath,
+  focusedSubfolder,
+  getAssetsInDir,
+  getSubfolders,
+  selectedSubfolderPath,
+} from '$lib/services/assets/subfolders';
 import { filterAssets } from '$lib/services/assets/view/filter';
 import { groupAssets } from '$lib/services/assets/view/group';
 import { assetListSettings, currentView, initSettings } from '$lib/services/assets/view/settings';
@@ -21,7 +33,7 @@ import {
 } from '$lib/services/utils/state.svelte';
 
 /**
- * @import { Asset, AssetFolderInfo } from '$lib/types/private';
+ * @import { Asset, AssetFolderInfo, AssetFolderSummary } from '$lib/types/private';
  */
 
 /**
@@ -84,12 +96,9 @@ export const selectedFolderAssets = createDerivedState(() => {
   const { current: _selectedAssetFolder } = selectedAssetFolder;
 
   if (_allAssets && _selectedAssetFolder && _selectedAssetFolder.internalPath !== undefined) {
-    // An asset’s folder is usually the very object the selection was made from, so identity
-    // settles it without walking the folder; the deep comparison is the fallback for a folder
-    // restored from `window.history.state`, which is an equal but separate object.
-    return _allAssets.filter(
-      ({ folder }) => folder === _selectedAssetFolder || equal(folder, _selectedAssetFolder),
-    );
+    // A folder restored from `window.history.state` is an equal but separate object, and the
+    // assets of another folder with the same path are listed as well
+    return _allAssets.filter((asset) => isAssetInFolder(asset, _selectedAssetFolder));
   }
 
   return _allAssets ? [..._allAssets] : [];
@@ -108,7 +117,7 @@ export const listedAssets = createDerivedState(() => {
     return assets;
   }
 
-  return assets.filter(({ path }) => getDirName(path) === dirPath);
+  return getAssetsInDir({ dirPath, assets });
 });
 
 /**
@@ -124,16 +133,45 @@ export const listedSubfolders = createDerivedState(() => {
 });
 
 /**
- * Map from asset path to the asset’s row index in the list, used by list rows to resolve their
- * `aria-rowindex` in O(1). The subfolders come first, so the index of an asset in
- * {@link listedAssets} is offset by their count. Rows are appended by an infinite scroller and
- * never unmounted, so once a large folder has been scrolled through, an `indexOf()` per row would
- * make every subsequent list update O(n²).
+ * What the folder info panel describes: the focused subfolder, or the folder being browsed — the
+ * subfolder being browsed if any, otherwise the selected folder itself.
+ * @type {{ readonly current: AssetFolderSummary | undefined }}
  */
-export const listedAssetIndexMap = createDerivedState(() => {
-  const offset = listedSubfolders.current.length;
+export const folderSummary = createDerivedState(() => {
+  const subfolder = focusedSubfolder.current;
 
-  return new Map(listedAssets.current.map((asset, index) => [asset.path, index + offset]));
+  if (subfolder) {
+    const { name, path } = subfolder;
+    const assets = selectedFolderAssets.current;
+
+    return {
+      name,
+      path,
+      folderCount: getSubfolders({ dirPath: path, assets }).length,
+      assetCount: getAssetsInDir({ dirPath: path, assets }).length,
+    };
+  }
+
+  const folder = selectedAssetFolder.current;
+
+  // The panel is only shown with a folder selected
+  if (!folder) {
+    return undefined;
+  }
+
+  const dirPath = browsedDirPath.current;
+
+  return {
+    name:
+      selectedSubfolderPath.current.split('/').at(-1) ||
+      // `appLocale.current` is a key, because the label can be localized
+      (appLocale.current && getFolderLabelByCollection(folder)),
+    // The All Assets folder has no path
+    path: dirPath ?? folder.internalPath,
+    // A folder that isn’t browsed by subfolder lists every asset below it at once
+    folderCount: dirPath === undefined ? undefined : listedSubfolders.current.length,
+    assetCount: listedAssets.current.length,
+  };
 });
 
 /**
@@ -209,6 +247,24 @@ export const assetGroups = createDerivedState(() => {
   return previousAssetGroups;
 });
 
+/**
+ * Map from asset path to the asset’s row index in the list, used by list rows to resolve their
+ * `aria-rowindex` in O(1). The index is counted across the groups rather than within each one, as
+ * the rows of every group make up one grid, and follows the current sorting and filtering. The
+ * subfolders come first, so they offset the index. Rows are appended by an infinite scroller and
+ * never unmounted, so once a large folder has been scrolled through, an `indexOf()` per row would
+ * make every subsequent list update O(n²).
+ */
+export const listedAssetIndexMap = createDerivedState(() => {
+  const offset = listedSubfolders.current.length;
+
+  return new Map(
+    Object.values(assetGroups.current)
+      .flat(1)
+      .map((asset, index) => [asset.path, index + offset]),
+  );
+});
+
 createRootEffect(() => {
   const { current: _backend } = backend;
 
@@ -217,10 +273,27 @@ createRootEffect(() => {
   }
 });
 
+// Clear the selection when the listed assets or the filter change, so it never includes an asset
+// the current view hides, which a bulk action like Delete would otherwise apply to. Likewise, drop
+// the focus from an asset the view no longer lists, e.g. an image once the list is filtered to
+// documents, as the toolbar actions and the info panel fall back to the focused asset. An updated
+// copy of the focused asset, e.g. after it’s replaced, has the same path, so the focus stays.
 createRootEffect(() => {
   const assets = listedAssets.current;
+  const filter = filterConditions.current;
+  const asset = untrack(() => focusedAsset.current);
 
   selectedAssets.current = [];
+
+  if (
+    asset &&
+    !filterAssets(
+      assets.filter(({ path }) => path === asset.path),
+      filter,
+    ).length
+  ) {
+    focusedAsset.current = undefined;
+  }
 
   if (untrack(() => prefs.devModeEnabled)) {
     // eslint-disable-next-line no-console

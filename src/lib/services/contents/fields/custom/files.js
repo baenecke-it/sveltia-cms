@@ -11,6 +11,7 @@ import {
 /**
  * @import {
  * EntryDraft,
+ * InternalLocaleCode,
  * MediaLibraryAssetKind,
  * SelectedResource,
  * TypedFieldKeyPath,
@@ -31,6 +32,8 @@ import {
  * @property {TypedFieldKeyPath} typedKeyPath Typed key path to the field.
  * @property {string} [componentName] Name of the rich text editor component the field is part of,
  * if any.
+ * @property {InternalLocaleCode} [locale] Locale the field is edited in, which an existing asset in
+ * an entry-relative folder is referenced relative to. Default: the default locale.
  */
 
 /**
@@ -38,6 +41,8 @@ import {
  * @property {CustomFieldPickedFile[]} files Usable resources, in the order they were selected.
  * @property {string[]} oversizedFileNames Names of the files that exceed the size limit.
  * @property {string[]} invalidFileNames Names of the files that cannot be decoded.
+ * @property {string[]} [mismatchedFileNames] Names of the files that are not one of the accepted
+ * file types, even once transformed.
  */
 
 /**
@@ -67,6 +72,8 @@ export const getCustomFieldAssetOptions = ({ draft, fieldConfig, typedKeyPath, c
  * downstream — the target folder, file naming, deduplication, the backup and the editorial workflow
  * — works the same way. The target folder is the one a File/Image field in the same place would
  * upload to: the field’s own `media_folder` if any, otherwise the collection’s or the global one.
+ * With the `replace` option, the file keeps its name and overwrites an existing asset with the same
+ * name, like a file the user chose to replace in the Select Assets dialog.
  * @param {CustomFieldArgs & { file: File | Blob, options?: CustomFieldAddFileOptions }} args
  * Arguments, including the file to be added and the options.
  * @returns {Promise<string>} Blob URL to be stored in the field value. It’s replaced with the
@@ -74,13 +81,14 @@ export const getCustomFieldAssetOptions = ({ draft, fieldConfig, typedKeyPath, c
  * uploaded, the public path of the existing asset is returned instead.
  * @throws {TypeError} When the file is not a `File`, or is a `Blob` given without a name.
  * @throws {Error} When the file cannot be decoded or exceeds the size limit configured for the
- * media library.
+ * media library, or there is no asset folder to upload it to.
  */
 export const addFileToDraft = async ({
   draft,
   fieldConfig,
   typedKeyPath,
   componentName,
+  locale,
   file,
   options = {},
 }) => {
@@ -100,10 +108,17 @@ export const addFileToDraft = async ({
     componentName,
   });
 
+  // Only a cloud media library is configured, and neither the field nor the collection has its own
+  // `media_folder`
+  if (!folder) {
+    throw new Error(`There is no asset folder to upload the file "${name}" to`);
+  }
+
   const { value, oversizedFileName, invalidFileName } = await processResource({
     draft,
-    resource: { file: namedFile, folder },
+    resource: { file: namedFile, folder, replace: !!options.replace },
     libraryConfig,
+    locale,
   });
 
   if (invalidFileName) {
@@ -149,7 +164,7 @@ export const getPickedAssetKind = ({ kind, accept }) => {
  * including the resource and the value {@link processResource} has resolved it to.
  * @returns {Promise<Blob | undefined>} Blob, if the resource has one.
  */
-const getPickedBlob = async ({ draft, typedKeyPath, componentName, resource, value }) => {
+const getPickedBlob = async ({ draft, typedKeyPath, componentName, locale, resource, value }) => {
   if (value.startsWith('blob:')) {
     return draft.files[value]?.file;
   }
@@ -159,7 +174,15 @@ const getPickedBlob = async ({ draft, typedKeyPath, componentName, resource, val
   const asset =
     resource.asset ??
     (resource.file
-      ? getAssetByPath({ value, entry, collectionName, fileName, componentName, typedKeyPath })
+      ? getAssetByPath({
+          value,
+          entry,
+          collectionName,
+          fileName,
+          componentName,
+          typedKeyPath,
+          locale,
+        })
       : undefined);
 
   return asset ? getAssetBlob(asset) : undefined;
@@ -169,11 +192,16 @@ const getPickedBlob = async ({ draft, typedKeyPath, componentName, resource, val
  * Resolve the resources picked in the Select Assets dialog on behalf of a custom field control.
  * Each resource is processed the way a built-in File/Image field would: an existing asset is
  * resolved to its public path, a file to be uploaded is cached in the draft and given a temporary
- * blob URL, and a URL is used as is. Files that are oversized or cannot be decoded are reported
- * separately, so the caller can show them the way a File/Image field does.
- * @param {CustomFieldArgs & { inEditorComponent?: boolean, resources: SelectedResource[] }} args
- * Arguments, including the resources picked in the dialog and whether the field is rendered in a
- * rich text editor component.
+ * blob URL, and a URL is used as is. Files that are oversized, cannot be decoded or are not one of
+ * the accepted types are reported separately, so the caller can show them the way a File/Image
+ * field does.
+ * @param {CustomFieldArgs & {
+ * inEditorComponent?: boolean,
+ * resources: SelectedResource[],
+ * accept?: string,
+ * }} args Arguments, including the resources picked in the dialog, whether the field is rendered in
+ * a rich text editor component, and the file types a file to be uploaded is checked against once
+ * processed.
  * @returns {Promise<PickedResourcesResult>} Result.
  * @throws {Error} When the bytes of a picked asset cannot be retrieved.
  */
@@ -182,8 +210,10 @@ export const resolvePickedResources = async ({
   fieldConfig,
   typedKeyPath,
   componentName,
+  locale,
   inEditorComponent = false,
   resources,
+  accept,
 }) => {
   const { folder, libraryConfig } = getCustomFieldAssetOptions({
     draft,
@@ -192,7 +222,14 @@ export const resolvePickedResources = async ({
     componentName,
   });
 
-  const results = await processResources({ draft, resources, folder, libraryConfig });
+  const results = await processResources({
+    draft,
+    resources,
+    folder,
+    libraryConfig,
+    accept,
+    locale,
+  });
 
   const files = await Promise.all(
     results.map(async ({ value, credit }, index) =>
@@ -205,6 +242,7 @@ export const resolvePickedResources = async ({
               fieldConfig,
               typedKeyPath,
               componentName,
+              locale,
               resource: resources[index],
               value,
             }),

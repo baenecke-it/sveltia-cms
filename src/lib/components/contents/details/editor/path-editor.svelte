@@ -7,23 +7,24 @@
   import ParentFolderTreeItem from '$lib/components/contents/details/editor/parent-folder-tree-item.svelte';
   import ValidationError from '$lib/components/contents/details/editor/validation-error.svelte';
   import { getNewFolderName, validateNewFolderName } from '$lib/services/common/slug';
+  import { isDraftReadonly } from '$lib/services/config/readonly';
   import { getCollectionLabel } from '$lib/services/contents/collection';
-  import { getEntriesByCollection } from '$lib/services/contents/collection/entries';
   import {
     getEntryDirPath,
     getMetaPathConfig,
     getNestedConfig,
-    getSharedEntryFileName,
   } from '$lib/services/contents/collection/nested';
-  import { localizeDirPath } from '$lib/services/contents/collection/nested/i18n';
+  import { getAllEntries, localizeDirPath } from '$lib/services/contents/collection/nested/i18n';
   import {
-    addFolderToTree,
     findNestedTreeNode,
-    getParentFolderTree,
+    getChildFolderNames,
+    getMaxParentFolderDepth,
+    getMovableFolderName,
+    getParentFolderPickerTree,
   } from '$lib/services/contents/collection/nested/tree';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
+  import { getPathValidationMessages } from '$lib/services/contents/draft/validate/messages';
   import { createPath } from '$lib/services/utils/file';
-  import { mergeUnpublishedEntries, unpublishedEntries } from '$lib/services/workflow';
 
   /**
    * @import { NestedTreeNode } from '$lib/services/contents/collection/nested/tree';
@@ -58,6 +59,8 @@
    * @see https://github.com/sveltia/sveltia-cms/issues/962
    */
   const isDefaultLocale = $derived(locale === collection?._i18n.defaultLocale);
+  /** Whether the entry can be moved, which a read-only entry can’t. */
+  const canMove = $derived(isDefaultLocale && !isDraftReadonly(entryDraft.current));
 
   /**
    * Name of the folder the entry occupies, which travels with it when the entry is filed elsewhere.
@@ -65,22 +68,13 @@
    * one: a new entry’s folder is named after its slug at save time, and in the other modes an entry
    * is a file rather than a folder.
    */
-  const ownFolderName = $derived.by(() => {
-    const subPath = entryDraft.current?.originalEntry?.subPath;
-
-    if (
-      entryDraft.current?.isNew ||
-      !subPath ||
-      !collection ||
-      !getSharedEntryFileName(collection)
-    ) {
-      return undefined;
-    }
-
-    const dirPath = getEntryDirPath(subPath);
-
-    return dirPath ? dirPath.slice(dirPath.lastIndexOf('/') + 1) : undefined;
-  });
+  const ownFolderName = $derived(
+    getMovableFolderName({
+      collection,
+      subPath: entryDraft.current?.originalEntry?.subPath,
+      isNew: entryDraft.current?.isNew,
+    }),
+  );
 
   /* v8 ignore next -- the editor is only rendered for a nested collection, where the path is set */
   const currentPath = $derived(stripSlashes(entryDraft.current?.currentPath ?? ''));
@@ -94,6 +88,16 @@
    */
   const canCreateFolder = $derived(
     !!collection && getNestedConfig(collection)?.subfolders === false,
+  );
+
+  /**
+   * Whether the selected folder has room for another one below it. An entry filed in a folder
+   * deeper than the collection’s `nested.depth` allows wouldn’t be part of the collection.
+   */
+  const hasRoomForFolder = $derived(
+    !!collection &&
+      selectedPath.split('/').filter(Boolean).length <
+        getMaxParentFolderDepth({ collection, entries: [] }),
   );
 
   let newFolderDialogOpen = $state(false);
@@ -116,33 +120,21 @@
       return /** @type {NestedTreeNode} */ ({ path: '', label: '', children: [] });
     }
 
-    const { name } = collection;
-
-    // With Editorial Workflow a section can be started and filled in one sitting: a page that only
-    // exists as a draft has to be offered as a parent too, or its sub-pages couldn’t be filed under
-    // it until it’s published. A pending move is reflected the same way, so the tree shows the
-    // folders as they’ll be once the drafts land
-    const entries = mergeUnpublishedEntries(
-      getEntriesByCollection(name),
-      unpublishedEntries.current.filter(({ workflow }) => workflow.collectionName === name),
-    );
-
-    return /** @type {NestedTreeNode} */ ({
-      path: '',
+    return getParentFolderPickerTree({
+      collection,
       label: getCollectionLabel(collection),
-      children: newFolderPaths.reduce(
-        (nodes, path) => addFolderToTree({ nodes, path }),
-        getParentFolderTree({
-          collection,
-          entries,
-          // An entry can’t be filed within itself
-          excludePath: ownFolderName
-            ? getEntryDirPath(/** @type {string} */ (entryDraft.current?.originalEntry?.subPath))
-            : undefined,
-          // Each pane names the folders in its own language
-          locale,
-        }),
-      ),
+      // With Editorial Workflow a section can be started and filled in one sitting: a page that
+      // only exists as a draft has to be offered as a parent too, or its sub-pages couldn’t be
+      // filed under it until it’s published. A pending move is reflected the same way, so the tree
+      // shows the folders as they’ll be once the drafts land
+      entries: getAllEntries(collection),
+      newFolderPaths,
+      // An entry can’t be filed within itself
+      excludePath: ownFolderName
+        ? getEntryDirPath(/** @type {string} */ (entryDraft.current?.originalEntry?.subPath))
+        : undefined,
+      // Each pane names the folders in its own language
+      locale,
     });
   });
 
@@ -166,9 +158,7 @@
   let buttonElement = $state();
   let popupOpen = $state(false);
   /** Names of the folders already in the folder the new one would be created in. */
-  const takenFolderNames = $derived(
-    (selectedNode?.children ?? []).map(({ path }) => path.slice(path.lastIndexOf('/') + 1)),
-  );
+  const takenFolderNames = $derived(getChildFolderNames(selectedNode));
 
   const newFolderError = $derived(
     validateNewFolderName({ takenNames: takenFolderNames, name: newFolderName }),
@@ -200,21 +190,13 @@
 <!-- A collection whose entries all sit at the top level has no folder to choose and, in the
 `subfolders` mode, no way to make one, which leaves nothing for the field to do -->
 {#if entryDraft.current && config && (hasFolderChoice || canCreateFolder)}
-  <FieldEditorGroup>
+  <FieldEditorGroup data-validation-key="_path">
     <header role="none">
       <h4 role="none" id="{fieldId}-label">{_('entry_parent_folder')}</h4>
     </header>
     {#if invalid}
       <ValidationError id="{fieldId}-error">
-        {#if validity?.patternMismatch}
-          {_('edit_path_error.invalid')}
-        {/if}
-        {#if validity?.customError}
-          {_('edit_path_error.recursive')}
-        {/if}
-        {#if validity?.duplicateError}
-          {_('edit_path_error.duplicate')}
-        {/if}
+        {getPathValidationMessages(validity).join(' ')}
       </ValidationError>
     {/if}
     <div role="none" class="field-wrapper">
@@ -222,7 +204,7 @@
         bind:element={buttonElement}
         class="parent-folder-button"
         variant="tertiary"
-        disabled={!hasFolderChoice || !isDefaultLocale}
+        disabled={!hasFolderChoice || !canMove}
         aria-haspopup="tree"
         aria-invalid={invalid}
         aria-labelledby="{fieldId}-label"
@@ -255,7 +237,7 @@
           variant="ghost"
           iconic
           class="new-parent-folder-button"
-          disabled={!isDefaultLocale}
+          disabled={!canMove || !hasRoomForFolder}
           aria-label={_('new_parent_folder')}
           onclick={() => {
             newFolderName = '';

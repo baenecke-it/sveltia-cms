@@ -2,19 +2,19 @@
 // @vitest-environment happy-dom
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { copyDefaultLocaleValue, createProxy, getValueMapVersion } from './proxy.svelte.js';
+import { getValueMapVersion } from '$lib/services/contents/draft/create/versioned-map.svelte';
 
-const { getCollection, getCollectionFile, getField, revalidateField, isAutoDuplicationEnabled } =
+import { copyDefaultLocaleValue, createProxy, isDuplicatedField } from './proxy.svelte.js';
+
+const { resolveCollectionAndFile, getField, revalidateField, isAutoDuplicationEnabled } =
   vi.hoisted(() => ({
-    getCollection: vi.fn(),
-    getCollectionFile: vi.fn(),
+    resolveCollectionAndFile: vi.fn(),
     getField: vi.fn(),
     revalidateField: vi.fn(),
     isAutoDuplicationEnabled: vi.fn(() => true),
   }));
 
-vi.mock('$lib/services/contents/collection', () => ({ getCollection }));
-vi.mock('$lib/services/contents/collection/files', () => ({ getCollectionFile }));
+vi.mock('$lib/services/contents/collection/files', () => ({ resolveCollectionAndFile }));
 vi.mock('$lib/services/contents/draft', () => ({ isAutoDuplicationEnabled }));
 vi.mock('$lib/services/contents/entry/fields', () => ({ getField }));
 vi.mock('$lib/services/contents/draft/validate/fields', () => ({ revalidateField }));
@@ -45,11 +45,13 @@ const createDraft = ({ locales = ['en', 'ja'], fileName = undefined, values = {}
 
 describe('contents/draft/create/proxy.svelte', () => {
   beforeEach(() => {
-    getCollection.mockReturnValue({
-      name: 'posts',
-      _i18n: { defaultLocale: 'en', canonicalSlug: { key: 'translationKey' } },
+    resolveCollectionAndFile.mockReturnValue({
+      collection: {
+        name: 'posts',
+        _i18n: { defaultLocale: 'en', canonicalSlug: { key: 'translationKey' } },
+      },
+      collectionFile: undefined,
     });
-    getCollectionFile.mockReturnValue(undefined);
     getField.mockReturnValue(undefined);
     isAutoDuplicationEnabled.mockReturnValue(true);
   });
@@ -214,17 +216,21 @@ describe('contents/draft/create/proxy.svelte', () => {
 
   describe('createProxy', () => {
     it('should return undefined if collection not found', () => {
-      getCollection.mockReturnValue(undefined);
+      resolveCollectionAndFile.mockReturnValue(undefined);
 
       const draft = { collectionName: 'nonexistent', fileName: undefined, isIndexFile: false };
 
       expect(createProxy({ draft, locale: 'en', target: {} })).toBeUndefined();
+      expect(resolveCollectionAndFile).toHaveBeenCalledWith('nonexistent', undefined);
     });
 
     it('should return undefined if collection file not found when fileName is provided', () => {
+      resolveCollectionAndFile.mockReturnValue(undefined);
+
       const draft = { collectionName: 'posts', fileName: 'about', isIndexFile: false };
 
       expect(createProxy({ draft, locale: 'en', target: {} })).toBeUndefined();
+      expect(resolveCollectionAndFile).toHaveBeenCalledWith('posts', 'about');
     });
 
     it('should hold the initial values and reflect updates', () => {
@@ -298,6 +304,35 @@ describe('contents/draft/create/proxy.svelte', () => {
       expect(draft.currentValues.ja.title).toBe('Title');
     });
 
+    it('should duplicate the subfield values of a duplicated List or Object field', () => {
+      /** @type {Record<string, any>} */
+      const fields = {
+        items: { name: 'items', widget: 'list', i18n: 'duplicate' },
+        'items.0.name': { name: 'name', widget: 'string' },
+        'items.0.id': { name: 'id', widget: 'uuid' },
+      };
+
+      getField.mockImplementation(({ keyPath }) => fields[keyPath]);
+
+      // The list item exists in every locale, as the list update adds it to each of them
+      const draft = createDraft({
+        values: {
+          en: { 'items.0.name': '', 'items.0.id': '' },
+          ja: { 'items.0.name': '', 'items.0.id': '' },
+        },
+      });
+
+      draft.currentValues.en['items.0.name'] = 'first';
+      draft.currentValues.en['items.0.id'] = 'abc';
+
+      expect(draft.currentValues.ja['items.0.name']).toBe('first');
+      expect(draft.currentValues.ja['items.0.id']).toBe('abc');
+
+      delete draft.currentValues.en['items.0.id'];
+
+      expect('items.0.id' in draft.currentValues.ja).toBe(false);
+    });
+
     it('should not duplicate values when auto-duplication is suspended', () => {
       getField.mockReturnValue({ widget: 'string', i18n: 'duplicate' });
       isAutoDuplicationEnabled.mockReturnValue(false);
@@ -358,13 +393,15 @@ describe('contents/draft/create/proxy.svelte', () => {
     });
 
     it('should use the collection file’s i18n config when available', () => {
-      getCollection.mockReturnValue({
-        name: 'pages',
-        _i18n: { defaultLocale: 'en', canonicalSlug: { key: 'id' } },
-      });
-      getCollectionFile.mockReturnValue({
-        name: 'about',
-        _i18n: { defaultLocale: 'fr', canonicalSlug: { key: 'customKey' } },
+      resolveCollectionAndFile.mockReturnValue({
+        collection: {
+          name: 'pages',
+          _i18n: { defaultLocale: 'en', canonicalSlug: { key: 'id' } },
+        },
+        collectionFile: {
+          name: 'about',
+          _i18n: { defaultLocale: 'fr', canonicalSlug: { key: 'customKey' } },
+        },
       });
       getField.mockReturnValue({ widget: 'string', i18n: 'duplicate' });
 
@@ -396,13 +433,43 @@ describe('contents/draft/create/proxy.svelte', () => {
       });
     });
 
-    it('should not revalidate when the field is unknown', () => {
+    it('should revalidate a deleted field in real time', () => {
+      const draft = createDraft({ values: { en: { 'tags.0': 'a', 'tags.1': 'b' }, ja: {} } });
+
+      // e.g. the last item of a List field without subfields, which has no field of its own; the
+      // revalidation tells the list from the item’s key path
+      delete draft.currentValues.en['tags.1'];
+
+      expect(draft.currentValues.en['tags.1']).toBeUndefined();
+      expect(revalidateField).toHaveBeenCalledOnce();
+      expect(revalidateField).toHaveBeenCalledWith({
+        draft,
+        locale: 'en',
+        keyPath: 'tags.1',
+        value: undefined,
+        valueMap: draft.currentValues.en,
+      });
+    });
+
+    it('should skip revalidation for the deleted canonical slug field', () => {
+      const draft = createDraft({ values: { en: { translationKey: 'abc' }, ja: {} } });
+
+      delete draft.currentValues.en.translationKey;
+
+      expect(draft.currentValues.en.translationKey).toBeUndefined();
+      expect(revalidateField).not.toHaveBeenCalled();
+    });
+
+    it('should leave a value without a field of its own to the revalidation to tell', () => {
       const draft = createDraft();
 
-      draft.currentValues.en.unknown = 'Value';
+      // e.g. a KeyValue pair, which is validated as part of its field
+      draft.currentValues.en['metadata.size'] = 'L';
 
-      expect(draft.currentValues.en.unknown).toBe('Value');
-      expect(revalidateField).not.toHaveBeenCalled();
+      expect(draft.currentValues.en['metadata.size']).toBe('L');
+      expect(revalidateField).toHaveBeenCalledWith(
+        expect.objectContaining({ keyPath: 'metadata.size', value: 'L' }),
+      );
     });
 
     it('should use getValueMap function when provided', () => {
@@ -464,6 +531,53 @@ describe('contents/draft/create/proxy.svelte', () => {
 
       expect(draft.currentValues.en.other).toBeUndefined();
       expect(draft.currentValues.ja.other).toBe('x');
+    });
+  });
+
+  describe('isDuplicatedField', () => {
+    /** @type {Record<string, any>} */
+    const fields = {
+      title: { name: 'title', widget: 'string', i18n: true },
+      meta: { name: 'meta', widget: 'object', i18n: 'duplicate' },
+      'meta.caption': { name: 'caption', widget: 'string', i18n: true },
+      'meta.box': { name: 'box', widget: 'object', i18n: true },
+      'meta.box.note': { name: 'note', widget: 'string' },
+      'meta.tags': { name: 'tags', widget: 'list' },
+      'meta.tags.0.label': { name: 'label', widget: 'string' },
+      blocks: { name: 'blocks', widget: 'list', i18n: true },
+      'blocks.0.text': { name: 'text', widget: 'string' },
+    };
+
+    beforeEach(() => {
+      getField.mockImplementation(({ keyPath }) => fields[keyPath]);
+    });
+
+    /**
+     * Check the field at the given key path.
+     * @param {string} keyPath Key path.
+     * @returns {boolean} Result.
+     */
+    const check = (keyPath) =>
+      isDuplicatedField({
+        fieldConfig: fields[keyPath],
+        getFieldArgs: { collectionName: 'posts', keyPath },
+      });
+
+    it('should detect the field’s own duplicate strategy', () => {
+      expect(check('meta')).toBe(true);
+      expect(check('title')).toBe(false);
+    });
+
+    it('should let an explicit `i18n` option of the field or a nearer ancestor win', () => {
+      expect(check('meta.caption')).toBe(false);
+      expect(check('meta.box.note')).toBe(false);
+    });
+
+    it('should detect a duplicated ancestor, skipping the list item indexes', () => {
+      expect(check('meta.tags')).toBe(true);
+      expect(check('meta.tags.0.label')).toBe(true);
+      expect(check('blocks.0.text')).toBe(false);
+      expect(getField).not.toHaveBeenCalledWith(expect.objectContaining({ keyPath: 'blocks.0' }));
     });
   });
 });

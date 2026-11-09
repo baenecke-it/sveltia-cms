@@ -8,10 +8,12 @@
   import { CodeEditor } from '@sveltia/ui';
   import { sleep } from '@sveltia/utils/misc';
   import { isObject } from '@sveltia/utils/object';
-  import { getContext } from 'svelte';
+  import { getContext, tick } from 'svelte';
 
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
-  import { getValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
+  import { deferDraftWrite } from '$lib/services/contents/draft/update/deferred';
+  import { getFieldValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
+  import { trackPendingFieldUpdate } from '$lib/services/contents/editor/pending';
   import { watch } from '$lib/services/utils/state.svelte';
 
   /**
@@ -46,6 +48,7 @@
 
   let code = $state('');
   let lang = $state('');
+  let pending = $state(false);
 
   const {
     default_language: defaultLanguage = 'plain',
@@ -53,7 +56,9 @@
     output_code_only: outputCodeOnly = false,
     keys: outputKeys = { code: 'code', lang: 'lang' },
   } = $derived(fieldConfig);
-  const valueMap = $derived(getValueMapSnapshot(entryDraft.current, locale, valueStoreKey));
+  const valueMap = $derived(
+    getFieldValueMapSnapshot(entryDraft.current, locale, keyPath, valueStoreKey),
+  );
   const codeKeyPath = $derived(`${keyPath}.${outputKeys.code}`);
   const langKeyPath = $derived(`${keyPath}.${outputKeys.lang}`);
 
@@ -106,17 +111,31 @@
       return;
     }
 
+    /** @type {Record<string, any>} */
+    const updates = {};
+
     if (!isObject(valueMap[keyPath]) || Object.keys(valueMap[keyPath]).length) {
-      draft[valueStoreKey][locale][keyPath] = {};
+      updates[keyPath] = {};
     }
 
     if (valueMap[codeKeyPath] !== code) {
-      draft[valueStoreKey][locale][codeKeyPath] = code;
+      updates[codeKeyPath] = code;
     }
 
     if (valueMap[langKeyPath] !== lang) {
-      draft[valueStoreKey][locale][langKeyPath] = lang;
+      updates[langKeyPath] = lang;
     }
+
+    if (!Object.keys(updates).length) {
+      return;
+    }
+
+    const valueStore = draft[valueStoreKey][locale];
+
+    // This runs from an effect, so the write to the draft is deferred
+    deferDraftWrite(() => {
+      Object.assign(valueStore, updates);
+    });
   };
 
   watch(
@@ -132,6 +151,27 @@
       setCurrentValue();
     },
   );
+
+  // While the editor holds a change made by the user, register it as a pending update: the editor
+  // passes the code on with a short delay, so a save right after a change would otherwise validate
+  // and write the previous value
+  $effect(() => {
+    if (!pending) {
+      return undefined;
+    }
+
+    /** @type {PromiseWithResolvers<void>} */
+    const { promise, resolve } = Promise.withResolvers();
+
+    trackPendingFieldUpdate(promise);
+
+    // Settle once the value has reached the draft, which `setCurrentValue()` writes in a microtask,
+    // or when the editor goes away
+    return async () => {
+      await tick();
+      resolve();
+    };
+  });
 </script>
 
 {#await sleep() then}
@@ -143,6 +183,7 @@
     <CodeEditor
       bind:code
       bind:lang
+      bind:pending
       {showLanguageSwitcher}
       flex
       {readonly}

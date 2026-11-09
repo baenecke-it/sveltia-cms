@@ -6,31 +6,29 @@
 -->
 <script>
   import { _ } from '@sveltia/i18n';
-  import { Button, Checkbox, Icon } from '@sveltia/ui';
-  import { toRaw } from '@sveltia/utils/object';
+  import { Checkbox } from '@sveltia/ui';
   import { getContext, onMount, tick } from 'svelte';
 
+  import RemoveButton from '$lib/components/common/remove-button.svelte';
   import AddItemButton from '$lib/components/contents/details/fields/object/add-item-button.svelte';
   import ObjectBody from '$lib/components/contents/details/fields/object/object-body.svelte';
   import ObjectHeader from '$lib/components/contents/details/fields/object/object-header.svelte';
-  import { suspendAutoDuplication } from '$lib/services/contents/draft';
-  import { getDefaultValues } from '$lib/services/contents/draft/defaults';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
-  import {
-    copyDefaultLocaleValues,
-    forEachTargetLocale,
-  } from '$lib/services/contents/draft/update/locale';
-  import { getValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
+  import { addObjectFields, removeObjectFields } from '$lib/services/contents/draft/update/object';
+  import { getFieldValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
   import {
     getInitialExpanderState,
+    isExpanded,
     syncExpanderStates,
   } from '$lib/services/contents/editor/fields';
   import { getKeysByPrefix } from '$lib/services/contents/entry/key-paths';
   import {
     formatSummary,
-    getUnknownTypeMessage,
+    getTypedSubKeyPath,
+    resolveVariableType,
+    warnUnknownType,
   } from '$lib/services/contents/fields/object/helpers';
-  import { getObjectThumbnail } from '$lib/services/contents/fields/object/thumbnail';
+  import { getDraftObjectThumbnail } from '$lib/services/contents/fields/object/thumbnail';
 
   /**
    * @import {
@@ -73,14 +71,21 @@
     fieldLabel,
     fieldConfig,
     required = true,
+    // `FieldEditor` only renders the editor in a locale where the field is shown, and makes it
+    // read-only in a locale whose values follow the default locale
+    readonly = false,
     /* eslint-enable prefer-const */
   } = $props();
 
   const fieldId = $props.id();
 
+  /** @type {HTMLElement | undefined} */
+  let wrapper = $state();
+  /** @type {AddItemButton | undefined} */
+  let addItemButton = $state();
+
   const {
     name: fieldName,
-    i18n = false,
     // Field type-specific options
     collapsed,
     summary,
@@ -93,8 +98,9 @@
   const collectionName = $derived(entryDraft.current?.collectionName ?? '');
   /* v8 ignore stop */
   const fileName = $derived(entryDraft.current?.fileName);
-  const defaultLocale = $derived(entryDraft.current?.defaultLocale);
-  const valueMap = $derived(getValueMapSnapshot(entryDraft.current, locale, valueStoreKey));
+  const valueMap = $derived(
+    getFieldValueMapSnapshot(entryDraft.current, locale, keyPath, valueStoreKey),
+  );
   const getFieldArgs = $derived({ collectionName, fileName, valueMap, isIndexFile });
   // Ask the shared key path index rather than scanning the whole value map: the editor renders one
   // component per field, and a large entry would otherwise be walked once per Object field on
@@ -102,23 +108,16 @@
   const hasValues = $derived(
     getKeysByPrefix(valueMap, `${keyPath}.`).some((_keyPath) => valueMap[_keyPath] !== undefined),
   );
-  const canEdit = $derived(
-    fieldContext === 'rich-text-editor-component' || locale === defaultLocale || i18n !== false,
-  );
   const parentExpandedKeyPath = $derived(`${keyPath}#`);
-  const parentExpanded = $derived(
-    entryDraft.current?.expanderStates?._[parentExpandedKeyPath] ?? true,
-  );
+  const parentExpanded = $derived(isExpanded(entryDraft.current, parentExpandedKeyPath));
   const hasVariableTypes = $derived(Array.isArray(types));
   const typeKeyPath = $derived(`${keyPath}.${typeKey}`);
   /* v8 ignore start -- only read for an object with variable types */
   const type = $derived(hasVariableTypes ? valueMap[typeKeyPath] : undefined);
   /* v8 ignore stop */
-  const typeConfig = $derived(type ? types?.find(({ name }) => name === type) : undefined);
-  const unknownType = $derived(hasVariableTypes && !typeConfig);
-  const subFields = $derived((hasVariableTypes ? typeConfig?.fields : fields) ?? []);
-  const summaryTemplate = $derived(hasVariableTypes ? typeConfig?.summary || summary : summary);
-  const addButtonDisabled = $derived(locale !== defaultLocale && i18n === 'duplicate');
+  const { typeConfig, unknownType, subFields, summaryTemplate } = $derived(
+    resolveVariableType({ types: hasVariableTypes ? types : undefined, fields, summary, type }),
+  );
 
   /**
    * Initialize the expander state.
@@ -143,73 +142,55 @@
    * @param {object} [args] Arguments.
    * @param {string} [args.type] Variable type name. If the field doesn’t have variable types, it
    * will be `undefined`.
-   * @returns {Promise<void>} A promise that resolves once the fields have been added.
    */
-  const addFields = async ({ type: _type } = {}) =>
-    // Avoid triggering the Proxy’s i18n duplication strategy for descendant fields. The suspension
-    // has to span the `await` below, because the values are written after it
-    suspendAutoDuplication(async () => {
-      const draft = entryDraft.current;
+  const addFields = ({ type: _type } = {}) => {
+    const draft = entryDraft.current;
 
-      /* v8 ignore next 3 -- the button is only offered while the draft is there */
-      if (!draft) {
-        return;
-      }
+    /* v8 ignore next 3 -- the button is only offered while the draft is there */
+    if (!draft) {
+      return;
+    }
 
-      if (_type) {
-        forEachTargetLocale({ valueStore: draft[valueStoreKey], locale, i18n }, (_valueMap) => {
-          _valueMap[typeKeyPath] = _type;
-        });
-
-        // Wait until `subFields` is updated
-        await tick();
-      }
-
-      const newContent = Object.fromEntries(
-        Object.entries(
-          getDefaultValues({ fields: subFields, locale, defaultLocale: draft.defaultLocale }),
-        ) //
-          .map(([_keyPath, value]) => [`${keyPath}.${_keyPath}`, value]),
-      );
-
-      const newValueMap =
-        locale === defaultLocale
-          ? newContent
-          : copyDefaultLocaleValues({
-              draft,
-              content: newContent,
-              targetLanguage: locale,
-              keyPathPrefix: keyPath,
-            });
-
-      forEachTargetLocale({ valueStore: draft[valueStoreKey], locale, i18n }, (_valueMap) => {
-        // Apply the new values through the Proxy
-        Object.assign(_valueMap, toRaw({ ...newValueMap, ..._valueMap }));
-
-        // Disable validation
-        delete _valueMap[keyPath];
-      });
-    });
+    addObjectFields({ draft, valueStoreKey, locale, keyPath, fieldConfig, type: _type });
+  };
 
   /**
    * Remove the object’s subfields from the entry draft.
    */
   const removeFields = () => {
-    forEachTargetLocale(
-      { valueStore: entryDraft.current?.[valueStoreKey], locale, i18n },
-      (_valueMap) => {
-        // Assign `null` before deleting each property, so the draft proxy can revalidate the field.
-        // The value map is the draft’s live map, which is mutated right below, so its key paths
-        // have to be read as they are right now
-        getKeysByPrefix(_valueMap, `${keyPath}.`, { live: true }).forEach((_keyPath) => {
-          _valueMap[_keyPath] = null;
-          delete _valueMap[_keyPath];
-        });
+    removeObjectFields({
+      // The Remove button is only offered while the draft is there
+      draft: /** @type {EntryDraft} */ (entryDraft.current),
+      valueStoreKey,
+      locale,
+      keyPath,
+      fieldConfig,
+    });
+  };
 
-        // Enable validation
-        _valueMap[keyPath] = null;
-      },
-    );
+  /**
+   * Add the subfields of the type picked from the Add menu. The menu button is gone along with the
+   * menu once the object takes its place, so move the focus to the object’s expander button. The
+   * header is hidden within a single-subfield list, whose item has an expander of its own.
+   * @param {object} args Arguments.
+   * @param {string} [args.type] Variable type name.
+   */
+  const addTypedFields = async ({ type: _type }) => {
+    addFields({ type: _type });
+    await tick();
+    /** @type {HTMLElement | null} */ (
+      /** @type {HTMLElement} */ (wrapper).querySelector(':scope > .header button')
+    )?.focus();
+  };
+
+  /**
+   * Remove the subfields of an object with variable types. The focused Remove button is gone along
+   * with them, so move the focus to the Add button that takes the object’s place.
+   */
+  const removeTypedFields = async () => {
+    removeFields();
+    await tick();
+    /** @type {AddItemButton} */ (addItemButton).focus();
   };
 
   /**
@@ -223,34 +204,32 @@
    * @returns {MediaFieldSource | undefined} Thumbnail.
    */
   const getThumbnail = () =>
-    getObjectThumbnail({
+    getDraftObjectThumbnail({
+      draft: entryDraft.current,
       thumbnailFieldName,
       keyPath,
-      typedKeyPath: type ? `${typedKeyPath}<${type}>` : typedKeyPath,
-      collectionName,
-      fileName,
+      typedKeyPath,
+      type,
       componentName,
       valueMap,
-      isIndexFile,
-      entry: entryDraft.current?.originalEntry,
-      files: entryDraft.current?.files,
+      locale,
     });
 
-  /**
-   * Warn about unknown variable type.
-   */
-  const warnUnknownType = () => {
-    const message = getUnknownTypeMessage({ fieldType: 'object', type, typeKey, types });
-
-    // eslint-disable-next-line no-console
-    console.warn(`List item ${keyPath}: ${message}`);
-  };
+  // Worked out only while the object is collapsed, and shared with the body showing them
+  const summaryText = $derived(_formatSummary());
+  const thumbnailSource = $derived(getThumbnail());
+  const summaryId = `object-${fieldId}-summary`;
+  // The summary labels the object while collapsed, but the body only renders it for a known type
+  // if there’s something to show
+  const labelledBy = $derived(
+    !parentExpanded && !unknownType && (summaryText || thumbnailSource) ? summaryId : undefined,
+  );
 
   onMount(() => {
     initializeExpanderState();
 
-    if (canEdit && hasValues && unknownType) {
-      warnUnknownType();
+    if (hasValues && unknownType) {
+      warnUnknownType({ fieldType: 'object', keyPath, type, typeKey, types });
     }
   });
 </script>
@@ -259,7 +238,7 @@
   <Checkbox
     label={_('add_x', { values: { name: fieldLabel || fieldName } })}
     checked={hasValues}
-    disabled={addButtonDisabled}
+    disabled={readonly}
     onChange={({ detail: { checked } }) => {
       if (checked) {
         addFields();
@@ -271,16 +250,22 @@
 {/if}
 
 {#if hasVariableTypes && !hasValues}
-  <AddItemButton disabled={addButtonDisabled} {fieldConfig} addItem={addFields} />
+  <AddItemButton
+    bind:this={addItemButton}
+    disabled={readonly}
+    {fieldConfig}
+    addItem={(args) => addTypedFields(/** @type {{ type: string }} */ (args))}
+  />
 {/if}
 
-{#if (!(!required || hasVariableTypes) || hasValues) && canEdit}
+{#if !(!required || hasVariableTypes) || hasValues}
   <div
+    bind:this={wrapper}
     role="group"
     class="wrapper"
     class:unknown-type={unknownType}
     class:expanded={parentExpanded}
-    aria-labelledby={parentExpanded ? undefined : `object-${fieldId}-summary`}
+    aria-labelledby={labelledBy}
   >
     {#if !hideHeader}
       <ObjectHeader
@@ -297,19 +282,12 @@
       >
         {#snippet endContent()}
           {#if hasVariableTypes}
-            <Button
-              size="small"
-              iconic
-              disabled={addButtonDisabled}
-              aria-label={_('remove')}
+            <RemoveButton
+              disabled={readonly}
               onclick={() => {
-                removeFields();
+                removeTypedFields();
               }}
-            >
-              {#snippet startIcon()}
-                <Icon name="close" />
-              {/snippet}
-            </Button>
+            />
           {/if}
         {/snippet}
       </ObjectHeader>
@@ -320,16 +298,13 @@
         {subFields}
         getSubFieldProps={(subField) => ({
           keyPath: `${keyPath}.${subField.name}`,
-          typedKeyPath:
-            hasVariableTypes && type
-              ? `${typedKeyPath}<${type}>.${subField.name}`
-              : `${keyPath}.${subField.name}`,
+          typedKeyPath: getTypedSubKeyPath({ typedKeyPath, type, subFieldName: subField.name }),
         })}
         expanded={parentExpanded}
         {unknownType}
-        getSummary={_formatSummary}
-        {getThumbnail}
-        summaryId="object-{fieldId}-summary"
+        getSummary={() => summaryText}
+        getThumbnail={() => thumbnailSource}
+        {summaryId}
       />
     </div>
   </div>

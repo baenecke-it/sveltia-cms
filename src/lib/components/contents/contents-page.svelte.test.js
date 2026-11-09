@@ -5,11 +5,8 @@ import { render } from 'vitest-browser-svelte';
 import { announcedPageStatus, mainAreaTitle } from '$lib/services/app/navigation';
 import { backendName } from '$lib/services/backends';
 import { selectedCollection } from '$lib/services/contents/collection';
-import {
-  contentUpdatesToast,
-  UPDATE_TOAST_DEFAULT_STATE,
-} from '$lib/services/contents/collection/data';
 import { entryListSettings } from '$lib/services/contents/collection/view/settings';
+import { backupToastState, showBackupToastIfNeeded } from '$lib/services/contents/draft/backup';
 import { showContentOverlay } from '$lib/services/contents/editor';
 import { entryEditorSettings } from '$lib/services/contents/editor/settings';
 import { searchMode, searchTerms } from '$lib/services/search';
@@ -30,6 +27,7 @@ vi.mock('$lib/services/contents/draft/backup', async () => {
   return {
     restoreDialogState: createDeepState({ show: false }),
     backupToastState: createDeepState({ saved: false, restored: false, deleted: false }),
+    cancelBackup: vi.fn(),
     deleteBackup: vi.fn(),
     getBackup: vi.fn(),
     getBackupSlug: vi.fn(() => ''),
@@ -67,7 +65,6 @@ describe('ContentsPage', () => {
     entryEditorSettings.current = { showPreview: true, showSecondPane: true };
     selectedCollection.current = undefined;
     showContentOverlay.current = false;
-    contentUpdatesToast.current = { ...UPDATE_TOAST_DEFAULT_STATE };
     backendName.current = undefined;
   });
 
@@ -99,6 +96,32 @@ describe('ContentsPage', () => {
       .element(page.getByRole('main', { name: '\u2068Pages\u2069 Collection' }))
       .toBeInTheDocument();
     expect(selectedCollection.current?.name).toBe('pages');
+  });
+
+  test('shows the entry list toolbar for a collection holding only drafts', async () => {
+    setEntries([]);
+    unpublishedEntries.current = [
+      /** @type {any} */ ({
+        ...createMockEntry({ slug: 'draft', content: { _default: { title: 'Draft' } } }),
+        workflow: {
+          status: 'draft',
+          collectionName: 'posts',
+          pullRequest: { number: 1, branch: 'cms/posts/draft' },
+        },
+      }),
+    ];
+    window.location.hash = '#/collections/posts';
+
+    try {
+      await render(ContentsPage);
+
+      const area = page.getByRole('main', { name: '\u2068Posts\u2069 Collection' });
+
+      await expect.element(area.getByRole('row', { name: 'Draft' })).toBeVisible();
+      await expect.element(area.getByRole('toolbar', { name: 'Entry List' })).toBeInTheDocument();
+    } finally {
+      unpublishedEntries.current = [];
+    }
   });
 
   test('redirects the index to the first collection on a large screen', async () => {
@@ -135,6 +158,31 @@ describe('ContentsPage', () => {
     await editor.getByRole('button', { name: 'Cancel Editing' }).click();
     await expect.poll(() => window.location.hash).toBe('#/collections/posts');
     await expect.poll(() => showContentOverlay.current).toBe(false);
+  });
+
+  test('tells the user about the draft backup once the editor is closed', async () => {
+    vi.mocked(showBackupToastIfNeeded).mockImplementationOnce(async () => {
+      backupToastState.current.saved = true;
+    });
+    window.location.hash = '#/collections/posts/entries/hello';
+
+    await render(ContentsPage);
+
+    const editor = page.getByRole('group', { name: 'Content Editor' });
+
+    await expect.element(editor.getByRole('textbox', { name: 'title' })).toHaveValue('Hello');
+    // Nothing to tell while the entry is open
+    expect(showBackupToastIfNeeded).not.toHaveBeenCalled();
+
+    await editor.getByRole('button', { name: 'Cancel Editing' }).click();
+    await expect.poll(() => showContentOverlay.current).toBe(false);
+    expect(showBackupToastIfNeeded).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ collectionName: 'posts' }),
+    );
+    // The toast outlives the overlay
+    await expect.element(page.getByRole('status')).toMatchTextContent('Draft backup saved.');
+    await waitForToastsToHide();
+    expect(backupToastState.current.saved).toBe(false);
   });
 
   test('waits for the drafts before opening a deep link with Editorial Workflow', async () => {
@@ -204,50 +252,4 @@ describe('ContentsPage', () => {
       .element(page.getByRole('grid', { name: 'Entries' }).getByRole('row', { name: /Hello/ }))
       .toBeInTheDocument();
   });
-
-  test('reports the content updates', async () => {
-    window.location.hash = '#/collections/posts';
-
-    await render(ContentsPage);
-
-    contentUpdatesToast.current = {
-      ...UPDATE_TOAST_DEFAULT_STATE,
-      count: 2,
-      saved: true,
-      published: true,
-    };
-    await expect
-      .element(page.getByRole('status'))
-      .toHaveTextContent('check_circle Success 2 entries saved and published.');
-    // The toast goes away on its own, resetting the state
-    await waitForToastsToHide();
-    expect(contentUpdatesToast.current.saved).toBe(false);
-
-    contentUpdatesToast.current = {
-      ...UPDATE_TOAST_DEFAULT_STATE,
-      count: 1,
-      deleted: true,
-      deletionPending: true,
-    };
-    await expect
-      .element(page.getByRole('status'))
-      .toHaveTextContent('check_circle Success Entry marked for deletion.');
-    await waitForToastsToHide();
-
-    contentUpdatesToast.current = { ...UPDATE_TOAST_DEFAULT_STATE, count: 1, discarded: true };
-    await expect
-      .element(page.getByRole('status'))
-      .toHaveTextContent('check_circle Success Changes discarded.');
-    await waitForToastsToHide();
-
-    contentUpdatesToast.current = {
-      ...UPDATE_TOAST_DEFAULT_STATE,
-      count: 1,
-      deletionCancelled: true,
-    };
-    await expect
-      .element(page.getByRole('status'))
-      .toHaveTextContent('check_circle Success Deletion cancelled.');
-    await waitForToastsToHide();
-  }, 40000);
 });

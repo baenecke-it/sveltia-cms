@@ -2,8 +2,8 @@ import { beforeAll, beforeEach, describe, expect, test } from 'vitest';
 import { page } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
-import { focusedAsset, uploadingAssets } from '$lib/services/assets';
 import { globalAssetFolder, selectedAssetFolder } from '$lib/services/assets/folders';
+import { focusedAsset, uploadingAssets } from '$lib/services/assets/state';
 import { focusedSubfolder, selectedSubfolderPath } from '$lib/services/assets/subfolders';
 import { currentView } from '$lib/services/assets/view/settings';
 import { forkedRepository } from '$lib/services/workflow/open-authoring';
@@ -106,6 +106,17 @@ describe('AssetList', () => {
   test('doesn’t offer to upload while contributing via a fork', async () => {
     setAssets([]);
     forkedRepository.current = /** @type {any} */ ({ owner: 'me', repo: 'site' });
+
+    await render(AssetList);
+
+    await expect.element(page.getByText('No files found.')).toBeInTheDocument();
+    expect(page.getByRole('button').elements()).toHaveLength(0);
+  });
+
+  test('doesn’t offer to upload within a folder the CMS is served from', async () => {
+    setAssets([]);
+    selectedAssetFolder.current = globalAssetFolder.current;
+    selectedSubfolderPath.current = 'admin';
 
     await render(AssetList);
 

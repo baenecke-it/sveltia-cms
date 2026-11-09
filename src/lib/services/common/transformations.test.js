@@ -1,8 +1,10 @@
 import dayjs from 'dayjs';
 import dayjsTimeZone from 'dayjs/plugin/timezone';
-import { describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 
+import { customStringTransformationRegistry } from '$lib/services/api/registries';
 import {
+  applyCustomTransformation,
   applyDateTransformation,
   applyDefaultTransformation,
   applyLowerCaseTransformation,
@@ -13,6 +15,7 @@ import {
   parseTransformations,
   ternaryTransformation,
 } from '$lib/services/common/transformations';
+import { getDate } from '$lib/services/contents/fields/date-time/parse';
 
 dayjs.extend(dayjsTimeZone);
 dayjs.tz.setDefault('America/New_York');
@@ -43,6 +46,101 @@ describe('Test parseTransformations()', () => {
         { method: 'default', args: { defaultValue: 'Untitled' } },
       ],
     });
+  });
+
+  test('does not split at a pipe within a quoted argument', () => {
+    expect(
+      parseTransformations(
+        "title | default('Untitled | Draft') | ternary('A | B', 'C|D') | truncate(5, '|')",
+      ),
+    ).toEqual({
+      value: 'title',
+      transformations: [
+        { method: 'default', args: { defaultValue: 'Untitled | Draft' } },
+        { method: 'ternary', args: { truthyValue: 'A | B', falsyValue: 'C|D' } },
+        { method: 'truncate', args: { max: '5', ellipsis: '|' } },
+      ],
+    });
+  });
+
+  test('does not treat an apostrophe within an argument as a closing quote', () => {
+    expect(parseTransformations("title | default('Don't | Stop') | upper")).toEqual({
+      value: 'title',
+      transformations: [
+        { method: 'default', args: { defaultValue: "Don't | Stop" } },
+        { method: 'upper', args: {} },
+      ],
+    });
+  });
+});
+
+describe('Test parseTransformations() with transformations that are not built-in', () => {
+  test('parses a transformation without arguments', () => {
+    expect(parseTransformations('title | reverse | shout()')).toEqual({
+      value: 'title',
+      transformations: [
+        { method: 'reverse', args: {} },
+        { method: 'shout', args: {}, customArgs: [] },
+      ],
+    });
+  });
+
+  test('parses string and numeric arguments', () => {
+    expect(
+      parseTransformations("title | wrap('[', ']') | pad(10, '-1', -2.5,'x') | quote('')"),
+    ).toEqual({
+      value: 'title',
+      transformations: [
+        { method: 'wrap', args: {}, customArgs: ['[', ']'] },
+        { method: 'pad', args: {}, customArgs: [10, '-1', -2.5, 'x'] },
+        { method: 'quote', args: {}, customArgs: [''] },
+      ],
+    });
+  });
+
+  test('keeps a pipe, comma, parenthesis, apostrophe or nested tag within a string argument', () => {
+    expect(
+      parseTransformations("title | join('a | b', 'c, d)', 'Don't', '{{fields.title}}')"),
+    ).toEqual({
+      value: 'title',
+      transformations: [
+        {
+          method: 'join',
+          args: {},
+          customArgs: ['a | b', 'c, d)', "Don't", '{{fields.title}}'],
+        },
+      ],
+    });
+  });
+
+  test('leaves a transformation with invalid arguments unparsed', () => {
+    ['wrap(foo)', "wrap('a',)", "wrap(,'a')", "wrap('a)", 'wrap(1.)', 'wrap(1)(2)'].forEach(
+      (transformation) => {
+        expect(parseTransformations(`title | ${transformation}`).transformations).toEqual([
+          { method: transformation, args: {} },
+        ]);
+      },
+    );
+  });
+
+  test('leaves a transformation with an invalid name unparsed', () => {
+    expect(parseTransformations("title | 1wrap('a') | my-wrap").transformations).toEqual([
+      { method: "1wrap('a')", args: {} },
+      { method: 'my-wrap', args: {} },
+    ]);
+  });
+
+  test('leaves a built-in transformation with invalid arguments unparsed', () => {
+    expect(parseTransformations("title | truncate('a') | upper(1)").transformations).toEqual([
+      { method: "truncate('a')", args: {} },
+      { method: 'upper(1)', args: {} },
+    ]);
+  });
+
+  test('freezes the parsed arguments', () => {
+    const [transformation] = parseTransformations("title | wrap('frozen')").transformations;
+
+    expect(Object.isFrozen(transformation.customArgs)).toBe(true);
   });
 });
 
@@ -238,6 +336,167 @@ describe('Test applyTransformation()', () => {
   });
 });
 
+describe('Test custom transformations', () => {
+  afterEach(() => {
+    customStringTransformationRegistry.clear();
+  });
+
+  test('applies a registered transformation with its arguments and locale', () => {
+    const transform = vi.fn((value, { args: [before, after] }) => `${before}${value}${after}`);
+
+    customStringTransformationRegistry.set('wrap', transform);
+
+    expect(
+      applyTransformation({
+        value: 'Hello',
+        transformation: { method: 'wrap', args: {}, customArgs: Object.freeze(['[', ']']) },
+        locale: 'en',
+      }),
+    ).toBe('[Hello]');
+    expect(transform).toHaveBeenCalledWith('Hello', { args: ['[', ']'], locale: 'en' });
+  });
+
+  test('passes the value as is, an empty argument list and no default locale', () => {
+    const transform = vi.fn((value) => (value ? 'yes' : 'no'));
+
+    customStringTransformationRegistry.set('yesno', transform);
+
+    expect(
+      applyTransformation({
+        value: false,
+        transformation: { method: 'yesno', args: {} },
+        locale: '_default',
+      }),
+    ).toBe('no');
+    expect(transform).toHaveBeenCalledWith(false, { args: [], locale: undefined });
+  });
+
+  test('gives each call its own copy of the arguments', () => {
+    const customArgs = Object.freeze(['a']);
+
+    customStringTransformationRegistry.set('mutate', (value, { args }) => {
+      args.push('b');
+
+      return args.join();
+    });
+
+    const transformation = { method: 'mutate', args: {}, customArgs };
+
+    expect(applyTransformation({ value: '', transformation })).toBe('a,b');
+    expect(applyTransformation({ value: '', transformation })).toBe('a,b');
+  });
+
+  test('converts the return value to a string', () => {
+    customStringTransformationRegistry.set('count', (value) => String(value).length);
+    customStringTransformationRegistry.set('nothing', () => undefined);
+    customStringTransformationRegistry.set('nil', () => null);
+
+    expect(
+      ['count', 'nothing', 'nil'].map((method) =>
+        applyTransformation({ value: 'abc', transformation: { method, args: {} } }),
+      ),
+    ).toEqual(['3', '', '']);
+  });
+
+  test('chains with built-in transformations', () => {
+    customStringTransformationRegistry.set('reverse', (value) =>
+      [...String(value)].reverse().join(''),
+    );
+
+    expect(
+      applyTransformations({
+        value: 'Hello',
+        transformations: parseTransformations('title | reverse | upper | truncate(3)')
+          .transformations,
+      }),
+    ).toBe('OLL…');
+  });
+
+  test('does not override a built-in transformation', () => {
+    customStringTransformationRegistry.set('upper', () => 'custom');
+
+    expect(applyTransformation({ value: 'a', transformation: { method: 'upper', args: {} } })).toBe(
+      'A',
+    );
+  });
+
+  test('logs an error and returns the value if the transformation throws', () => {
+    const error = new Error('Boom');
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const broken = vi.fn(() => {
+      throw error;
+    });
+
+    customStringTransformationRegistry.set('broken', broken);
+
+    expect(applyTransformation({ value: 42, transformation: { method: 'broken', args: {} } })).toBe(
+      '42',
+    );
+    expect(
+      applyTransformation({ value: undefined, transformation: { method: 'broken', args: {} } }),
+    ).toBe('');
+    // The error is logged only once for the function
+    expect(consoleError).toHaveBeenCalledOnce();
+
+    // The same function registered under another name is logged for that name too
+    customStringTransformationRegistry.set('alias', broken);
+
+    expect(applyTransformation({ value: 1, transformation: { method: 'alias', args: {} } })).toBe(
+      '1',
+    );
+    expect(consoleError).toHaveBeenCalledTimes(2);
+    expect(consoleError).toHaveBeenLastCalledWith(
+      'The custom \u201Calias\u201D string transformation failed. Further errors are not logged:',
+      error,
+    );
+    expect(consoleError).toHaveBeenCalledWith(
+      'The custom \u201Cbroken\u201D string transformation failed. Further errors are not logged:',
+      error,
+    );
+
+    consoleError.mockRestore();
+  });
+
+  test('logs an error and returns the value if the transformation returns a Promise', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const promise = Promise.reject(new Error('Rejected'));
+
+    expect(
+      applyCustomTransformation({
+        method: 'async',
+        transform: vi.fn(() => promise),
+        value: 'value',
+      }),
+    ).toBe('value');
+    expect(consoleError).toHaveBeenCalledWith(
+      'The custom \u201Casync\u201D string transformation failed. Further errors are not logged:',
+      expect.objectContaining({ name: 'TypeError' }),
+    );
+    // The rejection is handled
+    await expect(promise.catch(() => 'handled')).resolves.toBe('handled');
+
+    consoleError.mockRestore();
+  });
+
+  test('treats a thenable other than a Promise as an async result', () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const then = vi.fn();
+
+    expect(
+      applyCustomTransformation({
+        method: 'thenable',
+        transform: vi.fn(() => ({ then })),
+        value: 'value',
+      }),
+    ).toBe('value');
+    expect(then).toHaveBeenCalledOnce();
+    expect(consoleError).toHaveBeenCalledOnce();
+
+    consoleError.mockRestore();
+  });
+});
+
 describe('Test applyTransformations()', () => {
   test('applies multiple transformations in sequence', () => {
     expect(
@@ -257,7 +516,7 @@ describe('Test applyTransformations()', () => {
           { method: 'truncate', args: { max: '10' } },
         ],
       }),
-    ).toBe('long tit…');
+    ).toBe('long title…');
   });
 
   test('applies a single transformation', () => {
@@ -394,6 +653,112 @@ describe('Test individual transformation functions', () => {
           '2024-01-23T06:00:00Z',
           { format: 'YYYY-MM-DD' },
           { name: 'date', widget: 'datetime', time_format: false },
+        ),
+      ).toBe('2024-01-23');
+    });
+
+    test('should parse a value in the field’s own format', () => {
+      /** @type {import('$lib/types/public').DateTimeField} */
+      const fieldConfig = { name: 'date', widget: 'datetime', format: 'DD/MM/YYYY' };
+
+      expect(applyDateTransformation('25/12/2024', { format: 'YYYY' }, fieldConfig)).toBe('2024');
+      // Not read as May 12
+      expect(applyDateTransformation('05/12/2024', { format: 'YYYY-MM-DD' }, fieldConfig)).toBe(
+        '2024-12-05',
+      );
+      // In UTC if the field says so
+      expect(
+        applyDateTransformation(
+          '05/12/2024 23:30',
+          { format: 'YYYY-MM-DD HH:mm' },
+          { ...fieldConfig, format: 'DD/MM/YYYY HH:mm', picker_utc: true },
+        ),
+      ).toBe('2024-12-05 23:30');
+    });
+
+    test('should parse a number in the field’s own format', () => {
+      /** @type {import('$lib/types/public').DateTimeField} */
+      const fieldConfig = { name: 'date', widget: 'datetime', format: 'X', picker_utc: true };
+
+      // A Unix timestamp, which the front matter parser reads as a number
+      expect(applyDateTransformation(1700000000, { format: 'YYYY-MM-DD' }, fieldConfig)).toBe(
+        '2023-11-14',
+      );
+    });
+
+    describe('in a field with a custom time zone', () => {
+      /** @type {import('$lib/types/public').DateTimeField} */
+      const fieldConfig = {
+        name: 'date',
+        widget: 'datetime',
+        format: 'YYYY-MM-DD HH:mm',
+        input_timezone: 'Asia/Tokyo',
+      };
+
+      /**
+       * Run a function in the given browser time zone, like `parse.test.js` does. Node reads
+       * `process.env.TZ` again when it’s set, so the local time of a `Date` follows it.
+       * @param {string} timeZone IANA time zone name.
+       * @param {() => void} fn Function to run.
+       */
+      const withTimeZone = (timeZone, fn) => {
+        const { TZ } = process.env;
+
+        process.env.TZ = timeZone;
+
+        try {
+          fn();
+        } finally {
+          process.env.TZ = TZ;
+        }
+      };
+
+      // The stored value is a wall-clock time in the field’s time zone, and it’s formatted as such,
+      // so a slug or path made with `{{date | date('YYYY-MM-DD')}}` doesn’t depend on where the
+      // editor is. `getDate()` must not be used here: it converts the value to an instant, whose
+      // local date in the browser can be a day off, e.g. 23:30 in Tokyo is already the next day
+      // on Kiritimati (UTC+14), and 08:30 in Tokyo is still the previous day in Los Angeles
+      test.each([
+        ['Pacific/Kiritimati', '2024-12-05 23:30', 6],
+        ['America/Los_Angeles', '2024-12-05 08:30', 4],
+        ['UTC', '2024-12-05 23:30', 5],
+      ])(
+        'should keep the stored wall-clock date in the browser time zone %s',
+        (timeZone, value, localDayOfInstant) => {
+          withTimeZone(timeZone, () => {
+            // The browser time zone is in effect: the instant falls on another day there
+            expect(getDate(value, fieldConfig)?.getDate()).toBe(localDayOfInstant);
+            expect(applyDateTransformation(value, { format: 'YYYY-MM-DD' }, fieldConfig)).toBe(
+              '2024-12-05',
+            );
+            expect(
+              applyDateTransformation(value, { format: 'YYYY-MM-DD HH:mm' }, fieldConfig),
+            ).toBe(value);
+            expect(
+              applyTransformations({
+                fieldConfig,
+                value,
+                transformations: [{ method: 'date', args: { format: 'YYYY-MM-DD' } }],
+              }),
+            ).toBe('2024-12-05');
+          });
+        },
+      );
+    });
+
+    test('should fall back to the default parsing if the value doesn’t match the format', () => {
+      /** @type {import('$lib/types/public').DateTimeField} */
+      const fieldConfig = { name: 'date', widget: 'datetime', format: 'DD/MM/YYYY' };
+
+      expect(applyDateTransformation('2024-01-23', { format: 'YYYY-MM-DD' }, fieldConfig)).toBe(
+        '2024-01-23',
+      );
+      // A value that isn’t a string, like a `Date` parsed from front matter
+      expect(
+        applyDateTransformation(
+          new Date('2024-01-23T12:00:00Z'),
+          { format: 'YYYY-MM-DD', timeZone: 'utc' },
+          fieldConfig,
         ),
       ).toBe('2024-01-23');
     });

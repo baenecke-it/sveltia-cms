@@ -4,7 +4,7 @@ import { getValidCollections } from '$lib/services/contents/collection';
 import {
   getValidCollectionFiles,
   isValidCollectionFile,
-} from '$lib/services/contents/collection/files';
+} from '$lib/services/contents/collection/predicates';
 import { getLocalePath } from '$lib/services/contents/i18n';
 import { normalizeI18nConfig } from '$lib/services/contents/i18n/config';
 import { hasLocalePlaceholder } from '$lib/services/contents/i18n/placeholder';
@@ -70,7 +70,14 @@ export const compareFilePath = (a, b) =>
 export const getEntryCollectionFolders = ({ collections }) =>
   getValidCollections({ collections, type: 'entry' })
     .map((collection) => {
-      const { name: collectionName, folder } = /** @type {EntryCollection} */ (collection);
+      const { name: collectionName, folder, file } = /** @type {EntryCollection} */ (collection);
+
+      // All the entries are stored in one file, which is matched by its path like a file
+      // collection’s file. A collection file name is not given, as the file is not one
+      if (typeof file === 'string') {
+        return { collectionName, filePathMap: { _default: stripSlashes(file) } };
+      }
+
       const folderPath = stripSlashes(/** @type {string} */ (folder));
       const _i18n = normalizeI18nConfig(collection);
 
@@ -110,7 +117,11 @@ export const getEntryCollectionFolders = ({ collections }) =>
       };
     })
     .sort((a, b) =>
-      compare(/** @type {string} */ (a.folderPath), /** @type {string} */ (b.folderPath)),
+      // A collection storing all the entries in one file has a file path instead of a folder path
+      compare(
+        a.folderPath ?? /** @type {Record<string, string>} */ (a.filePathMap)._default,
+        b.folderPath ?? /** @type {Record<string, string>} */ (b.filePathMap)._default,
+      ),
     );
 
 /**

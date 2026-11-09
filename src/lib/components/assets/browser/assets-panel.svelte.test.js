@@ -1,4 +1,3 @@
-import { sleep } from '@sveltia/utils/misc';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { page } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
@@ -60,6 +59,16 @@ describe('AssetsPanel', () => {
     ).toHaveTextContent('Unsaved');
   });
 
+  test('names the list after the kind of assets being picked', async () => {
+    const props = $state({ assets, kind: /** @type {'image' | undefined} */ ('image') });
+
+    await render(AssetsPanel, props);
+    await expect.element(page.getByRole('listbox', { name: 'Available Images' })).toBeVisible();
+
+    props.kind = undefined;
+    await expect.element(page.getByRole('listbox', { name: 'Available Files' })).toBeVisible();
+  });
+
   test('lists the subfolders ahead of the assets, opening one on a click', async () => {
     const onOpenSubfolder = vi.fn();
 
@@ -90,7 +99,7 @@ describe('AssetsPanel', () => {
     // Nothing to select in the folders, so the selection of assets is left alone
     expect(
       page
-        .getByRole('listbox', { name: 'Available Images' })
+        .getByRole('listbox', { name: 'Available Files' })
         .getByRole('option', { selected: true })
         .elements(),
     ).toHaveLength(0);
@@ -130,28 +139,37 @@ describe('AssetsPanel', () => {
 
   test('selects a single asset', async () => {
     const onSelect = vi.fn();
-    const props = $state({ assets, selectedResources: [], onSelect });
+    const props = $state({ assets, selectedResources: /** @type {any[]} */ ([]), onSelect });
 
     await render(AssetsPanel, props);
     await expect.poll(() => page.getByRole('option').elements().length).toBe(3);
-    await sleep(150);
 
-    // The listed asset carries its relative path and key
-    /**
-     * Match the listed asset at the given index.
-     * @param {number} index Index.
-     * @returns {any} Matcher.
-     */
-    const listedAsset = (index) =>
-      expect.objectContaining({ path: assets[index].path, relPath: assets[index].name });
-
+    // The original asset object is selected, not a copy
     await getOption(assets[1].path).click();
-    await expect.poll(() => props.selectedResources).toEqual([{ asset: listedAsset(1) }]);
-    expect(onSelect).toHaveBeenCalledWith({ asset: listedAsset(1) });
+    await expect.poll(() => props.selectedResources).toHaveLength(1);
+    expect(props.selectedResources[0].asset).toBe(props.assets[1]);
+    expect(onSelect).toHaveBeenCalledOnce();
+    expect(onSelect.mock.calls[0][0].asset).toBe(props.assets[1]);
 
     // Another selection replaces the previous one
     await getOption(assets[0].path).click();
-    await expect.poll(() => props.selectedResources).toEqual([{ asset: listedAsset(0) }]);
+    await expect.poll(() => props.selectedResources[0]?.asset).toBe(props.assets[0]);
+    expect(props.selectedResources).toHaveLength(1);
+  });
+
+  test('replaces a single selection hidden by a search', async () => {
+    const props = $state({
+      assets,
+      searchTerms: 'logo',
+      selectedResources: /** @type {any[]} */ ([{ asset: assets[0] }]),
+    });
+
+    const { container } = await render(AssetsPanel, props);
+
+    await expect.poll(() => getLabels(container)).toEqual(['logo.png']);
+    await getOption(assets[1].path).click();
+    await expect.poll(() => props.selectedResources[0]?.asset).toBe(props.assets[1]);
+    expect(props.selectedResources).toHaveLength(1);
   });
 
   test('selects multiple assets, keeping the other resources', async () => {
@@ -163,7 +181,6 @@ describe('AssetsPanel', () => {
 
     await render(AssetsPanel, props);
     await expect.poll(() => page.getByRole('option').elements().length).toBe(3);
-    await sleep(150);
 
     /**
      * Get the URLs or paths of the selected resources.

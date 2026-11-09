@@ -4,6 +4,7 @@ import { cmsConfig } from '$lib/services/config';
 import { allCloudStorageServices } from '$lib/services/integrations/media-libraries/cloud';
 import { prefs } from '$lib/services/user/prefs.svelte';
 import { createDerivedState, createRawState } from '$lib/services/utils/state.svelte';
+import { encodePathSegments } from '$lib/services/utils/url';
 
 /**
  * @import {
@@ -62,7 +63,7 @@ export const getCloudServicePath = ({ serviceId }) =>
  * @returns {string} Path, e.g. `/assets/-/aws_s3/images/photo.jpg`.
  */
 export const getExternalAssetPath = (service, { id }) =>
-  `${getCloudServicePath(service)}/${id.split('/').map(encodeURIComponent).join('/')}`;
+  `${getCloudServicePath(service)}/${encodePathSegments(id)}`;
 
 /**
  * Whether the given asset can be previewed in the details overlay: a media file, a PDF document
@@ -71,6 +72,19 @@ export const getExternalAssetPath = (service, { id }) =>
  * @returns {boolean} Result.
  */
 export const canPreviewExternalAsset = ({ kind, fileName }) => canPreviewFile(kind, fileName);
+
+/**
+ * Add newly uploaded assets to the top of a list. A file uploaded under an existing name overwrites
+ * the asset on most services, so an asset with the same ID is replaced rather than listed twice.
+ * @param {ExternalAsset[]} uploaded Uploaded assets.
+ * @param {ExternalAsset[]} assets Assets listed so far.
+ * @returns {ExternalAsset[]} Merged list.
+ */
+export const mergeUploadedExternalAssets = (uploaded, assets) => {
+  const uploadedIds = new Set(uploaded.map(({ id }) => id));
+
+  return [...uploaded, ...assets.filter(({ id }) => !uploadedIds.has(id))];
+};
 
 /**
  * Cloud storage service currently selected in the Asset Library, or `undefined` when a repository
@@ -150,16 +164,62 @@ export const externalAssetCounts = createRawState({});
 export const externalAssetsError = createRawState();
 
 /**
+ * Whether the list of assets stopped short of the end, as the service holds more files than are
+ * listed at once, so the user can be told that some files are left out.
+ * @type {{ current: boolean }}
+ */
+export const externalAssetsTruncated = createRawState(false);
+
+/**
  * Assets selected in the list.
  * @type {{ current: ExternalAsset[] }}
  */
 export const selectedExternalAssets = createRawState([]);
 
 /**
+ * Set of selected asset IDs, for O(1) membership checks in list items.
+ */
+export const selectedExternalAssetIdSet = createDerivedState(
+  () => new Set(selectedExternalAssets.current.map(({ id }) => id)),
+);
+
+/**
  * Asset that has focus in the list, whose details are shown in the Info pane.
  * @type {{ current: ExternalAsset | undefined }}
  */
 export const focusedExternalAsset = createRawState();
+
+/**
+ * Drop the selected and focused assets that fail the given test, e.g. once they have been deleted
+ * or are no longer listed. The selection is only replaced when an asset is actually dropped, so a
+ * caller running in an effect doesn’t invalidate it needlessly.
+ * @param {(id: string) => boolean} keep Function telling whether to keep the asset with the given
+ * ID.
+ */
+export const pruneExternalAssetSelection = (keep) => {
+  const selected = selectedExternalAssets.current;
+  const kept = selected.filter(({ id }) => keep(id));
+
+  if (kept.length !== selected.length) {
+    selectedExternalAssets.current = kept;
+  }
+
+  if (focusedExternalAsset.current && !keep(focusedExternalAsset.current.id)) {
+    focusedExternalAsset.current = undefined;
+  }
+};
+
+/**
+ * Assets the toolbar actions operate on: the selected assets, or else the focused asset, if any.
+ * @type {{ readonly current: ExternalAsset[] }}
+ */
+export const selectedOrFocusedExternalAssets = createDerivedState(() => {
+  if (selectedExternalAssets.current.length) {
+    return [...selectedExternalAssets.current];
+  }
+
+  return focusedExternalAsset.current ? [focusedExternalAsset.current] : [];
+});
 
 /**
  * ID of the asset whose details are shown in the overlay, taken from the URL. The asset itself is
@@ -212,6 +272,7 @@ export const resetExternalAssets = () => {
   externalAssets.current = undefined;
   externalFolders.current = [];
   externalAssetsError.current = undefined;
+  externalAssetsTruncated.current = false;
   selectedExternalAssets.current = [];
   selectedExternalDirPath.current = '';
   focusedExternalAsset.current = undefined;

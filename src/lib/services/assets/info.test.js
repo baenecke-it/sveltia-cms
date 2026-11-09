@@ -3,8 +3,26 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import {
+  _resetAssetBlobCache,
+  _resetRevocationQueue,
+  _resetThumbnailDB,
+  cacheAssetBlob,
+  createDisplayBlobURL,
+  getAssetBlob,
+  getAssetBlobURL,
+  getAssetPublicURL,
+  getAssetThumbnailURL,
+  getDisplayBlob,
+  getFolderPublicPath,
+  hasCachedThumbnail,
+  preloadAssets,
+  revokeAssetBlobURLIfNeeded,
+  revokeBlobURLIfNeeded,
+} from '$lib/services/assets/info';
+import { getMediaFieldURL } from '$lib/services/assets/media-field';
 import * as cloudStorageModule from '$lib/services/integrations/media-libraries/cloud';
-import * as cloudinaryModule from '$lib/services/integrations/media-libraries/cloud/cloudinary';
+import { createMockAssetFolder } from '$lib/test/factories';
 
 import {
   _resetAssetMetadataCache,
@@ -12,22 +30,6 @@ import {
   getAssetDetails,
   getAssetUsedEntries,
 } from './details';
-import {
-  _resetAssetBlobCache,
-  _resetRevocationQueue,
-  _resetThumbnailDB,
-  getAssetBaseURL,
-  getAssetBlob,
-  getAssetBlobURL,
-  getAssetPublicURL,
-  getAssetThumbnailURL,
-  getFolderPublicPath,
-  getMediaFieldSource,
-  getMediaFieldURL,
-  hasCachedThumbnail,
-  revokeAssetBlobURLIfNeeded,
-  revokeBlobURLIfNeeded,
-} from './info';
 
 // Mock all dependencies
 vi.mock('@sveltia/utils/file');
@@ -45,15 +47,18 @@ const mockGlobalAssetFolder = vi.hoisted(() => ({ current: undefined }));
 /** @type {{ current: any[] }} */
 const mockAllAssets = vi.hoisted(() => ({ current: [] }));
 
-vi.mock('@sveltia/i18n', () => ({
-  _: vi.fn((key) => key),
-  addMessages: vi.fn(),
-  locale: { current: 'en', set: vi.fn() },
-  dictionary: {},
-}));
+vi.mock('@sveltia/i18n', async () =>
+  (await import('$lib/test/i18n')).createI18nMock({
+    locale: 'en',
+    exports: { addMessages: vi.fn(), dictionary: {} },
+  }),
+);
 vi.mock('$lib/services/assets', () => ({
   getAssetByPath: vi.fn(),
   isRelativePath: vi.fn((path) => !/^[/@]/.test(path)),
+}));
+
+vi.mock('$lib/services/assets/state', () => ({
   focusedAsset: { current: undefined },
   allAssets: mockAllAssets,
 }));
@@ -68,8 +73,16 @@ vi.mock('$lib/services/assets/folders', () => ({
   globalAssetFolder: mockGlobalAssetFolder,
   selectedAssetFolder: { current: undefined },
 }));
-vi.mock('$lib/services/contents/collection/entries');
-vi.mock('$lib/services/utils/file');
+vi.mock('$lib/services/assets/references');
+vi.mock('$lib/services/utils/file', async (importOriginal) => {
+  const actual = /** @type {Record<string, any>} */ (await importOriginal());
+
+  // Mock every function but the directory name helper, which calls the mocked `getPathInfo()`
+  return {
+    ...Object.fromEntries(Object.keys(actual).map((key) => [key, vi.fn()])),
+    getDirName: actual.getDirName,
+  };
+});
 vi.mock('$lib/services/utils/media');
 vi.mock('$lib/services/utils/media/image/svg');
 vi.mock('$lib/services/utils/media/image/transform');
@@ -107,13 +120,10 @@ describe('assets/info', () => {
       kind: 'image',
       sha: 'abc123',
       size: 1024,
-      folder: {
+      folder: createMockAssetFolder({
         internalPath: 'assets/images',
         publicPath: '/assets/images',
-        collectionName: undefined,
-        entryRelative: false,
-        hasTemplateTags: false,
-      },
+      }),
     };
 
     // Create mock blob
@@ -393,6 +403,80 @@ describe('assets/info', () => {
     });
   });
 
+  describe('getDisplayBlob', () => {
+    it('should wrap an SVG image, whatever the case and parameters of its type', async () => {
+      const { createInertSVG } = await import('$lib/services/utils/media/image/svg');
+      const wrapper = new Blob(['<svg/>'], { type: 'image/svg+xml' });
+
+      vi.mocked(createInertSVG).mockResolvedValue(wrapper);
+
+      const svg = new Blob(['<svg><script/></svg>'], { type: 'image/svg+xml' });
+      const svgWithParams = new Blob(['<svg/>'], { type: 'Image/SVG+XML; charset=utf-8' });
+
+      expect(await getDisplayBlob(svg)).toBe(wrapper);
+      expect(createInertSVG).toHaveBeenCalledWith(svg);
+      expect(await getDisplayBlob(svgWithParams)).toBe(wrapper);
+    });
+
+    it.each([
+      'text/html',
+      'application/xhtml+xml',
+      'text/xml',
+      'application/xml',
+      'application/xslt+xml',
+    ])('should turn a %s document into plain text', async (type) => {
+      const { createInertSVG } = await import('$lib/services/utils/media/image/svg');
+      const blob = new Blob(['<script>alert(1)</script>'], { type });
+      const result = await getDisplayBlob(blob);
+
+      expect(result).not.toBe(blob);
+      expect(result.type).toBe('text/plain');
+      expect(await result.text()).toBe('<script>alert(1)</script>');
+      expect(createInertSVG).not.toHaveBeenCalled();
+    });
+
+    it.each(['image/png', 'application/pdf', 'text/plain', 'video/mp4', ''])(
+      'should leave a %s file as is',
+      async (type) => {
+        const blob = new Blob(['data'], { type });
+
+        expect(await getDisplayBlob(blob)).toBe(blob);
+      },
+    );
+  });
+
+  describe('createDisplayBlobURL', () => {
+    it('should create the URL of the blob to be displayed', async () => {
+      const { createInertSVG } = await import('$lib/services/utils/media/image/svg');
+      const wrapper = new Blob(['<svg/>'], { type: 'image/svg+xml' });
+      const file = new File(['<svg/>'], 'test.svg', { type: 'image/svg+xml' });
+
+      vi.mocked(createInertSVG).mockResolvedValue(wrapper);
+
+      expect(await createDisplayBlobURL(file)).toBe('blob:mock-url');
+      expect(global.URL.createObjectURL).toHaveBeenCalledExactlyOnceWith(wrapper);
+    });
+  });
+
+  describe('cacheAssetBlob', () => {
+    it('should give the asset the URL of the display blob, and keep the original', async () => {
+      const { createInertSVG } = await import('$lib/services/utils/media/image/svg');
+      const wrapper = new Blob(['<svg/>'], { type: 'image/svg+xml' });
+      const file = new File(['<svg><script/></svg>'], 'test.svg', { type: 'image/svg+xml' });
+      const svgAsset = { ...mockAsset, path: 'assets/images/test.svg', name: 'test.svg' };
+
+      vi.mocked(createInertSVG).mockResolvedValue(wrapper);
+      global.fetch = vi.fn();
+
+      expect(await cacheAssetBlob(svgAsset, file)).toBe(file);
+      expect(svgAsset.blobURL).toBe('blob:mock-url');
+      expect(global.URL.createObjectURL).toHaveBeenCalledExactlyOnceWith(wrapper);
+      // The original is read back, not the wrapper behind the URL
+      expect(await getAssetBlob(svgAsset)).toBe(file);
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getAssetBlobURL', () => {
     it('should return existing blobURL if available', async () => {
       const assetWithBlobURL = {
@@ -504,6 +588,7 @@ describe('assets/info', () => {
         width: 512,
         height: 512,
         fit: 'contain',
+        nativeOnly: true,
       });
       expect(mockIndexedDB.set).toHaveBeenCalledWith('abc123', thumbnailBlob);
       expect(result).toBe('blob:mock-url');
@@ -548,6 +633,7 @@ describe('assets/info', () => {
         width: 512,
         height: 512,
         fit: 'contain',
+        nativeOnly: true,
       });
       expect(result).toBe('blob:mock-url');
     });
@@ -623,6 +709,40 @@ describe('assets/info', () => {
       expect(transformImageMock).toHaveBeenCalledTimes(2);
     });
 
+    it('should generate at most four thumbnails at the same time', async () => {
+      mockIndexedDB.get.mockResolvedValue(undefined);
+
+      const { transformImage } = await import('$lib/services/utils/media/image/transform');
+      const thumbnailBlob = new Blob(['thumbnail'], { type: 'image/webp' });
+      /** @type {(() => void)[]} */
+      const pendingTransforms = [];
+
+      // Hold every transformation until released, so the thumbnails in flight can be counted
+      vi.mocked(transformImage).mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            pendingTransforms.push(() => resolve(thumbnailBlob));
+          }),
+      );
+
+      const results = Promise.all(
+        [...Array(6).keys()].map((index) =>
+          getAssetThumbnailURL({
+            ...mockAsset,
+            sha: `sha-${index}`,
+            file: new File(['content'], `test-${index}.jpg`, { type: 'image/jpeg' }),
+          }),
+        ),
+      );
+
+      await vi.waitFor(() => expect(pendingTransforms).toHaveLength(4));
+      pendingTransforms.splice(0).forEach((release) => release());
+      await vi.waitFor(() => expect(pendingTransforms).toHaveLength(2));
+      pendingTransforms.splice(0).forEach((release) => release());
+
+      expect(await results).toEqual(Array(6).fill('blob:mock-url'));
+    });
+
     it('should return undefined when the thumbnail cannot be generated', async () => {
       mockIndexedDB.get.mockResolvedValue(undefined);
 
@@ -636,6 +756,109 @@ describe('assets/info', () => {
       const result = await getAssetThumbnailURL(assetWithFile);
 
       expect(result).toBe(undefined);
+    });
+
+    describe('thumbnail source', () => {
+      /** @type {any} */
+      let transformImageMock;
+      const thumbnailBlob = new Blob(['thumbnail'], { type: 'image/webp' });
+
+      beforeEach(async () => {
+        const { transformImage } = await import('$lib/services/utils/media/image/transform');
+
+        mockIndexedDB.get.mockResolvedValue(undefined);
+        transformImageMock = vi.mocked(transformImage);
+        transformImageMock.mockClear();
+        transformImageMock.mockResolvedValue(thumbnailBlob);
+      });
+
+      it('should not cache a downloaded original on the asset', async () => {
+        const asset = { ...mockAsset };
+
+        mockBackend.fetchBlob.mockResolvedValue(new Blob(['data']));
+
+        await getAssetThumbnailURL(asset);
+
+        const [[source]] = transformImageMock.mock.calls;
+
+        // The MIME type is still derived from the file name
+        expect(source.type).toBe('image/jpeg');
+        expect(asset.blobURL).toBeUndefined();
+        // The only object URL is the thumbnail’s own
+        expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
+        expect(URL.createObjectURL).toHaveBeenCalledWith(thumbnailBlob);
+      });
+
+      it('should not cache a file read from a handle on the asset', async () => {
+        const file = new File(['data'], 'test.jpg', { type: 'image/jpeg' });
+        const asset = { ...mockAsset, handle: { getFile: vi.fn(async () => file) } };
+
+        await getAssetThumbnailURL(asset);
+
+        expect(transformImageMock).toHaveBeenCalledWith(file, expect.any(Object));
+        expect(asset.blobURL).toBeUndefined();
+      });
+
+      it('should not create an object URL for an unsaved file', async () => {
+        const file = new File(['data'], 'test.jpg', { type: 'image/jpeg' });
+        const asset = { ...mockAsset, file };
+
+        await getAssetThumbnailURL(asset);
+
+        expect(transformImageMock).toHaveBeenCalledWith(file, expect.any(Object));
+        expect(asset.blobURL).toBeUndefined();
+      });
+
+      it('should read the blob behind an existing object URL', async () => {
+        const asset = { ...mockAsset, blobURL: 'blob:existing' };
+
+        await getAssetThumbnailURL(asset);
+
+        expect(global.fetch).toHaveBeenCalledWith('blob:existing');
+        expect(transformImageMock).toHaveBeenCalledWith(mockBlob, expect.any(Object));
+        expect(mockBackend.fetchBlob).not.toHaveBeenCalled();
+      });
+
+      it('should join a download already in flight rather than start another', async () => {
+        const asset = { ...mockAsset };
+        /** @type {any} */
+        let resolveDownload;
+
+        mockBackend.fetchBlob.mockReturnValue(
+          new Promise((resolve) => {
+            resolveDownload = resolve;
+          }),
+        );
+
+        // A caller that wants the full-size file starts the download first
+        const blobPromise = getAssetBlob(asset);
+        const urlPromise = getAssetThumbnailURL(asset);
+
+        resolveDownload(new Blob(['data']));
+        await Promise.all([blobPromise, urlPromise]);
+
+        expect(mockBackend.fetchBlob).toHaveBeenCalledTimes(1);
+        expect(transformImageMock).toHaveBeenCalledWith(await blobPromise, expect.any(Object));
+      });
+
+      it('should reject when the handle cannot be read', async () => {
+        const asset = {
+          ...mockAsset,
+          handle: { getFile: vi.fn(async () => Promise.reject(new Error('NotFoundError'))) },
+        };
+
+        await expect(getAssetThumbnailURL(asset)).rejects.toThrow(
+          'Failed to retrieve blob from file handle',
+        );
+      });
+
+      it('should reject when the backend returns no blob', async () => {
+        mockBackend.fetchBlob.mockResolvedValue(null);
+
+        await expect(getAssetThumbnailURL({ ...mockAsset })).rejects.toThrow(
+          'Failed to retrieve blob',
+        );
+      });
     });
 
     describe('hasCachedThumbnail', () => {
@@ -837,6 +1060,41 @@ describe('assets/info', () => {
       expect(result).toBe('test.jpg');
     });
 
+    it('should return the path relative to the given locale’s entry file', async () => {
+      const { getPathInfo } = await import('@sveltia/utils/file');
+
+      vi.mocked(getPathInfo).mockImplementation(
+        (path) => /** @type {any} */ ({ dirname: path.slice(0, path.lastIndexOf('/')) }),
+      );
+
+      // With the `multiple_folders` i18n structure, each locale’s entry file has a folder of its
+      // own, which the locale’s entry-relative assets are stored in
+      const entryRelativeAsset = {
+        ...mockAsset,
+        path: 'content/posts/fr/hello/photo-fr.jpg',
+        name: 'photo-fr.jpg',
+        folder: { ...mockAsset.folder, internalPath: 'content/posts', entryRelative: true },
+      };
+
+      const mockEntry = /** @type {any} */ ({
+        id: 'hello',
+        slug: 'hello',
+        subPath: 'hello/index',
+        locales: {
+          en: { path: 'content/posts/en/hello/index.md' },
+          fr: { path: 'content/posts/fr/hello/index.md' },
+        },
+      });
+
+      expect(
+        getAssetPublicURL(entryRelativeAsset, { pathOnly: true, entry: mockEntry, locale: 'fr' }),
+      ).toBe('photo-fr.jpg');
+      // The default locale’s folder doesn’t hold the asset
+      expect(
+        getAssetPublicURL(entryRelativeAsset, { pathOnly: true, entry: mockEntry }),
+      ).toBeUndefined();
+    });
+
     it('should return relative path for entry-relative asset in sub-folder', async () => {
       const { getPathInfo } = await import('@sveltia/utils/file');
       const getPathInfoMock = vi.mocked(getPathInfo);
@@ -887,98 +1145,87 @@ describe('assets/info', () => {
       expect(result).toBe('photos/photo.jpg');
     });
 
-    it('should return undefined when assetFolderPath is undefined', async () => {
+    it('should return undefined for an asset at the root outside the entry folder', async () => {
       const { getPathInfo } = await import('@sveltia/utils/file');
       const getPathInfoMock = vi.mocked(getPathInfo);
 
-      getPathInfoMock.mockImplementation((path) => {
-        if (path.includes('photos/photo.jpg')) {
-          return {
-            dirname: undefined,
-            basename: 'photo.jpg',
-            filename: 'photo',
-            extension: '.jpg',
-          };
-        }
-
-        return {
-          dirname: 'assets/images',
-          basename: 'entry.md',
-          filename: 'entry',
-          extension: '.md',
-        };
-      });
+      getPathInfoMock.mockImplementation((path) => ({
+        dirname: path === 'photo.jpg' ? undefined : 'assets/images',
+        basename: 'photo.jpg',
+        filename: 'photo',
+        extension: '.jpg',
+      }));
 
       const entryRelativeAsset = {
         ...mockAsset,
-        path: 'assets/images/photos/photo.jpg',
-        folder: {
-          ...mockAsset.folder,
-          entryRelative: true,
-        },
+        path: 'photo.jpg',
+        name: 'photo.jpg',
+        folder: { ...mockAsset.folder, entryRelative: true },
       };
 
       const mockEntry = /** @type {any} */ ({
         id: 'test',
         slug: 'test',
-        locales: {
-          en: { path: 'assets/images/entry.md' },
-        },
+        locales: { en: { path: 'assets/images/entry.md' } },
       });
 
-      const result = getAssetPublicURL(entryRelativeAsset, {
-        pathOnly: true,
-        entry: mockEntry,
-      });
+      const result = getAssetPublicURL(entryRelativeAsset, { pathOnly: true, entry: mockEntry });
 
       expect(result).toBe(undefined);
     });
 
-    it('should return undefined when entryFolderPath is undefined', async () => {
+    it('should resolve a path relative to an entry at the repository root', async () => {
       const { getPathInfo } = await import('@sveltia/utils/file');
       const getPathInfoMock = vi.mocked(getPathInfo);
 
-      getPathInfoMock.mockImplementation((path) => {
-        if (path.includes('photos/photo.jpg')) {
-          return {
-            dirname: 'assets/images/photos',
-            basename: 'photo.jpg',
-            filename: 'photo',
-            extension: '.jpg',
-          };
-        }
-
-        return {
-          dirname: undefined,
-          basename: 'entry.md',
-          filename: 'entry',
-          extension: '.md',
-        };
-      });
+      getPathInfoMock.mockImplementation((path) => ({
+        dirname: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : undefined,
+        basename: 'photo.jpg',
+        filename: 'photo',
+        extension: '.jpg',
+      }));
 
       const entryRelativeAsset = {
         ...mockAsset,
-        path: 'assets/images/photos/photo.jpg',
-        folder: {
-          ...mockAsset.folder,
-          entryRelative: true,
-        },
+        path: 'images/sub/photo.jpg',
+        name: 'photo.jpg',
+        folder: { ...mockAsset.folder, internalPath: '', entryRelative: true },
       };
 
       const mockEntry = /** @type {any} */ ({
         id: 'test',
         slug: 'test',
-        locales: {
-          en: { path: 'assets/images/entry.md' },
+        locales: { en: { path: 'entry.md' } },
+      });
+
+      const options = { pathOnly: true, entry: mockEntry };
+
+      expect(getAssetPublicURL(entryRelativeAsset, options)).toBe('images/sub/photo.jpg');
+
+      // An asset next to the entry
+      entryRelativeAsset.path = 'photo.jpg';
+
+      expect(getAssetPublicURL(entryRelativeAsset, options)).toBe('photo.jpg');
+    });
+
+    it('should resolve a path in an entry-relative folder at the root without an entry', async () => {
+      const { createPath } = await import('$lib/services/utils/file');
+
+      vi.mocked(createPath).mockReturnValue('images/photo.jpg');
+
+      const entryRelativeAsset = {
+        ...mockAsset,
+        path: 'images/photo.jpg',
+        name: 'photo.jpg',
+        folder: {
+          ...mockAsset.folder,
+          internalPath: '',
+          internalSubPath: 'images',
+          entryRelative: true,
         },
-      });
+      };
 
-      const result = getAssetPublicURL(entryRelativeAsset, {
-        pathOnly: true,
-        entry: mockEntry,
-      });
-
-      expect(result).toBe(undefined);
+      expect(getAssetPublicURL(entryRelativeAsset, { pathOnly: true })).toBe('images/photo.jpg');
     });
 
     it('should return undefined for entry-relative asset when pathOnly is false', async () => {
@@ -1053,6 +1300,86 @@ describe('assets/info', () => {
       expect(result).toBe('/@assets/images/666-test/my-image.jpg');
     });
 
+    it('should keep the literal text around a template tag in a path segment', () => {
+      const templateAsset = {
+        ...mockAsset,
+        path: 'static/images/post-hello/a.jpg',
+        folder: {
+          ...mockAsset.folder,
+          internalPath: 'static/images/post-{{slug}}',
+          publicPath: '/images/post-{{slug}}',
+          hasTemplateTags: true,
+        },
+      };
+
+      expect(getAssetPublicURL(templateAsset, { pathOnly: true })).toBe('/images/post-hello/a.jpg');
+    });
+
+    it('should handle several template tags, repeated or with a transformation', () => {
+      const templateAsset = {
+        ...mockAsset,
+        path: 'static/2024-hello/hello/a.jpg',
+        folder: {
+          ...mockAsset.folder,
+          internalPath: 'static/{{year}}-{{slug | lower}}/{{slug | lower}}',
+          publicPath: '/{{slug | lower}}/{{year}}',
+          hasTemplateTags: true,
+        },
+      };
+
+      expect(getAssetPublicURL(templateAsset, { pathOnly: true })).toBe('/hello/2024/a.jpg');
+    });
+
+    it('should leave a tag only found in the public path as is', () => {
+      const templateAsset = {
+        ...mockAsset,
+        path: 'static/hello/a.jpg',
+        folder: {
+          ...mockAsset.folder,
+          internalPath: 'static/{{slug}}',
+          publicPath: '/{{locale}}/{{slug}}',
+          hasTemplateTags: true,
+        },
+      };
+
+      expect(getAssetPublicURL(templateAsset, { pathOnly: true })).toBe('/{{locale}}/hello/a.jpg');
+    });
+
+    it('should prefix the public path to an asset in a root media folder', () => {
+      const rootAsset = {
+        ...mockAsset,
+        path: 'photo.jpg',
+        name: 'photo.jpg',
+        folder: { ...mockAsset.folder, internalPath: '', publicPath: '/' },
+      };
+
+      expect(getAssetPublicURL(rootAsset, { pathOnly: true })).toBe('/photo.jpg');
+
+      rootAsset.folder = { ...rootAsset.folder, publicPath: '/uploads' };
+
+      expect(getAssetPublicURL(rootAsset, { pathOnly: true })).toBe('/uploads/photo.jpg');
+    });
+
+    it('should return a bare path for an empty public folder, which is special', () => {
+      const asset = {
+        ...mockAsset,
+        path: 'static/images/sub/photo.jpg',
+        name: 'photo.jpg',
+        folder: { ...mockAsset.folder, internalPath: 'static/images', publicPath: '' },
+      };
+
+      const options = { pathOnly: true, allowSpecial: true };
+
+      expect(getAssetPublicURL(asset, options)).toBe('sub/photo.jpg');
+      expect(getAssetPublicURL(asset, { pathOnly: true })).toBeUndefined();
+
+      // A root media folder
+      asset.path = 'photo.jpg';
+      asset.folder = { ...asset.folder, internalPath: '' };
+
+      expect(getAssetPublicURL(asset, options)).toBe('photo.jpg');
+    });
+
     it('should encode file path when encoding is enabled', async () => {
       const { encodeFilePath } = await import('$lib/services/utils/file');
 
@@ -1087,13 +1414,11 @@ describe('assets/info', () => {
     it('should search for asset folder by collection when collectionName is defined (line 166)', async () => {
       const { getAssetFoldersByPath } = await import('$lib/services/assets/folders');
 
-      const collectionFolder = {
+      const collectionFolder = createMockAssetFolder({
+        collectionName: 'posts',
         internalPath: 'posts/media',
         publicPath: '/posts/media',
-        collectionName: 'posts',
-        entryRelative: false,
-        hasTemplateTags: false,
-      };
+      });
 
       vi.mocked(getAssetFoldersByPath).mockReturnValue([collectionFolder]);
 
@@ -1110,409 +1435,6 @@ describe('assets/info', () => {
       // Verify that getAssetFoldersByPath was called to search for the folder
       expect(getAssetFoldersByPath).toHaveBeenCalledWith(assetWithCollection.path);
       expect(result).toBeDefined();
-    });
-  });
-
-  describe('getMediaFieldSource', () => {
-    it('should return undefined for empty value', () => {
-      expect(getMediaFieldSource({ value: '', collectionName: 'posts' })).toBeUndefined();
-    });
-
-    it('should return an external URL as-is', () => {
-      expect(
-        getMediaFieldSource({ value: 'https://example.com/image.jpg', collectionName: 'posts' }),
-      ).toEqual({ url: 'https://example.com/image.jpg' });
-    });
-
-    it('should return the asset the path points to', async () => {
-      const { getAssetByPath } = await import('$lib/services/assets');
-
-      vi.mocked(getAssetByPath).mockReturnValue(mockAsset);
-
-      const entry = /** @type {any} */ ({ id: 'post' });
-
-      expect(
-        getMediaFieldSource({
-          value: '/uploads/test.jpg',
-          entry,
-          collectionName: 'posts',
-          fileName: 'about',
-          componentName: 'figure',
-          typedKeyPath: 'hero.image',
-        }),
-      ).toEqual({ asset: mockAsset });
-
-      expect(getAssetByPath).toHaveBeenCalledWith({
-        value: '/uploads/test.jpg',
-        entry,
-        collectionName: 'posts',
-        fileName: 'about',
-        componentName: 'figure',
-        typedKeyPath: 'hero.image',
-      });
-
-      vi.mocked(getAssetByPath).mockReturnValue(undefined);
-
-      expect(
-        getMediaFieldSource({ value: '/uploads/missing.jpg', collectionName: 'posts' }),
-      ).toBeUndefined();
-    });
-  });
-
-  describe('getMediaFieldURL', () => {
-    beforeEach(async () => {
-      const { getAssetByPath } = await import('$lib/services/assets');
-
-      vi.mocked(getAssetByPath).mockReturnValue(mockAsset);
-    });
-
-    it('should return undefined for empty value', async () => {
-      const result = await getMediaFieldURL({
-        value: '',
-        collectionName: 'posts',
-      });
-
-      expect(result).toBe(undefined);
-    });
-
-    it('should return external URLs as-is', async () => {
-      const httpUrl = 'https://example.com/image.jpg';
-      const dataUrl = 'data:image/jpeg;base64,/9j/4AAQ';
-      const blobUrl = 'blob:abc123';
-
-      const httpResult = await getMediaFieldURL({
-        value: httpUrl,
-        collectionName: 'posts',
-      });
-
-      const dataResult = await getMediaFieldURL({
-        value: dataUrl,
-        collectionName: 'posts',
-      });
-
-      const blobResult = await getMediaFieldURL({
-        value: blobUrl,
-        collectionName: 'posts',
-      });
-
-      expect(httpResult).toBe(httpUrl);
-      expect(dataResult).toBe(dataUrl);
-      expect(blobResult).toBe(blobUrl);
-    });
-
-    it('should return undefined if asset not found', async () => {
-      const { getAssetByPath } = await import('$lib/services/assets');
-
-      vi.mocked(getAssetByPath).mockReturnValue(undefined);
-
-      const result = await getMediaFieldURL({
-        value: 'nonexistent.jpg',
-        collectionName: 'posts',
-      });
-
-      expect(result).toBe(undefined);
-    });
-
-    it('should return blob URL for found asset', async () => {
-      const mockHandle = {
-        getFile: vi.fn(async () => new File(['content'], 'test.jpg', { type: 'image/jpeg' })),
-      };
-
-      const assetWithHandle = {
-        ...mockAsset,
-        handle: mockHandle,
-      };
-
-      const { getAssetByPath } = await import('$lib/services/assets');
-
-      vi.mocked(getAssetByPath).mockReturnValue(assetWithHandle);
-
-      const result = await getMediaFieldURL({
-        value: 'test.jpg',
-        collectionName: 'posts',
-      });
-
-      expect(result).toBe('blob:mock-url');
-    });
-
-    it('should return thumbnail URL when thumbnail option is true', async () => {
-      const { IndexedDB } = await import('@sveltia/utils/storage');
-
-      /** @type {any} */
-      const mockIndexedDB = {
-        get: vi.fn().mockResolvedValue(undefined),
-        set: vi.fn(),
-      };
-
-      // Vitest 4 requires proper constructor with 'class' keyword
-      /** @type {any} */
-      class MockIndexedDB {
-        /**
-         * Creates a mock IndexedDB instance.
-         */
-        constructor() {
-          Object.assign(this, mockIndexedDB);
-        }
-      }
-
-      /** @type {any} */
-      const mockedIndexedDB = vi.mocked(IndexedDB);
-
-      // @ts-ignore - Constructor signature mismatch
-      mockedIndexedDB.mockImplementation(MockIndexedDB);
-
-      const { transformImage } = await import('$lib/services/utils/media/image/transform');
-
-      vi.mocked(transformImage).mockResolvedValue(new Blob(['thumbnail']));
-
-      const mockHandle = {
-        getFile: vi.fn(async () => new File(['content'], 'test.jpg', { type: 'image/jpeg' })),
-      };
-
-      const assetWithHandle = {
-        ...mockAsset,
-        handle: mockHandle,
-      };
-
-      const { getAssetByPath } = await import('$lib/services/assets');
-
-      vi.mocked(getAssetByPath).mockReturnValue(assetWithHandle);
-
-      const result = await getMediaFieldURL({
-        value: 'test.jpg',
-        collectionName: 'posts',
-        thumbnail: true,
-      });
-
-      expect(result).toBe('blob:mock-url');
-    });
-
-    it('should use Cloudinary base URL for relative paths when fieldConfig is provided', async () => {
-      // @ts-ignore
-      vi.mocked(cloudStorageModule.allCloudStorageServices.cloudinary.isEnabled).mockReturnValue(
-        true,
-      );
-      vi.mocked(cloudinaryModule.getMergedLibraryOptions).mockReturnValue({
-        output_filename_only: true,
-        config: {
-          cloud_name: 'my-cloud',
-        },
-      });
-
-      const fieldConfig = /** @type {any} */ ({ type: 'image' });
-      const relativeImagePath = 'my-image.jpg';
-
-      const result = await getMediaFieldURL({
-        value: relativeImagePath,
-        collectionName: 'posts',
-        fieldConfig,
-      });
-
-      expect(result).toBe('https://res.cloudinary.com/my-cloud/my-image.jpg');
-    });
-
-    it('should call getAssetBaseURL with the provided fieldConfig', async () => {
-      // @ts-ignore
-      vi.mocked(cloudStorageModule.allCloudStorageServices.cloudinary.isEnabled).mockReturnValue(
-        true,
-      );
-      vi.mocked(cloudinaryModule.getMergedLibraryOptions).mockReturnValue({
-        output_filename_only: true,
-        config: {
-          cloud_name: 'test-cloud',
-        },
-      });
-
-      const fieldConfig = /** @type {any} */ ({ type: 'image', options: { width: 400 } });
-      const relativeImagePath = 'photo.png';
-
-      await getMediaFieldURL({
-        value: relativeImagePath,
-        collectionName: 'posts',
-        fieldConfig,
-      });
-
-      expect(vi.mocked(cloudinaryModule.getMergedLibraryOptions)).toHaveBeenCalledWith(fieldConfig);
-    });
-
-    it('should not use Cloudinary URL for absolute paths starting with /', async () => {
-      // @ts-ignore
-      vi.mocked(cloudStorageModule.allCloudStorageServices.cloudinary.isEnabled).mockReturnValue(
-        true,
-      );
-      vi.mocked(cloudinaryModule.getMergedLibraryOptions).mockReturnValue({
-        output_filename_only: true,
-        config: {
-          cloud_name: 'my-cloud',
-        },
-      });
-
-      const { getAssetByPath } = await import('$lib/services/assets');
-
-      // Set up asset with blobURL to avoid blob retrieval
-      const assetWithBlobURL = {
-        ...mockAsset,
-        blobURL: 'blob:existing-url',
-      };
-
-      vi.mocked(getAssetByPath).mockReturnValue(assetWithBlobURL);
-
-      const fieldConfig = /** @type {any} */ ({ type: 'image' });
-      const absolutePath = '/assets/image.jpg';
-
-      const result = await getMediaFieldURL({
-        value: absolutePath,
-        collectionName: 'posts',
-        fieldConfig,
-      });
-
-      expect(result).toBe('blob:existing-url');
-      // getAssetByPath should be called instead of using Cloudinary URL
-      expect(vi.mocked(getAssetByPath)).toHaveBeenCalled();
-    });
-
-    it('should fall back to asset lookup when no Cloudinary URL is available', async () => {
-      // @ts-ignore
-      vi.mocked(cloudStorageModule.allCloudStorageServices.cloudinary.isEnabled).mockReturnValue(
-        false,
-      );
-
-      const { getAssetByPath } = await import('$lib/services/assets');
-
-      // Set up asset with blobURL to avoid blob retrieval
-      const assetWithBlobURL = {
-        ...mockAsset,
-        blobURL: 'blob:existing-url',
-      };
-
-      vi.mocked(getAssetByPath).mockReturnValue(assetWithBlobURL);
-
-      const fieldConfig = /** @type {any} */ ({ type: 'image' });
-      const relativeImagePath = 'my-image.jpg';
-
-      const result = await getMediaFieldURL({
-        value: relativeImagePath,
-        collectionName: 'posts',
-        fieldConfig,
-      });
-
-      expect(result).toBe('blob:existing-url');
-      expect(vi.mocked(getAssetByPath)).toHaveBeenCalledWith({
-        value: relativeImagePath,
-        entry: undefined,
-        collectionName: 'posts',
-        fileName: undefined,
-      });
-    });
-
-    it('should treat paths starting with @ as absolute paths', async () => {
-      // @ts-ignore
-      vi.mocked(cloudStorageModule.allCloudStorageServices.cloudinary.isEnabled).mockReturnValue(
-        true,
-      );
-      vi.mocked(cloudinaryModule.getMergedLibraryOptions).mockReturnValue({
-        output_filename_only: true,
-        config: {
-          cloud_name: 'my-cloud',
-        },
-      });
-
-      const { getAssetByPath } = await import('$lib/services/assets');
-
-      // Set up asset with blobURL to avoid blob retrieval
-      const assetWithBlobURL = {
-        ...mockAsset,
-        blobURL: 'blob:existing-url',
-      };
-
-      vi.mocked(getAssetByPath).mockReturnValue(assetWithBlobURL);
-
-      const fieldConfig = /** @type {any} */ ({ type: 'image' });
-      const aliasPath = '@assets/images/image.jpg';
-
-      const result = await getMediaFieldURL({
-        value: aliasPath,
-        collectionName: 'posts',
-        fieldConfig,
-      });
-
-      expect(result).toBe('blob:existing-url');
-      // getAssetByPath should be called, not Cloudinary URL
-      expect(vi.mocked(getAssetByPath)).toHaveBeenCalledWith({
-        value: aliasPath,
-        entry: undefined,
-        collectionName: 'posts',
-        fileName: undefined,
-      });
-    });
-
-    it('should not use Cloudinary URL for paths starting with @media', async () => {
-      // @ts-ignore
-      vi.mocked(cloudStorageModule.allCloudStorageServices.cloudinary.isEnabled).mockReturnValue(
-        true,
-      );
-      vi.mocked(cloudinaryModule.getMergedLibraryOptions).mockReturnValue({
-        output_filename_only: true,
-        config: {
-          cloud_name: 'my-cloud',
-        },
-      });
-
-      const { getAssetByPath } = await import('$lib/services/assets');
-
-      // Set up asset with blobURL to avoid blob retrieval
-      const assetWithBlobURL = {
-        ...mockAsset,
-        blobURL: 'blob:existing-url',
-      };
-
-      vi.mocked(getAssetByPath).mockReturnValue(assetWithBlobURL);
-
-      const fieldConfig = /** @type {any} */ ({ type: 'image' });
-      const aliasPath = '@media/uploads/photo.jpg';
-
-      const result = await getMediaFieldURL({
-        value: aliasPath,
-        collectionName: 'posts',
-        fieldConfig,
-      });
-
-      expect(result).toBe('blob:existing-url');
-      expect(vi.mocked(getAssetByPath)).toHaveBeenCalled();
-    });
-
-    it('should pass componentName and typedKeyPath to getAssetByPath when provided', async () => {
-      const { getAssetByPath } = await import('$lib/services/assets');
-
-      // Ensure Cloudinary is disabled so the relative path reaches getAssetByPath
-      // @ts-ignore
-      vi.mocked(cloudStorageModule.allCloudStorageServices.cloudinary.isEnabled).mockReturnValue(
-        false,
-      );
-
-      const assetWithBlobURL = {
-        ...mockAsset,
-        blobURL: 'blob:typed-key-url',
-      };
-
-      vi.mocked(getAssetByPath).mockReturnValue(assetWithBlobURL);
-
-      const result = await getMediaFieldURL({
-        value: 'hero-image.jpg',
-        collectionName: 'posts',
-        componentName: 'custom-editor',
-        typedKeyPath: 'hero',
-      });
-
-      expect(result).toBe('blob:typed-key-url');
-      expect(vi.mocked(getAssetByPath)).toHaveBeenCalledWith(
-        expect.objectContaining({
-          value: 'hero-image.jpg',
-          collectionName: 'posts',
-          componentName: 'custom-editor',
-          typedKeyPath: 'hero',
-        }),
-      );
     });
   });
 
@@ -1877,6 +1799,27 @@ describe('assets/info', () => {
       expect(result).toBeDefined();
     });
 
+    it('should use the asset’s own folder when neither a collection nor a global folder is found', async () => {
+      const { getAssetFoldersByPath } = await import('$lib/services/assets/folders');
+
+      // Without the global `media_folder` option, there is no global folder
+      vi.mocked(getAssetFoldersByPath).mockReturnValue([]);
+      mockGlobalAssetFolder.current = undefined;
+
+      const assetWithCollection = {
+        ...mockAsset,
+        path: 'static/posts/test.jpg',
+        folder: {
+          ...mockAsset.folder,
+          collectionName: 'posts',
+          internalPath: 'static/posts',
+          publicPath: '/posts',
+        },
+      };
+
+      expect(getAssetPublicURL(assetWithCollection, { pathOnly: true })).toBe('/posts/test.jpg');
+    });
+
     it('should handle undefined baseURL in cmsConfig', () => {
       mockCmsConfig._baseURL = undefined;
 
@@ -1916,14 +1859,11 @@ describe('assets/info', () => {
       expect(result).toBeDefined();
     });
 
-    it('should handle getEntriesByAssetURL when url is undefined', async () => {
-      const { getEntriesByAssetURL } = await import('$lib/services/contents/collection/entries');
+    it('should look up the entries by the asset itself in an entry-relative folder', async () => {
+      const { getEntriesByAssets, getEntriesByAssetURL } =
+        await import('$lib/services/assets/references');
 
-      vi.mocked(getEntriesByAssetURL).mockResolvedValue([]);
-
-      const mockHandle = {
-        getFile: vi.fn(async () => new File(['content'], 'test.jpg', { type: 'image/jpeg' })),
-      };
+      vi.mocked(getEntriesByAssets).mockResolvedValue([[]]);
 
       const entryRelativeAsset = {
         ...mockAsset,
@@ -1931,18 +1871,19 @@ describe('assets/info', () => {
           ...mockAsset.folder,
           entryRelative: true,
         },
-        handle: mockHandle,
       };
 
       const result = await getAssetUsedEntries(entryRelativeAsset);
 
-      // publicURL is undefined for entry-relative assets; blobURL is set from the handle,
-      // so getEntriesByAssetURL is called with the blob URL and returns []
+      // A path relative to the entry would match the same path in any entry, so a value only
+      // refers to the asset when it resolves to it
       expect(result).toEqual([]);
+      expect(vi.mocked(getEntriesByAssets)).toHaveBeenCalledWith([{ asset: entryRelativeAsset }]);
+      expect(vi.mocked(getEntriesByAssetURL)).not.toHaveBeenCalled();
     });
 
     it('should handle getEntriesByAssetURL with used entries', async () => {
-      const { getEntriesByAssetURL } = await import('$lib/services/contents/collection/entries');
+      const { getEntriesByAssetURL } = await import('$lib/services/assets/references');
 
       const mockUsedEntry = /** @type {any} */ ({
         id: 'entry-1',
@@ -2070,13 +2011,11 @@ describe('assets/info', () => {
     it('should handle asset with collection name from folder', async () => {
       const { getAssetFoldersByPath } = await import('$lib/services/assets/folders');
 
-      const collectionFolder = {
+      const collectionFolder = createMockAssetFolder({
+        collectionName: 'blog',
         internalPath: 'blog/media',
         publicPath: '/blog/media',
-        collectionName: 'blog',
-        entryRelative: false,
-        hasTemplateTags: false,
-      };
+      });
 
       // Mock to find a folder with collectionName
       vi.mocked(getAssetFoldersByPath).mockReturnValue([collectionFolder]);
@@ -2246,7 +2185,7 @@ describe('assets/info', () => {
     });
 
     it('should handle async getEntriesByAssetURL with result', async () => {
-      const { getEntriesByAssetURL } = await import('$lib/services/contents/collection/entries');
+      const { getEntriesByAssetURL } = await import('$lib/services/assets/references');
 
       const usedEntries = /** @type {any} */ ([
         {
@@ -2531,172 +2470,6 @@ describe('assets/info', () => {
       // blobURL is undefined (createObjectURL returned undefined), falls back to publicURL
       expect(result).toBe('https://example.com/assets/images/test.jpg');
     });
-
-    it('should return empty array when url is undefined in getAssetUsedEntries', async () => {
-      // Covers the !url branch: both getAssetPublicURL and getAssetBlobURL return undefined
-      const { getEntriesByAssetURL } = await import('$lib/services/contents/collection/entries');
-
-      // @ts-ignore
-      global.URL = {
-        createObjectURL: vi.fn().mockReturnValue(undefined),
-        revokeObjectURL: vi.fn(),
-      };
-
-      const mockFile = new File(['content'], 'test.jpg', { type: 'image/jpeg' });
-
-      // entryRelative=true with no entry → getAssetPublicURL returns undefined
-      const entryRelativeAsset = {
-        ...mockAsset,
-        file: mockFile,
-        blobURL: undefined,
-        folder: {
-          ...mockAsset.folder,
-          entryRelative: true,
-        },
-      };
-
-      const result = await getAssetUsedEntries(entryRelativeAsset);
-
-      // url = undefined ?? undefined = undefined → returns []
-      expect(vi.mocked(getEntriesByAssetURL)).not.toHaveBeenCalled();
-      expect(result).toEqual([]);
-    });
-  });
-
-  describe('getAssetBaseURL', () => {
-    beforeEach(() => {
-      vi.clearAllMocks();
-    });
-
-    it('should return Cloudinary base URL when Cloudinary is enabled with valid config', () => {
-      // @ts-ignore
-      vi.mocked(cloudStorageModule.allCloudStorageServices.cloudinary.isEnabled).mockReturnValue(
-        true,
-      );
-      vi.mocked(cloudinaryModule.getMergedLibraryOptions).mockReturnValue({
-        output_filename_only: true,
-        config: {
-          cloud_name: 'my-cloud',
-        },
-      });
-
-      const fieldConfig = /** @type {any} */ ({ type: 'image' });
-      const result = getAssetBaseURL(fieldConfig);
-
-      expect(result).toBe('https://res.cloudinary.com/my-cloud');
-    });
-
-    it('should return undefined when Cloudinary is not enabled', () => {
-      // @ts-ignore
-      vi.mocked(cloudStorageModule.allCloudStorageServices.cloudinary.isEnabled).mockReturnValue(
-        false,
-      );
-
-      const fieldConfig = /** @type {any} */ ({ type: 'image' });
-      const result = getAssetBaseURL(fieldConfig);
-
-      expect(result).toBeUndefined();
-    });
-
-    it('should return undefined when output_filename_only is false', () => {
-      // @ts-ignore
-      vi.mocked(cloudStorageModule.allCloudStorageServices.cloudinary.isEnabled).mockReturnValue(
-        true,
-      );
-      vi.mocked(cloudinaryModule.getMergedLibraryOptions).mockReturnValue({
-        output_filename_only: false,
-        config: {
-          cloud_name: 'my-cloud',
-        },
-      });
-
-      const fieldConfig = /** @type {any} */ ({ type: 'image' });
-      const result = getAssetBaseURL(fieldConfig);
-
-      expect(result).toBeUndefined();
-    });
-
-    it('should return undefined when cloud_name is missing', () => {
-      // @ts-ignore
-      vi.mocked(cloudStorageModule.allCloudStorageServices.cloudinary.isEnabled).mockReturnValue(
-        true,
-      );
-      vi.mocked(cloudinaryModule.getMergedLibraryOptions).mockReturnValue({
-        output_filename_only: true,
-        config: {},
-      });
-
-      const fieldConfig = /** @type {any} */ ({ type: 'image' });
-      const result = getAssetBaseURL(fieldConfig);
-
-      expect(result).toBeUndefined();
-    });
-
-    it('should return undefined when config is missing', () => {
-      // @ts-ignore
-      vi.mocked(cloudStorageModule.allCloudStorageServices.cloudinary.isEnabled).mockReturnValue(
-        true,
-      );
-      vi.mocked(cloudinaryModule.getMergedLibraryOptions).mockReturnValue({
-        output_filename_only: true,
-      });
-
-      const fieldConfig = /** @type {any} */ ({ type: 'image' });
-      const result = getAssetBaseURL(fieldConfig);
-
-      expect(result).toBeUndefined();
-    });
-
-    it('should handle undefined fieldConfig', () => {
-      // @ts-ignore
-      vi.mocked(cloudStorageModule.allCloudStorageServices.cloudinary.isEnabled).mockReturnValue(
-        true,
-      );
-      vi.mocked(cloudinaryModule.getMergedLibraryOptions).mockReturnValue({
-        output_filename_only: true,
-        config: {
-          cloud_name: 'test-cloud',
-        },
-      });
-
-      const result = getAssetBaseURL(undefined);
-
-      expect(result).toBe('https://res.cloudinary.com/test-cloud');
-    });
-
-    it('should return undefined when Cloudinary service is null or undefined', () => {
-      // @ts-ignore - Testing edge case where cloudinary is undefined
-      const originalCloudinary = cloudStorageModule.allCloudStorageServices.cloudinary;
-
-      // @ts-ignore
-      cloudStorageModule.allCloudStorageServices.cloudinary = undefined;
-
-      const result = getAssetBaseURL(/** @type {any} */ ({ type: 'image' }));
-
-      expect(result).toBeUndefined();
-
-      // Restore for other tests
-      cloudStorageModule.allCloudStorageServices.cloudinary = originalCloudinary;
-    });
-
-    it('should pass fieldConfig to getMergedLibraryOptions', () => {
-      // @ts-ignore
-      vi.mocked(cloudStorageModule.allCloudStorageServices.cloudinary.isEnabled).mockReturnValue(
-        true,
-      );
-      vi.mocked(cloudinaryModule.getMergedLibraryOptions).mockReturnValue({
-        output_filename_only: true,
-        config: {
-          cloud_name: 'test-cloud',
-        },
-      });
-
-      const fieldConfig = /** @type {any} */ ({ type: 'image', options: { width: 200 } });
-
-      getAssetBaseURL(fieldConfig);
-
-      expect(vi.mocked(cloudinaryModule.getMergedLibraryOptions)).toHaveBeenCalledWith(fieldConfig);
-    });
   });
 
   describe('getFolderPublicPath', () => {
@@ -2814,6 +2587,22 @@ describe('assets/info', () => {
       // @ts-ignore
       revokeAssetBlobURLIfNeeded(assetWithoutBlobURL);
 
+      expect(global.URL.revokeObjectURL).not.toHaveBeenCalled();
+    });
+
+    it('should not revoke the blobURL of an unsaved asset', () => {
+      // The URL belongs to the entry draft, which uses it as the field value
+      const unsavedAsset = /** @type {any} */ ({
+        blobURL: 'blob:draft-file',
+        path: 'assets/new.jpg',
+        name: 'new.jpg',
+        unsaved: true,
+      });
+
+      // @ts-ignore
+      revokeAssetBlobURLIfNeeded(unsavedAsset);
+
+      expect(global.window.requestAnimationFrame).not.toHaveBeenCalled();
       expect(global.URL.revokeObjectURL).not.toHaveBeenCalled();
     });
 
@@ -3029,6 +2818,172 @@ describe('assets/info', () => {
         revokeBlobURLIfNeeded('blob:thumbnail-1');
 
         expect(global.URL.revokeObjectURL).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('preloadAssets', () => {
+      /** @type {any[]} */
+      let images;
+      /** @type {any} */
+      let decode;
+
+      /**
+       * Wait for the preloading started in the background to finish.
+       * @returns {Promise<void>} Result.
+       */
+      const settle = () =>
+        new Promise((resolve) => {
+          setTimeout(resolve, 0);
+        });
+
+      beforeEach(() => {
+        images = [];
+        decode = vi.fn().mockResolvedValue(undefined);
+
+        // @ts-ignore
+        global.Image = class {
+          constructor() {
+            this.src = '';
+            this.decode = decode;
+            images.push(this);
+          }
+        };
+      });
+
+      afterEach(() => {
+        preloadAssets([]);
+        // @ts-ignore
+        delete global.Image;
+      });
+
+      it('should decode a preloaded image and keep its URL until it’s released', async () => {
+        const [asset] = mockAssets;
+
+        asset.kind = 'image';
+        preloadAssets([asset]);
+        await settle();
+
+        expect(images).toHaveLength(1);
+        expect(images[0].src).toBe('blob:url-1');
+        expect(decode).toHaveBeenCalledOnce();
+
+        // Nothing displays the URL, yet a revocation leaves it alone while it’s preloaded
+        revokeAssetBlobURLIfNeeded(asset);
+        expect(global.URL.revokeObjectURL).not.toHaveBeenCalled();
+        expect(asset.blobURL).toBe('blob:url-1');
+
+        preloadAssets([]);
+        expect(global.URL.revokeObjectURL).toHaveBeenCalledWith('blob:url-1');
+        expect(asset.blobURL).toBeUndefined();
+      });
+
+      it('should only release the assets that aren’t preloaded any more', async () => {
+        const [first, second, third] = mockAssets;
+
+        preloadAssets([first, second]);
+        await settle();
+        preloadAssets([second, third]);
+        await settle();
+
+        expect(global.URL.revokeObjectURL).toHaveBeenCalledOnce();
+        expect(global.URL.revokeObjectURL).toHaveBeenCalledWith('blob:url-1');
+      });
+
+      it('should keep the URL of an asset to keep without loading it', async () => {
+        const [first, second] = mockAssets;
+
+        first.kind = 'image';
+        second.kind = 'image';
+        preloadAssets([first], { keep: [second] });
+        await settle();
+
+        expect(images).toHaveLength(1);
+        expect(images[0].src).toBe('blob:url-1');
+
+        // The kept URL survives a revocation, until the asset is no longer kept
+        revokeAssetBlobURLIfNeeded(second);
+        expect(global.URL.revokeObjectURL).not.toHaveBeenCalled();
+
+        preloadAssets([first]);
+        expect(global.URL.revokeObjectURL).toHaveBeenCalledWith('blob:url-2');
+      });
+
+      it('should keep an asset whose URL hasn’t been created yet', async () => {
+        const asset = /** @type {any} */ ({ path: 'assets/new.jpg', name: 'new.jpg' });
+
+        mockAssets = [asset];
+        preloadAssets([], { keep: [asset] });
+        await settle();
+        preloadAssets([]);
+
+        expect(global.URL.revokeObjectURL).not.toHaveBeenCalled();
+      });
+
+      it('should not load an asset again while it stays preloaded', async () => {
+        const [first, second] = mockAssets;
+
+        first.kind = 'image';
+        second.kind = 'image';
+        preloadAssets([first]);
+        await settle();
+        preloadAssets([first, second]);
+        await settle();
+
+        expect(images.map(({ src }) => src)).toEqual(['blob:url-1', 'blob:url-2']);
+      });
+
+      it('should not decode an asset other than an image', async () => {
+        const [asset] = mockAssets;
+
+        asset.kind = 'video';
+        preloadAssets([asset]);
+        await settle();
+
+        expect(images).toHaveLength(0);
+      });
+
+      it('should release an asset that is no longer wanted once its blob has been read', async () => {
+        const asset = /** @type {any} */ ({
+          path: 'assets/new.jpg',
+          name: 'new.jpg',
+          kind: 'image',
+          file: new Blob(['x'], { type: 'image/jpeg' }),
+        });
+
+        mockAssets = [asset];
+        global.URL.createObjectURL = vi.fn().mockReturnValue('blob:new');
+        preloadAssets([asset]);
+        preloadAssets([]);
+        await settle();
+
+        expect(images).toHaveLength(0);
+        expect(global.URL.revokeObjectURL).toHaveBeenCalledWith('blob:new');
+      });
+
+      it('should skip an asset whose URL can’t be created', async () => {
+        const asset = /** @type {any} */ ({
+          path: 'assets/new.jpg',
+          name: 'new.jpg',
+          kind: 'image',
+          file: new Blob(['x'], { type: 'image/jpeg' }),
+        });
+
+        global.URL.createObjectURL = vi.fn().mockReturnValue(undefined);
+        preloadAssets([asset]);
+        await settle();
+
+        expect(images).toHaveLength(0);
+      });
+
+      it('should ignore an image that fails to decode', async () => {
+        const [asset] = mockAssets;
+
+        asset.kind = 'image';
+        decode.mockRejectedValue(new Error('EncodingError'));
+        preloadAssets([asset]);
+        await settle();
+
+        expect(decode).toHaveBeenCalledOnce();
       });
     });
   });

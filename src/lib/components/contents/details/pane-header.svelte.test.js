@@ -1,4 +1,3 @@
-import { sleep } from '@sveltia/utils/misc';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { page } from 'vitest/browser';
 
@@ -68,15 +67,16 @@ const renderHeader = async ({
 
 /**
  * Open the content options menu.
- * @param {string} [locale] Locale label.
+ * @param {string | null} [locale] Locale label, or `null` for a monolingual entry, whose content
+ * has no locale to name.
  * @returns {Promise<import('vitest/browser').Locator>} Menu.
  */
 const openMenu = async (locale = 'English') => {
-  await page.getByRole('button', { name: `Show \u2068${locale}\u2069 Content Options` }).click();
-  // A Sveltia UI menu starts handling clicks 100 ms after it’s opened
-  await sleep(150);
+  const name = locale ? `\u2068${locale}\u2069 Content Options` : 'Content Options';
 
-  return page.getByRole('menu', { name: `\u2068${locale}\u2069 Content Options` });
+  await page.getByRole('button', { name: `Show ${name}`, exact: true }).click();
+
+  return page.getByRole('menu', { name, exact: true });
 };
 
 describe('PaneHeader', () => {
@@ -96,7 +96,8 @@ describe('PaneHeader', () => {
           folder: 'content/posts',
           preview_path: 'posts/{{slug}}',
           i18n: true,
-          fields,
+          // A collection with i18n enabled needs a localized field
+          fields: [{ ...fields[0], i18n: true }],
         },
         { name: 'pages', label: 'Pages', folder: 'content/pages', fields },
       ],
@@ -125,16 +126,35 @@ describe('PaneHeader', () => {
         .getByRole('menuitem')
         .elements()
         .map((el) => el.textContent?.trim()),
-    ).toEqual(['Copy from \u2068French\u2069', 'Revert Changes', 'Disable \u2068English\u2069']);
+    ).toEqual([
+      'Copy from \u2068French\u2069',
+      'Revert Changes',
+      'Restore Default',
+      'Clear All',
+      'Disable \u2068English\u2069',
+    ]);
     await expect.element(menu.getByRole('menuitem', { name: 'Revert Changes' })).toBeDisabled();
+    // The title differs from its default value, which is empty
     // The default locale can’t be disabled
     await expect
       .element(menu.getByRole('menuitem', { name: 'Disable \u2068English\u2069' }))
       .toBeDisabled();
 
+    await expect.element(menu.getByRole('menuitem', { name: 'Restore Default' })).toBeEnabled();
+    await expect.element(menu.getByRole('menuitem', { name: 'Clear All' })).toBeEnabled();
+
     draft.currentValues.en.title = 'Hi';
     await expect.element(menu.getByRole('menuitem', { name: 'Revert Changes' })).toBeEnabled();
     await menu.getByRole('menuitem', { name: 'Revert Changes' }).click();
+
+    // The changes are only reverted once confirmed
+    const dialog = page.getByRole('alertdialog');
+
+    await expect
+      .element(dialog)
+      .toMatchTextContent('revert all the changes made to the \u2068English\u2069 content');
+    expect(draft.currentValues.en.title).toBe('Hi');
+    await dialog.getByRole('button', { name: 'Revert Changes' }).click();
     await expect.poll(() => draft.currentValues.en.title).toBe('Hello');
   });
 
@@ -163,20 +183,21 @@ describe('PaneHeader', () => {
     const { draft } = await renderHeader({
       draftProps: {
         currentLocales: { en: true, fr: false },
+        originalValues: { en: { title: 'Hello' } },
         currentValues: { en: { title: 'Hello' } },
       },
       thisPane: createRawState({ mode: 'edit', locale: 'fr' }),
     });
 
+    const menu = await openMenu('French');
+
+    // There are no changes to revert either
+    await expect.element(menu.getByRole('menuitem', { name: 'Revert Changes' })).toBeDisabled();
     // The locale has no content to bring back, so it’s enabled rather than reenabled
-    await (
-      await openMenu('French')
-    )
-      .getByRole('menuitem', { name: 'Enable \u2068French\u2069' })
-      .click();
+    await menu.getByRole('menuitem', { name: 'Enable \u2068French\u2069' }).click();
     expect(draft.currentLocales.fr).toBe(true);
-    // The content starts empty, as the field isn’t duplicated from the default locale
-    expect(draft.currentValues.fr).toEqual({});
+    // The translatable field starts empty rather than duplicated from the default locale
+    expect(draft.currentValues.fr).toEqual({ title: '' });
   });
 
   test('links to the entry on the live site', async () => {
@@ -190,7 +211,7 @@ describe('PaneHeader', () => {
     const menu = await openMenu();
 
     await expect.element(menu.getByRole('menuitem', { name: 'View on Live Site' })).toBeEnabled();
-    expect(menu.element().querySelectorAll('[role="separator"]')).toHaveLength(2);
+    expect(menu.element().querySelectorAll('[role="separator"]')).toHaveLength(3);
   });
 
   test('offers the repository link in developer mode', async () => {
@@ -281,7 +302,7 @@ describe('PaneHeader', () => {
       thisPane: createRawState(/** @type {any} */ ({ mode: 'edit', locale: '_default' })),
     });
 
-    const menu = await openMenu('_default');
+    const menu = await openMenu(null);
 
     await expect.element(menu.getByRole('menuitem', { name: 'View on Live Site' })).toBeVisible();
   });
@@ -321,7 +342,7 @@ describe('PaneHeader', () => {
       thisPane: createRawState(/** @type {any} */ ({ mode: 'edit', locale: '_default' })),
     });
 
-    const menu = await openMenu('_default');
+    const menu = await openMenu(null);
 
     await expect.element(menu.getByRole('menuitem', { name: 'View on Live Site' })).toBeVisible();
   });
@@ -360,14 +381,16 @@ describe('PaneHeader', () => {
     expect(page.getByRole('radiogroup').elements()).toHaveLength(0);
     expect(page.getByRole('button', { name: /Translate/ }).elements()).toHaveLength(0);
 
-    const menu = await openMenu('_default');
+    const menu = await openMenu(null);
 
     expect(
       menu
         .getByRole('menuitem')
         .elements()
         .map((el) => el.textContent?.trim()),
-    ).toEqual(['Revert Changes']);
+    ).toEqual(['Revert Changes', 'Restore Default', 'Clear All']);
+    // Nothing comes before them to separate them from
+    expect(menu.element().querySelectorAll('[role="separator"]')).toHaveLength(0);
   });
 
   test('offers the preview toggle with i18n on a medium screen', async () => {
@@ -408,7 +431,7 @@ describe('PaneHeader', () => {
       },
     });
 
-    const menu = await openMenu('_default');
+    const menu = await openMenu(null);
 
     expect(menu.element().querySelectorAll('[role="separator"]')).toHaveLength(0);
   });
@@ -453,6 +476,35 @@ describe('PaneHeader', () => {
     expect(thisPane.current).toEqual({ mode: 'preview', locale: '_default' });
     // The content options are for editing
     expect(page.getByRole('button', { name: /Content Options/ }).elements()).toHaveLength(0);
+  });
+
+  test('only offers the links for a read-only entry', async () => {
+    await renderHeader({
+      draftProps: {
+        collection: { ...getCollection('posts'), readonly: true },
+        isNew: false,
+        originalEntry: createMockEntry({ slug: 'hello', content: { en: {}, fr: {} } }),
+      },
+    });
+
+    expect(page.getByRole('button', { name: /Translate/ }).elements()).toHaveLength(0);
+
+    const menu = await openMenu();
+
+    expect(menu.getByRole('menuitem').elements()).toHaveLength(1);
+    await expect.element(menu.getByRole('menuitem', { name: 'View on Live Site' })).toBeEnabled();
+    expect(menu.element().querySelectorAll('[role="separator"]')).toHaveLength(0);
+  });
+
+  test('offers no content options for a read-only entry without links', async () => {
+    await renderHeader({
+      draftProps: { collection: { ...getCollection('pages'), readonly: true } },
+    });
+
+    await expect.element(page.getByRole('toolbar')).toBeInTheDocument();
+    expect(
+      page.getByRole('button', { name: 'Show \u2068English\u2069 Content Options' }).elements(),
+    ).toHaveLength(0);
   });
 
   test('disables the options for an entry awaiting deletion', async () => {

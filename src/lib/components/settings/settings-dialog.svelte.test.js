@@ -22,7 +22,8 @@ describe('SettingsDialog', () => {
       'library_books Contents',
       'photo_library Media',
       'accessibility_new Accessibility',
-      'build Advanced',
+      'code_xml Developer',
+      'database Data Management',
     ]);
     await expect.element(tabs.nth(0)).toHaveAttribute('aria-selected', 'true');
     await expect.element(dialog.getByRole('heading', { name: 'Theme' })).toBeVisible();
@@ -47,5 +48,40 @@ describe('SettingsDialog', () => {
 
     await vi.waitFor(() => expect(onClose).toHaveBeenCalledOnce());
     expect(props.open).toBe(false);
+  });
+
+  test('links each category to its panel, and moves the selection', async () => {
+    cmsConfig.current = /** @type {any} */ ({});
+
+    await render(SettingsDialog, { open: true });
+
+    const dialog = page.getByRole('dialog', { name: 'Settings' });
+    const appearance = dialog.getByRole('tab', { name: 'Appearance' });
+    const data = dialog.getByRole('tab', { name: 'Data Management' });
+
+    await expect.element(appearance).toHaveAttribute('aria-controls', 'prefs-tab-appearance');
+    await expect.element(data).toHaveAttribute('aria-controls', 'prefs-tab-data');
+    await expect
+      .element(dialog.getByRole('tablist'))
+      .toHaveAttribute('aria-orientation', 'vertical');
+
+    await data.click();
+    await expect.element(data).toHaveAttribute('aria-selected', 'true');
+    await expect.element(appearance).toHaveAttribute('aria-selected', 'false');
+    await expect.element(dialog.getByRole('heading', { name: 'Clear Data' })).toBeVisible();
+  });
+
+  test('opens with the bound prop, and closes without a handler', async () => {
+    cmsConfig.current = /** @type {any} */ ({});
+
+    const props = $state({ open: false });
+
+    await render(SettingsDialog, props);
+    expect(page.getByRole('dialog').elements()).toHaveLength(0);
+
+    props.open = true;
+    await expect.element(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
+    await page.getByRole('button', { name: 'Close' }).click();
+    await expect.poll(() => props.open).toBe(false);
   });
 });

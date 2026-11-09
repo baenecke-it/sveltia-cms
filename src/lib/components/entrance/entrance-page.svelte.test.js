@@ -1,13 +1,15 @@
+import { flushSync } from 'svelte';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { page } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
+import { missingBrowserFeatures } from '$lib/services/app/browser-support';
 import { announcedPageStatus } from '$lib/services/app/navigation';
 import { inAuthPopup } from '$lib/services/backends/git/shared/auth';
 import { cmsConfig, cmsConfigErrors } from '$lib/services/config';
 import { dataLoaded, dataLoadedProgress } from '$lib/services/contents';
 import { user } from '$lib/services/user/account.svelte';
-import { auth } from '$lib/services/user/auth.svelte';
+import { auth, signInAutomatically } from '$lib/services/user/auth.svelte';
 import { prefs, prefsError } from '$lib/services/user/prefs.svelte';
 
 import EntrancePage from './entrance-page.svelte';
@@ -34,6 +36,7 @@ vi.mock('$lib/services/user/auth.svelte', async () => {
 
 describe('EntrancePage', () => {
   beforeEach(() => {
+    missingBrowserFeatures.current = [];
     cmsConfig.current = /** @type {any} */ ({
       backend: { name: 'github', repo: 'acme/site' },
       app_title: 'Acme CMS',
@@ -58,6 +61,26 @@ describe('EntrancePage', () => {
       .toBeVisible();
     await expect.element(page.getByText('Powered by \u2068Sveltia CMS\u2069')).toBeVisible();
     expect(announcedPageStatus.current).toBe('Welcome to \u2068Acme CMS\u2069');
+  });
+
+  test('asks the user to update an unsupported browser', async () => {
+    missingBrowserFeatures.current = ['Iterator helpers'];
+    cmsConfig.current = undefined;
+
+    await render(EntrancePage, {});
+
+    await expect.element(page.getByRole('heading', { name: 'Sveltia CMS' })).toBeVisible();
+    expect(document.querySelector('.logo')).toHaveAttribute(
+      'src',
+      expect.stringMatching(/^data:image\/svg\+xml;base64,/),
+    );
+    await expect
+      .element(page.getByRole('alert'))
+      .toHaveTextContent(
+        'Your browser is not supported. Please update it to the latest version or use another ' +
+          'browser.',
+      );
+    expect(page.getByRole('button').elements()).toHaveLength(0);
   });
 
   test('lists the configuration errors', async () => {
@@ -93,6 +116,30 @@ describe('EntrancePage', () => {
       .element(page.getByRole('alert'))
       .toHaveTextContent('There was an error while loading site data. Repository not found');
     await expect.element(page.getByRole('button', { name: /Sign In with/ })).toBeVisible();
+  });
+
+  test('keeps the sign-in form when a manual sign-in clears the data loading error', async () => {
+    // An authentication error while loading data clears the user cache as well
+    auth.signInError = { message: 'Bad credentials', context: 'dataFetch' };
+
+    await render(EntrancePage, {});
+
+    const button = page.getByRole('button', { name: /Sign In with/ });
+
+    await expect.element(button).toBeVisible();
+
+    const element = button.element();
+
+    // `signInManually()` resets the error before the user picks a directory
+    auth.signInError = { message: '', context: 'authentication' };
+    flushSync();
+
+    await expect
+      .element(page.getByText('There was an error while loading site data.'))
+      .not.toBeInTheDocument();
+    // The same form is kept, rather than another one starting an automatic sign-in on mount
+    expect(button.element()).toBe(element);
+    expect(signInAutomatically).not.toHaveBeenCalled();
   });
 
   test('reports while the configuration or preferences load, or authorization is pending', async () => {

@@ -1,5 +1,6 @@
 <script>
   import { _, locale as appLocale } from '@sveltia/i18n';
+  import { Alert, Infobar, Toast } from '@sveltia/ui';
 
   import DeleteAssetsButton from '$lib/components/assets/list/delete-assets-button.svelte';
   import DownloadAssetsButton from '$lib/components/assets/list/download-assets-button.svelte';
@@ -10,21 +11,29 @@
   import PreviewAssetButton from '$lib/components/assets/list/preview-asset-button.svelte';
   import PrimaryToolbar from '$lib/components/assets/list/primary-toolbar.svelte';
   import { goBack, goto } from '$lib/services/app/navigation';
-  import { focusedAsset, selectedAssets } from '$lib/services/assets';
   import { planAssetDeletion } from '$lib/services/assets/data/cascade';
   import { deleteAssets } from '$lib/services/assets/data/delete';
   import {
+    assetsLocked,
     canCreateAsset,
+    hasReadonlyAsset,
     selectedAssetFolder,
     targetAssetFolder,
   } from '$lib/services/assets/folders';
   import { getAssetBlob } from '$lib/services/assets/info';
   import { canPreviewAsset } from '$lib/services/assets/kinds';
-  import { selectedSubfolderPath } from '$lib/services/assets/subfolders';
+  import { getAssetFolderHistoryState } from '$lib/services/assets/navigation';
+  import { focusedAsset, selectedOrFocusedAssets } from '$lib/services/assets/state';
+  import { browsingCmsFolder, selectedSubfolderPath } from '$lib/services/assets/subfolders';
   import { getFolderLabelByCollection, listedAssets } from '$lib/services/assets/view';
+  import { lockedBranch } from '$lib/services/backends/branch-access';
+  import { isCommitCancelled } from '$lib/services/backends/commit-prompt';
+  import { getReadonlyMessage } from '$lib/services/config/readonly';
   import { env } from '$lib/services/user/env.svelte';
   import { createPath } from '$lib/services/utils/file';
-  import { openAuthoring } from '$lib/services/workflow/open-authoring';
+  import { encodePathSegments } from '$lib/services/utils/url';
+
+  let deletingFailed = $state(false);
 
   const folder = $derived(selectedAssetFolder.current);
   // `appLocale.current` is a key, because `getFolderLabelByCollection` can return a localized label
@@ -37,17 +46,17 @@
   );
   const asset = $derived(focusedAsset.current);
 
-  const assets = $derived.by(() => {
-    if (selectedAssets.current.length) return [...selectedAssets.current];
-    if (asset) return [asset];
-    return [];
-  });
+  const assets = $derived(selectedOrFocusedAssets.current);
+  // The folder is read-only with the `readonly` option, or all the assets are because the user
+  // can’t push to the configured branch
+  const readonly = $derived(!!folder?.readonly || !!lockedBranch.current);
 
   // Uploading to the media library commits straight to the configured branch rather than going
-  // through review, so it’s not something an Open Authoring contributor can do. An asset attached
-  // to an entry is committed with that entry, so it’s unaffected
+  // through review, so it’s not something an Open Authoring contributor or a user who can’t push to
+  // the branch can do. An asset attached to an entry is committed with that entry, so it’s
+  // unaffected. Nor can anything be added to a folder the CMS itself is served from
   const uploadDisabled = $derived(
-    openAuthoring.current || !canCreateAsset(targetAssetFolder.current),
+    assetsLocked.current || !canCreateAsset(targetAssetFolder.current) || browsingCmsFolder.current,
   );
 
   /**
@@ -59,7 +68,10 @@
    * as the back button on small screens does.
    */
   const browseAncestor = (depth, back) => {
-    const path = `/assets/${createPath([folder?.internalPath, ...subfolderNames.slice(0, depth)])}`;
+    const path = encodePathSegments(
+      `/assets/${createPath([folder?.internalPath, ...subfolderNames.slice(0, depth)])}`,
+    );
+
     const options = { transitionType: /** @type {const} */ ('backwards'), state: { folder } };
 
     if (back) {
@@ -70,24 +82,43 @@
   };
 </script>
 
+{#if readonly}
+  <Infobar
+    dismissible={false}
+    --sui-infobar-border-width="0 0 1px"
+    --sui-infobar-message-justify-content="center"
+  >
+    {getReadonlyMessage('asset_folder', { folder })}
+  </Infobar>
+{/if}
 <PrimaryToolbar rootLabel={folderLabel} {subfolderNames} onBrowse={browseAncestor}>
   {#snippet actions()}
     <PreviewAssetButton
-      path={asset ? `/assets/${asset.path}` : undefined}
+      path={asset ? encodePathSegments(`/assets/${asset.path}`) : undefined}
       disabled={!asset || !canPreviewAsset(asset)}
+      state={getAssetFolderHistoryState()}
     />
     <CopyAssetsButton assets={asset ? [asset] : []} />
     <DownloadAssetsButton {assets} getName={(a) => a.name} getBlob={getAssetBlob} />
     <!--
         Deleting a file from the media library commits straight to the configured branch rather
-        than going through review, so it’s not something an Open Authoring contributor can do
+        than going through review, so it’s not something an Open Authoring contributor or a user
+        who can’t push to the branch can do
       -->
     <DeleteAssetsButton
       {assets}
-      disabled={openAuthoring.current}
-      deleteAssets={(_assets) => {
-        // Don’t wait for the commit; the list is updated optimistically
-        deleteAssets(_assets);
+      disabled={assetsLocked.current || hasReadonlyAsset(assets)}
+      deleteAssets={async (_assets) => {
+        try {
+          await deleteAssets(_assets);
+        } catch (/** @type {any} */ ex) {
+          // The user has cancelled the commit at the commit message prompt, which isn’t a failure
+          if (!isCommitCancelled(ex)) {
+            deletingFailed = true;
+            // eslint-disable-next-line no-console
+            console.error(ex);
+          }
+        }
       }}
       planDeletion={planAssetDeletion}
       buttonDescription={_('delete_selected_assets', { values: { count: assets.length } })}
@@ -109,3 +140,7 @@
     {/if}
   {/snippet}
 </PrimaryToolbar>
+
+<Toast bind:show={deletingFailed}>
+  <Alert status="error">{_('deleting_assets_failed')}</Alert>
+</Toast>

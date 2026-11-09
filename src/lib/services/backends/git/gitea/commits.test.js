@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
+import { getWorkflowRepository } from '$lib/services/backends/git/gitea/fork';
 import { repository } from '$lib/services/backends/git/gitea/repository';
+import { repositoryHead } from '$lib/services/backends/git/shared/head';
+import { forkedRepository } from '$lib/services/workflow/open-authoring';
 
 import { commitChanges, fetchFileCommits, fetchLastCommit } from './commits.js';
 
@@ -14,9 +17,7 @@ const fetchAPIMock = vi.hoisted(() => vi.fn());
 const encodeBase64Mock = vi.hoisted(() => vi.fn());
 const createCommitMessageMock = vi.hoisted(() => vi.fn());
 
-vi.mock('@sveltia/i18n', () => ({
-  _: vi.fn((key) => key),
-}));
+vi.mock('@sveltia/i18n', async () => (await import('$lib/test/i18n')).createI18nMock());
 
 vi.mock('$lib/services/backends/git/shared/api', () => ({
   fetchAPI: fetchAPIMock,
@@ -27,16 +28,25 @@ vi.mock('@sveltia/utils/file', () => ({
 }));
 
 vi.mock('$lib/services/backends/git/shared/commits', async (importOriginal) => ({
-  dedupeFileCommits: /** @type {any} */ (await importOriginal()).dedupeFileCommits,
+  .../** @type {any} */ (await importOriginal()),
   createCommitMessage: createCommitMessageMock,
 }));
 
-vi.mock('$lib/services/backends/git/gitea/repository', () => ({
-  repository: {
-    owner: 'test-owner',
-    repo: 'test-repo',
-    branch: 'main',
-  },
+vi.mock('$lib/services/backends/git/gitea/repository', async (importOriginal) => {
+  // The real module, so the last commit is fetched with its `fetchBranch()`
+  const actual = /** @type {any} */ (await importOriginal());
+
+  Object.assign(actual.repository, { owner: 'test-owner', repo: 'test-repo', branch: 'main' });
+
+  return actual;
+});
+
+vi.mock('$lib/services/backends/git/shared/head', () => ({
+  repositoryHead: { current: '' },
+}));
+
+vi.mock('$lib/services/backends/git/gitea/fork', () => ({
+  getWorkflowRepository: vi.fn(() => ({ owner: 'test-owner', repo: 'test-repo' })),
 }));
 
 vi.mock('$lib/services/user/account.svelte', () => ({
@@ -89,17 +99,51 @@ describe('Gitea Commits Service', () => {
       );
     });
 
+    test('should encode the branch name', async () => {
+      fetchAPIMock.mockResolvedValue({ commit: { id: 'abc', message: 'Message' } });
+      repository.branch = 'release#1';
+
+      try {
+        await fetchLastCommit();
+      } finally {
+        repository.branch = 'main';
+      }
+
+      // Left as is, `#` would start a fragment and cut the request URL short
+      expect(fetchAPIMock).toHaveBeenCalledWith(
+        `/repos/${mockOwner}/${mockRepo}/branches/release%231`,
+      );
+    });
+
     test('should handle branch not found error', async () => {
-      fetchAPIMock.mockRejectedValue(new Error('Branch not found'));
+      fetchAPIMock.mockRejectedValue(
+        new Error('Server responded with an error', { cause: { status: 404 } }),
+      );
 
-      await expect(fetchLastCommit()).rejects.toThrow('Failed to retrieve the last commit hash.');
+      await expect(fetchLastCommit()).rejects.toMatchObject({
+        message: 'Failed to retrieve the last commit hash.',
+        cause: { message: 'branch_not_found' },
+      });
     });
 
-    test('should handle API fetch error', async () => {
-      fetchAPIMock.mockRejectedValue(new Error('Network error'));
+    test('should pass on a network error rather than reporting a missing branch', async () => {
+      const error = new Error('Failed to send the request');
 
-      await expect(fetchLastCommit()).rejects.toThrow('Failed to retrieve the last commit hash.');
+      fetchAPIMock.mockRejectedValue(error);
+
+      await expect(fetchLastCommit()).rejects.toBe(error);
     });
+
+    test.each([401, 500, 503])(
+      'should pass on a %i error rather than reporting a missing branch',
+      async (status) => {
+        const error = new Error('Server responded with an error', { cause: { status } });
+
+        fetchAPIMock.mockRejectedValue(error);
+
+        await expect(fetchLastCommit()).rejects.toBe(error);
+      },
+    );
 
     test('should handle malformed response', async () => {
       const malformedResponse = {
@@ -357,6 +401,166 @@ describe('Gitea Commits Service', () => {
       await expect(commitChanges(mockChanges, mockOptions)).rejects.toThrow('Commit failed');
     });
 
+    describe('guard against a concurrent push', () => {
+      /** @type {FileChange[]} */
+      const changes = [
+        { action: 'update', slug: 'a', path: 'a.md', previousSha: 'known-blob-sha', data: 'x' },
+      ];
+
+      const options = { commitType: /** @type {CommitType} */ ('update') };
+
+      beforeEach(() => {
+        repositoryHead.current = 'loaded-head-sha';
+      });
+
+      afterEach(() => {
+        repositoryHead.current = '';
+      });
+
+      test('sends the blob SHA of the file as the user knows it', async () => {
+        fetchAPIMock.mockResolvedValue({
+          commit: { sha: 'c1', created: '2023-01-01T00:00:00Z' },
+          files: [{ path: 'a.md', sha: 'new-blob-sha' }],
+        });
+
+        await commitChanges(changes, options);
+
+        expect(fetchAPIMock).toHaveBeenCalledTimes(1);
+        expect(fetchAPIMock.mock.calls[0][1].body.files[0].sha).toBe('known-blob-sha');
+      });
+
+      test.each([
+        { action: 'update', path: 'a b.md', previousPath: undefined, lookupPath: 'a%20b.md' },
+        { action: 'update', path: 'a.md', previousSha: '', lookupPath: 'a.md' },
+        { action: 'delete', path: 'dir/c#.md', previousPath: undefined, lookupPath: 'dir/c%23.md' },
+        { action: 'move', path: 'new.md', previousPath: 'old.md', lookupPath: 'old.md' },
+      ])(
+        'looks up a missing blob SHA for $action as of the loaded commit, not the branch head',
+        async ({ lookupPath, ...change }) => {
+          fetchAPIMock.mockResolvedValueOnce({ sha: 'known-at-head-sha' }).mockResolvedValueOnce({
+            commit: { sha: 'c1', created: '2023-01-01T00:00:00Z' },
+            files: [],
+          });
+
+          await commitChanges(
+            [/** @type {FileChange} */ ({ slug: 'a', data: 'x', ...change })],
+            options,
+          );
+
+          expect(fetchAPIMock).toHaveBeenCalledTimes(2);
+          expect(fetchAPIMock.mock.calls[0]).toEqual([
+            `/repos/test-owner/test-repo/contents/${lookupPath}?ref=loaded-head-sha`,
+          ]);
+          expect(fetchAPIMock.mock.calls[1][1].body.files[0].sha).toBe('known-at-head-sha');
+        },
+      );
+
+      test('reports the parent the commit has been made on top of', async () => {
+        fetchAPIMock.mockResolvedValue({
+          commit: {
+            sha: 'c1',
+            created: '2023-01-01T00:00:00Z',
+            parents: [{ sha: 'colleague-sha', url: 'https://example.com/colleague-sha' }],
+          },
+          files: [{ path: 'a.md', sha: 'new-blob-sha' }],
+        });
+
+        const result = await commitChanges(changes, options);
+
+        // Someone else’s commit to another file doesn’t stop this one, which lands on top of it
+        expect(result.parentSha).toBe('colleague-sha');
+      });
+
+      test('doesn’t look up a SHA for a new file', async () => {
+        fetchAPIMock.mockResolvedValueOnce({
+          commit: { sha: 'c1', created: '2023-01-01T00:00:00Z' },
+          files: [{ path: 'n.md', sha: 'new-blob-sha' }],
+        });
+
+        await commitChanges([{ action: 'create', slug: 'n', path: 'n.md', data: 'x' }], options);
+
+        expect(fetchAPIMock).toHaveBeenCalledTimes(1);
+        expect(fetchAPIMock.mock.calls[0][1].body.files[0].sha).toBeUndefined();
+      });
+
+      test('doesn’t commit a change without a SHA if the lookup fails', async () => {
+        const lookupError = new Error('Server responded with an error', { cause: { status: 404 } });
+
+        fetchAPIMock.mockRejectedValueOnce(lookupError);
+
+        await expect(
+          commitChanges([{ action: 'update', slug: 'a', path: 'a.md', data: 'x' }], options),
+        ).rejects.toBe(lookupError);
+        expect(fetchAPIMock).toHaveBeenCalledTimes(1);
+      });
+
+      test('doesn’t commit a change without a SHA before the site data is loaded', async () => {
+        repositoryHead.current = '';
+
+        await expect(
+          commitChanges([{ action: 'delete', slug: 'a', path: 'a.md' }], options),
+        ).rejects.toThrow('The last known version of a.md could not be determined.');
+        expect(fetchAPIMock).not.toHaveBeenCalled();
+      });
+
+      test.each([409, 422])(
+        'reports a commit refused with %i because the branch has moved',
+        async (status) => {
+          fetchAPIMock
+            .mockRejectedValueOnce(
+              new Error('Server responded with an error', { cause: { status } }),
+            )
+            .mockResolvedValueOnce({ commit: { id: 'someone-elses-sha', message: '' } });
+
+          await expect(commitChanges(changes, options)).rejects.toThrow(
+            'The branch has moved since the site data was loaded.',
+          );
+          expect(fetchAPIMock).toHaveBeenLastCalledWith(
+            '/repos/test-owner/test-repo/branches/main',
+          );
+        },
+      );
+
+      test('passes the failure on when the head is where it was expected', async () => {
+        const apiError = new Error('Server responded with an error', { cause: { status: 422 } });
+
+        fetchAPIMock
+          .mockRejectedValueOnce(apiError)
+          .mockResolvedValueOnce({ commit: { id: 'loaded-head-sha', message: '' } });
+
+        await expect(commitChanges(changes, options)).rejects.toBe(apiError);
+      });
+
+      test('passes the failure on when the head can’t be looked up afterwards', async () => {
+        const apiError = new Error('Server responded with an error', { cause: { status: 409 } });
+
+        fetchAPIMock
+          .mockRejectedValueOnce(apiError)
+          .mockRejectedValueOnce(new Error('Failed to send the request'));
+
+        await expect(commitChanges(changes, options)).rejects.toBe(apiError);
+      });
+
+      test('passes any other failure on without a head lookup', async () => {
+        const apiError = new Error('Server responded with an error', { cause: { status: 500 } });
+
+        fetchAPIMock.mockRejectedValueOnce(apiError);
+
+        await expect(commitChanges(changes, options)).rejects.toBe(apiError);
+        expect(fetchAPIMock).toHaveBeenCalledTimes(1);
+      });
+
+      test('passes a failure on without a head lookup before the site data is loaded', async () => {
+        const apiError = new Error('Server responded with an error', { cause: { status: 422 } });
+
+        repositoryHead.current = '';
+        fetchAPIMock.mockRejectedValueOnce(apiError);
+
+        await expect(commitChanges(changes, options)).rejects.toBe(apiError);
+        expect(fetchAPIMock).toHaveBeenCalledTimes(1);
+      });
+    });
+
     test('should handle multiple file changes in single commit', async () => {
       const mockChanges = [
         {
@@ -550,6 +754,83 @@ describe('Gitea Commits Service', () => {
         },
       });
     });
+
+    test('should commit a workflow branch to the contributor’s fork', async () => {
+      forkedRepository.current = { owner: 'me', repo: 'fork' };
+      vi.mocked(getWorkflowRepository).mockReturnValue({ owner: 'me', repo: 'fork' });
+      fetchAPIMock.mockResolvedValue({
+        commit: { sha: 'workflow-sha', created: '2023-01-15T16:00:00Z' },
+        files: [{ path: 'file1.md', sha: 'sha1' }],
+      });
+
+      await commitChanges(
+        [{ action: /** @type {CommitAction} */ ('create'), path: 'file1.md', data: 'a' }],
+        { commitType: /** @type {CommitType} */ ('create'), branch: 'cms/me/fork/posts/hello' },
+      );
+
+      expect(fetchAPIMock).toHaveBeenCalledWith('/repos/me/fork/contents', expect.anything());
+      forkedRepository.current = undefined;
+    });
+
+    test('should look a missing SHA up on the workflow branch in the fork', async () => {
+      forkedRepository.current = { owner: 'me', repo: 'fork' };
+      vi.mocked(getWorkflowRepository).mockReturnValue({ owner: 'me', repo: 'fork' });
+      fetchAPIMock.mockResolvedValueOnce({ sha: 'fork-sha' }).mockResolvedValueOnce({
+        commit: { sha: 'workflow-sha', created: '2023-01-15T16:00:00Z' },
+        files: [{ path: 'file1.md', sha: 'sha1' }],
+      });
+
+      await commitChanges(
+        [{ action: /** @type {CommitAction} */ ('update'), path: 'file1.md', data: 'a' }],
+        { commitType: /** @type {CommitType} */ ('update'), branch: 'cms/me/fork/posts/hello' },
+      );
+
+      expect(fetchAPIMock).toHaveBeenNthCalledWith(
+        1,
+        '/repos/me/fork/contents/file1.md?ref=cms%2Fme%2Ffork%2Fposts%2Fhello',
+      );
+      expect(fetchAPIMock.mock.calls[1][1].body.files[0].sha).toBe('fork-sha');
+      forkedRepository.current = undefined;
+    });
+
+    test('should refuse a direct commit from an Open Authoring contributor', async () => {
+      forkedRepository.current = { owner: 'me', repo: 'fork' };
+
+      await expect(
+        commitChanges(
+          [{ action: /** @type {CommitAction} */ ('create'), path: 'file1.md', data: 'a' }],
+          { commitType: /** @type {CommitType} */ ('create') },
+        ),
+      ).rejects.toThrow('Cannot commit directly to the configured repository');
+
+      expect(fetchAPIMock).not.toHaveBeenCalled();
+      forkedRepository.current = undefined;
+    });
+
+    test('should create the workflow branch as part of the first commit', async () => {
+      fetchAPIMock.mockResolvedValue({
+        commit: { sha: 'workflow-sha', created: '2023-01-15T16:00:00Z' },
+        files: [{ path: 'file1.md', sha: 'sha1' }],
+      });
+
+      await commitChanges(
+        [{ action: /** @type {CommitAction} */ ('create'), path: 'file1.md', data: 'a' }],
+        {
+          commitType: /** @type {CommitType} */ ('create'),
+          branch: 'cms/posts/hello',
+          startBranch: mockBranch,
+        },
+      );
+
+      expect(fetchAPIMock).toHaveBeenCalledTimes(1);
+
+      expect(fetchAPIMock).toHaveBeenCalledWith(
+        `/repos/${mockOwner}/${mockRepo}/contents`,
+        expect.objectContaining({
+          body: expect.objectContaining({ branch: mockBranch, new_branch: 'cms/posts/hello' }),
+        }),
+      );
+    });
   });
 
   describe('fetchFileCommits', () => {
@@ -558,6 +839,7 @@ describe('Gitea Commits Service', () => {
         {
           sha: 'abc123',
           commit: {
+            message: 'Update Post “hello”\r\n\r\nWith a body\r\n',
             author: { name: 'Alice', email: 'alice@example.com', date: '2024-06-01T12:00:00Z' },
           },
           author: { avatar_url: 'https://example.com/alice.png', login: 'alice' },
@@ -576,6 +858,7 @@ describe('Gitea Commits Service', () => {
       expect(result).toHaveLength(2);
       expect(result[0]).toEqual({
         sha: 'abc123',
+        message: 'Update Post “hello”',
         authorName: 'Alice',
         authorEmail: 'alice@example.com',
         authorAvatarURL: 'https://example.com/alice.png',
@@ -584,6 +867,7 @@ describe('Gitea Commits Service', () => {
       });
       expect(result[1]).toEqual({
         sha: 'def456',
+        message: '',
         authorName: 'Bob',
         authorEmail: 'bob@example.com',
         authorAvatarURL: 'https://example.com/bob.png',
@@ -659,6 +943,7 @@ describe('Gitea Commits Service', () => {
       expect(result).toHaveLength(1);
       expect(result[0]).toEqual({
         sha: 'no-author',
+        message: '',
         authorName: '',
         authorEmail: undefined,
         authorAvatarURL: undefined,

@@ -1,6 +1,7 @@
+// @vitest-environment happy-dom
 import { describe, expect, test, vi } from 'vitest';
 
-import { getDefaultValueMap } from './defaults';
+import { getDefaultValueMap, hasRequiredSingleItem } from './defaults';
 
 /**
  * @import { PopulateDefaultValueArgs } from '$lib/types/private';
@@ -81,6 +82,46 @@ describe('Test getDefaultValueMap()', () => {
       'items.1': 'dynamic2',
       'items.2': 'dynamic3',
     });
+  });
+
+  test('should sanitize dynamicValue items of a RichText subfield', () => {
+    /** @type {ListField} */
+    const fieldConfig = {
+      ...baseFieldConfig,
+      field: { name: 'body', widget: 'richtext', sanitize_preview: false },
+    };
+
+    const result = getDefaultValueMap({
+      fieldConfig,
+      keyPath: 'items',
+      locale: '_default',
+      defaultLocale: '_default',
+      dynamicValue: '<img src=x onerror=alert(1)>, &lt;svg onload=alert(1)&gt;, **Bold** `1 < 2`',
+    });
+
+    expect(result).toEqual({
+      items: [],
+      'items.0': '&lt;svg onload=alert(1)>',
+      'items.1': '**Bold** `1 < 2`',
+    });
+  });
+
+  test('should keep dynamicValue items of another subfield as is', () => {
+    /** @type {ListField} */
+    const fieldConfig = {
+      ...baseFieldConfig,
+      field: { name: 'tag', widget: 'string' },
+    };
+
+    const result = getDefaultValueMap({
+      fieldConfig,
+      keyPath: 'items',
+      locale: '_default',
+      defaultLocale: '_default',
+      dynamicValue: '<b>, a < b',
+    });
+
+    expect(result).toEqual({ items: [], 'items.0': '<b>', 'items.1': 'a < b' });
   });
 
   test('should handle empty dynamicValue', () => {
@@ -468,5 +509,95 @@ describe('Test getDefaultValueMap()', () => {
 
       expect(result).toEqual({ items: [], 'items.0.label': 'Home' });
     });
+  });
+
+  describe('a required single-item list', () => {
+    /**
+     * Stand-in for `populateDefaultValue()`, which writes the field’s own default or an empty
+     * string.
+     * @type {(args: PopulateDefaultValueArgs) => void}
+     */
+    const populateDefault = vi.fn(({ content, keyPath, fieldConfig }) => {
+      // @ts-ignore `default` is not defined on every field type
+      content[keyPath] = fieldConfig.default ?? '';
+    });
+
+    /**
+     * Get the default value map with the stand-in.
+     * @param {ListField} fieldConfig Field configuration.
+     * @param {string} [locale] Locale.
+     * @returns {Record<string, any>} Default value map.
+     */
+    const getMap = (fieldConfig, locale = 'en') =>
+      getDefaultValueMap({
+        fieldConfig,
+        keyPath: 'items',
+        locale,
+        defaultLocale: 'en',
+        populateDefault,
+      });
+
+    test('should hold one item with the default values of the subfields', () => {
+      expect(
+        getMap({
+          ...baseFieldConfig,
+          max: 1,
+          fields: [
+            { name: 'name', widget: 'string', default: 'Anonymous' },
+            { name: 'email', widget: 'string' },
+          ],
+        }),
+      ).toEqual({ items: [], 'items.0.name': 'Anonymous', 'items.0.email': '' });
+
+      // A list with a single subfield holds the subfield’s value as the item
+      expect(
+        getMap({
+          ...baseFieldConfig,
+          max: 1,
+          field: { name: 'tag', widget: 'string', default: 'new' },
+        }),
+      ).toEqual({ items: [], 'items.0': 'new' });
+    });
+
+    test('should leave the list empty where the item isn’t required', () => {
+      const fields = [{ name: 'name', widget: 'string' }];
+
+      expect(getMap({ ...baseFieldConfig, max: 1, required: false, fields })).toEqual({
+        items: [],
+      });
+      // The field is only required in English
+      expect(getMap({ ...baseFieldConfig, max: 1, required: ['en'], fields }, 'fr')).toEqual({
+        items: [],
+      });
+      expect(getMap({ ...baseFieldConfig, max: 2, fields })).toEqual({ items: [] });
+    });
+  });
+});
+
+describe('Test hasRequiredSingleItem()', () => {
+  test('should be true for a required list with subfields limited to one item', () => {
+    const fields = [{ name: 'name', widget: 'string' }];
+
+    expect(
+      hasRequiredSingleItem({ fieldConfig: { ...baseFieldConfig, max: 1, fields }, locale: 'en' }),
+    ).toBe(true);
+    expect(
+      hasRequiredSingleItem({
+        fieldConfig: { ...baseFieldConfig, max: 1, field: fields[0] },
+        locale: 'en',
+      }),
+    ).toBe(true);
+  });
+
+  test('should be false for a list with variable types or without subfields', () => {
+    expect(
+      hasRequiredSingleItem({
+        fieldConfig: { ...baseFieldConfig, max: 1, types: [{ name: 'a', fields: [] }] },
+        locale: 'en',
+      }),
+    ).toBe(false);
+    expect(
+      hasRequiredSingleItem({ fieldConfig: { ...baseFieldConfig, max: 1 }, locale: 'en' }),
+    ).toBe(false);
   });
 });

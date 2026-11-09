@@ -1,8 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-/**
- * @import { ConfigParserCollectors } from '$lib/types/private';
- */
+import { createCollectors } from '$lib/test/config-parser';
 
 // Mock @sveltia/i18n
 /** @type {Record<string, string>} */
@@ -18,30 +16,10 @@ const mockI18nStrings = {
   'config.error.collection_file_i18n_required': 'Collection file i18n required',
 };
 
-/**
- * Mock translation function.
- * @param {string} key Message key.
- * @param {object & { values?: Record<string, string> }} [options] Options.
- * @returns {string} Translated string.
- */
-function mockTranslate(key, options) {
-  let message = mockI18nStrings[key] || key;
+vi.mock('@sveltia/i18n', async () =>
+  (await import('$lib/test/i18n')).createI18nMock({ strings: mockI18nStrings, locale: 'en-US' }),
+);
 
-  if (options?.values) {
-    Object.entries(options.values).forEach(([k, v]) => {
-      message = message.replace(`{${k}}`, v);
-    });
-  }
-
-  return message;
-}
-
-vi.mock('@sveltia/i18n', () => ({
-  _: mockTranslate,
-  locale: { current: 'en-US', set: vi.fn() },
-}));
-
-const mockGetStore = vi.fn();
 const mockParseFields = vi.fn();
 
 vi.mock('$lib/services/config/parser/fields', () => ({
@@ -49,8 +27,10 @@ vi.mock('$lib/services/config/parser/fields', () => ({
 }));
 
 const mockIsFormatMismatch = vi.fn();
+const mockCheckBodyField = vi.fn();
 
 vi.mock('$lib/services/config/parser/collections/format', () => ({
+  checkBodyField: mockCheckBodyField,
   isFormatMismatch: mockIsFormatMismatch,
 }));
 
@@ -62,24 +42,9 @@ vi.mock('$lib/services/config/parser/utils/validator', () => ({
   checkName: mockCheckName,
 }));
 
-/**
- * Create a fresh collectors object for testing.
- * @returns {ConfigParserCollectors} Collectors instance.
- */
-function createCollectors() {
-  return {
-    errors: new Set(),
-    warnings: new Set(),
-    mediaFields: new Set(),
-    relationFields: new Set(),
-  };
-}
-
 describe('Collection Files Parser', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-
-    mockGetStore.mockImplementation((store) => store);
 
     mockCheckName.mockReturnValue(true);
   });
@@ -111,6 +76,79 @@ describe('Collection Files Parser', () => {
         context,
         collectors,
       );
+    });
+
+    it('should check the body field with the file’s or the collection’s options', async () => {
+      const { parseCollectionFile } = await import('.');
+      const collectors = createCollectors();
+      const fields = [{ name: 'body', widget: 'object', fields: [] }];
+
+      /**
+       * Parse a collection file and get the `checkBodyField()` arguments.
+       * @param {any} collection Collection.
+       * @param {any} collectionFile Collection file.
+       * @returns {any} Arguments, without the context and collectors.
+       */
+      const parse = (collection, collectionFile) => {
+        mockCheckBodyField.mockClear();
+        parseCollectionFile(
+          {
+            cmsConfig: /** @type {any} */ ({}),
+            collection,
+            collectionFile: { fields, ...collectionFile },
+          },
+          collectors,
+        );
+
+        const [{ context: _context, collectors: _collectors, ...args }] =
+          mockCheckBodyField.mock.calls[0];
+
+        return args;
+      };
+
+      expect(
+        parse(
+          { name: 'pages', format: 'yaml-frontmatter', body_field: { key: 'body' } },
+          { name: 'about', file: 'content/about.html' },
+        ),
+      ).toEqual({
+        extension: 'html',
+        format: 'yaml-frontmatter',
+        bodyField: { key: 'body' },
+        fields,
+      });
+      expect(
+        parse(
+          { name: 'pages', body_field: { key: 'body' } },
+          { name: 'about', file: 'content/about.md', body_field: { inline: true } },
+        ),
+      ).toEqual({ extension: 'md', format: undefined, bodyField: { inline: true }, fields });
+    });
+
+    it('should check the template tags in the file’s folder options', async () => {
+      const { parseCollectionFile } = await import('.');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const context = {
+        cmsConfig: {},
+        collection: { name: 'pages' },
+        collectionFile: {
+          name: 'about',
+          file: 'content/about.md',
+          media_folder: '/static/{{locale}}',
+          fields: [{ name: 'title', widget: 'string' }],
+        },
+      };
+
+      parseCollectionFile(context, collectors);
+
+      expect(mockAddMessage).toHaveBeenCalledWith({
+        strKey: 'unsupported_folder_template_tag',
+        values: { option: 'media_folder', tag: '{{locale}}' },
+        context,
+        collectors,
+      });
     });
 
     it('should use inherited format from collection if file format is not specified', async () => {
@@ -359,6 +397,163 @@ describe('Collection Files Parser', () => {
           strKey: 'collection_file_i18n_required',
         }),
       );
+    });
+
+    describe('locale placeholder with the default locale omitted from the file path', () => {
+      /**
+       * Parse a collection file with the given `file` path and i18n options.
+       * @param {object} args Arguments.
+       * @param {string} args.file File path.
+       * @param {Record<string, any>} [args.siteI18n] Site-level i18n options.
+       * @param {any} [args.collectionI18n] Collection-level `i18n` option.
+       * @param {any} [args.fileI18n] File-level `i18n` option.
+       * @param {string} [args.collectionName] Collection name.
+       * @returns {Promise<any>} Context passed to the parser.
+       */
+      const parse = async ({
+        file,
+        siteI18n = { locales: ['en', 'fr'], omit_default_locale_from_file_path: true },
+        collectionI18n = true,
+        fileI18n = true,
+        collectionName = 'settings',
+      }) => {
+        const { parseCollectionFile } = await import('.');
+
+        /** @type {any} */
+        const context = {
+          cmsConfig: { i18n: siteI18n },
+          collection: { name: collectionName, files: [], i18n: collectionI18n },
+          collectionFile: {
+            name: 'general',
+            file,
+            fields: [{ name: 'title', widget: 'string' }],
+            i18n: fileI18n,
+          },
+        };
+
+        parseCollectionFile(context, createCollectors());
+
+        return context;
+      };
+
+      it.each([
+        'i18n/{{locale}}.yaml',
+        'data/settings_{{locale}}.json',
+        'settings-{{locale}}.json',
+        '{{locale}}.md',
+        'data/.{{locale}}.json',
+        'content/about-{{locale}}/index.md',
+      ])('should add a warning for the unresolvable path %s', async (file) => {
+        const context = await parse({ file });
+
+        expect(mockAddMessage).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'warning',
+            strKey: 'locale_not_omitted_from_file_path',
+            values: { file },
+            context,
+          }),
+        );
+      });
+
+      it.each([
+        'content/{{locale}}/about.md',
+        '{{locale}}/about.md',
+        'content/about.{{locale}}.md',
+        'data/{{locale}}.settings.json',
+        'content/about.{{locale}}',
+      ])('should not add a warning for the resolvable path %s', async (file) => {
+        await parse({ file });
+
+        expect(mockAddMessage).not.toHaveBeenCalledWith(
+          expect.objectContaining({ strKey: 'locale_not_omitted_from_file_path' }),
+        );
+      });
+
+      it('should not add a warning when the option is disabled', async () => {
+        await parse({ file: 'i18n/{{locale}}.yaml', siteI18n: { locales: ['en', 'fr'] } });
+
+        expect(mockAddMessage).not.toHaveBeenCalledWith(
+          expect.objectContaining({ strKey: 'locale_not_omitted_from_file_path' }),
+        );
+      });
+
+      it('should not add a warning when i18n is not enabled for the file', async () => {
+        await parse({ file: 'i18n/{{locale}}.yaml', fileI18n: false });
+
+        expect(mockAddMessage).not.toHaveBeenCalledWith(
+          expect.objectContaining({ strKey: 'locale_not_omitted_from_file_path' }),
+        );
+      });
+
+      it('should not add a warning without locales', async () => {
+        await parse({
+          file: 'i18n/{{locale}}.yaml',
+          siteI18n: { omit_default_locale_from_file_path: true },
+        });
+
+        expect(mockAddMessage).not.toHaveBeenCalledWith(
+          expect.objectContaining({ strKey: 'locale_not_omitted_from_file_path' }),
+        );
+      });
+
+      it('should add a warning when the option is enabled at the collection level', async () => {
+        await parse({
+          file: 'i18n/{{locale}}.yaml',
+          siteI18n: { locales: ['en', 'fr'] },
+          collectionI18n: { omit_default_locale_from_file_path: true },
+        });
+
+        expect(mockAddMessage).toHaveBeenCalledWith(
+          expect.objectContaining({ strKey: 'locale_not_omitted_from_file_path' }),
+        );
+      });
+
+      it('should add a warning when the option is enabled at the file level', async () => {
+        await parse({
+          file: 'i18n/{{locale}}.yaml',
+          siteI18n: { locales: ['en', 'fr'] },
+          fileI18n: { omit_default_locale_from_file_path: true },
+        });
+
+        expect(mockAddMessage).toHaveBeenCalledWith(
+          expect.objectContaining({ strKey: 'locale_not_omitted_from_file_path' }),
+        );
+      });
+
+      it('should not add a warning when the file level disables the option', async () => {
+        await parse({
+          file: 'i18n/{{locale}}.yaml',
+          fileI18n: { omit_default_locale_from_file_path: false },
+        });
+
+        expect(mockAddMessage).not.toHaveBeenCalledWith(
+          expect.objectContaining({ strKey: 'locale_not_omitted_from_file_path' }),
+        );
+      });
+
+      it('should add a warning when the deprecated alias enables the option', async () => {
+        await parse({
+          file: 'i18n/{{locale}}.yaml',
+          siteI18n: { locales: ['en', 'fr'], omit_default_locale_from_filename: true },
+        });
+
+        expect(mockAddMessage).toHaveBeenCalledWith(
+          expect.objectContaining({ strKey: 'locale_not_omitted_from_file_path' }),
+        );
+      });
+
+      it('should add a warning for a singleton file', async () => {
+        await parse({
+          file: 'i18n/{{locale}}.yaml',
+          collectionName: '_singletons',
+          collectionI18n: false,
+        });
+
+        expect(mockAddMessage).toHaveBeenCalledWith(
+          expect.objectContaining({ strKey: 'locale_not_omitted_from_file_path' }),
+        );
+      });
     });
   });
 

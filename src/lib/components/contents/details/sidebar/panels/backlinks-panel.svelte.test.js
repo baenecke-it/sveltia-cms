@@ -58,15 +58,16 @@ describe('BacklinksPanel', () => {
     });
 
     const panel = page.getByRole('group', { name: 'Backlinks' });
-    const group = panel.getByRole('group');
+    const group = panel.getByRole('group', { name: 'Posts' });
 
     await expect.element(group.getByRole('heading', { level: 4 })).toHaveTextContent('Posts');
+    // The entries are sorted by summary
     expect(
       group
         .getByRole('button')
         .elements()
         .map((el) => el.textContent?.trim()),
-    ).toEqual(['Hello', 'Again']);
+    ).toEqual(['Again', 'Hello']);
 
     await group.getByRole('button', { name: 'Hello' }).click();
     await expect.poll(() => window.location.hash).toBe('#/collections/posts/entries/hello');

@@ -1,5 +1,5 @@
 import { sleep } from '@sveltia/utils/misc';
-import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { beforeEach, describe, expect, onTestFinished, test, vi } from 'vitest';
 import { page, userEvent } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
@@ -7,6 +7,8 @@ import { createSubfolder } from '$lib/services/assets/data/subfolder';
 import { globalAssetFolder } from '$lib/services/assets/folders';
 import { selectAssetsView, showContentOverlay } from '$lib/services/contents/editor';
 import { duplicates } from '$lib/services/contents/fields/file/duplicates.svelte';
+import { listAssets } from '$lib/services/contents/fields/file/helpers';
+import { getUnsavedAssets } from '$lib/services/contents/fields/file/process';
 import {
   FRAME_ORIGIN as CLOUDINARY_ORIGIN,
   activated as cloudinaryActivated,
@@ -25,6 +27,9 @@ import {
 } from '$lib/test/config';
 
 import SelectAssetsDialog from './select-assets-dialog.svelte';
+
+vi.mock('$lib/services/contents/fields/file/helpers', { spy: true });
+vi.mock('$lib/services/contents/fields/file/process', { spy: true });
 
 vi.mock('$lib/services/assets/data/subfolder', async (importOriginal) => ({
   .../** @type {object} */ (await importOriginal()),
@@ -110,6 +115,23 @@ const dropFiles = (files) => {
 };
 
 /**
+ * Drag files over the dialog, and tell whether the drop indicator then appears.
+ * @returns {Promise<boolean>} Whether the indicator is shown.
+ */
+const isDropIndicatorShownOnDragOver = async () => {
+  /** @type {HTMLElement} */ (document.querySelector('.drop-target')).dispatchEvent(
+    new DragEvent('dragover', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer: new DataTransfer(),
+    }),
+  );
+  await sleep(100);
+
+  return !!document.querySelector('.drop-indicator');
+};
+
+/**
  * Wait for the grid to be listed and activated.
  * @param {number} count Expected number of items.
  * @returns {Promise<void>}
@@ -118,8 +140,6 @@ const waitForGrid = async (count) => {
   await expect
     .poll(() => document.querySelectorAll('#select-assets-grid [role="option"]').length)
     .toBe(count);
-  // A Sveltia UI list box starts handling clicks 100 ms after it’s mounted
-  await sleep(150);
 };
 
 describe('SelectAssetsDialog', () => {
@@ -276,6 +296,69 @@ describe('SelectAssetsDialog', () => {
       expect(dialog.getByRole('listbox', { name: 'Folders' }).elements()).toHaveLength(0);
     });
 
+    test('neither creates nor uploads anything within a read-only folder', async () => {
+      // A read-only asset collection is offered to every field, which can still pick from it
+      const { onSelect } = await renderDialog({
+        assetLibraryFolderMap: {
+          global: { folder: { ...globalAssetFolder.current, readonly: true }, enabled: true },
+        },
+      });
+
+      const dialog = page.getByRole('dialog', { name: 'Select Image' });
+
+      await waitForGrid(2);
+      await expect.element(dialog.getByRole('button', { name: 'Upload' })).toBeDisabled();
+      await dialog
+        .getByRole('listbox', { name: 'Folders' })
+        .getByRole('option', { name: '2024' })
+        .click();
+      await waitForGrid(1);
+
+      await expect.element(dialog.getByRole('button', { name: 'New Folder' })).toBeDisabled();
+      await expect.element(dialog.getByRole('button', { name: 'Upload' })).toBeDisabled();
+
+      // The drop zone is disabled, so dragging files over it doesn’t invite a drop, and a dropped
+      // file is ignored rather than headed for the folder
+      expect(await isDropIndicatorShownOnDragOver()).toBe(false);
+      dropFiles([await createMockImageFile({ name: 'index.png' })]);
+      await waitForGrid(1);
+      await expect.element(dialog.getByRole('button', { name: 'Insert' })).toBeDisabled();
+      expect(onSelect).not.toHaveBeenCalled();
+    });
+
+    test('neither creates nor uploads anything in a folder the CMS is served from', async () => {
+      assets.push(
+        createMockAsset({
+          name: 'logo.png',
+          folderPath: 'static/uploads/admin',
+          file: await createMockImageFile({ name: 'logo.png' }),
+          asset: { folder: globalAssetFolder.current },
+        }),
+      );
+      setAssets(assets);
+
+      const { onSelect } = await renderDialog();
+      const dialog = page.getByRole('dialog', { name: 'Select Image' });
+
+      await waitForGrid(2);
+      await dialog
+        .getByRole('listbox', { name: 'Folders' })
+        .getByRole('option', { name: 'admin' })
+        .click();
+      await waitForGrid(1);
+
+      await expect.element(dialog.getByRole('button', { name: 'New Folder' })).toBeDisabled();
+      await expect.element(dialog.getByRole('button', { name: 'Upload' })).toBeDisabled();
+
+      // The drop zone is disabled, so dragging files over it doesn’t invite a drop, and a dropped
+      // file is ignored rather than headed for the folder
+      expect(await isDropIndicatorShownOnDragOver()).toBe(false);
+      dropFiles([await createMockImageFile({ name: 'index.png' })]);
+      await waitForGrid(1);
+      await expect.element(dialog.getByRole('button', { name: 'Insert' })).toBeDisabled();
+      expect(onSelect).not.toHaveBeenCalled();
+    });
+
     test('creates a folder where the user is, and uploads there', async () => {
       vi.mocked(createSubfolder).mockResolvedValue(undefined);
 
@@ -312,6 +395,7 @@ describe('SelectAssetsDialog', () => {
       // A dropped file goes to the subfolder being browsed
       const file = await createMockImageFile({ name: 'new.png' });
 
+      expect(await isDropIndicatorShownOnDragOver()).toBe(true);
       dropFiles([file]);
       await waitForGrid(2);
       await dialog.getByRole('button', { name: 'Insert' }).click();
@@ -319,6 +403,56 @@ describe('SelectAssetsDialog', () => {
       await vi.waitFor(() =>
         expect(onSelect).toHaveBeenCalledWith([
           { file, folder: globalAssetFolder.current, subfolderPath: '2024', replace: false },
+        ]),
+      );
+    });
+
+    test('refuses the name of a folder leading to another asset folder', async () => {
+      await initTestConfig({
+        media_libraries: { stock_assets: { providers: ['picsum'] } },
+        collections: [
+          {
+            name: 'projects',
+            folder: 'content/projects',
+            media_folder: '/static/uploads/projects',
+            fields: [{ name: 'title', widget: 'string' }],
+          },
+        ],
+      });
+
+      await renderDialog();
+
+      const dialog = page.getByRole('dialog', { name: 'Select Image' });
+
+      await waitForGrid(2);
+      await dialog.getByRole('button', { name: 'New Folder' }).click();
+
+      const newFolder = page.getByRole('dialog', { name: 'New Folder' });
+
+      // The collection’s own folder isn’t listed, but a new folder can’t take its name
+      await newFolder.getByRole('textbox', { name: 'Folder Name' }).fill('projects');
+      await expect.element(newFolder.getByRole('button', { name: 'Create' })).toBeDisabled();
+      await newFolder.getByRole('textbox', { name: 'Folder Name' }).fill('portfolio');
+      await expect.element(newFolder.getByRole('button', { name: 'Create' })).toBeEnabled();
+    });
+
+    test('only asks to replace a file in the directory the dropped file goes to', async () => {
+      const { onSelect } = await renderDialog();
+      const dialog = page.getByRole('dialog', { name: 'Select Image' });
+
+      await waitForGrid(2);
+
+      // `d.png` is in a subfolder, not in the folder root the file goes to
+      const file = await createMockImageFile({ name: 'd.png', width: 5 });
+
+      dropFiles([file]);
+      await waitForGrid(3);
+      expect(duplicates.showDialog).toBe(false);
+      await dialog.getByRole('button', { name: 'Insert' }).click();
+
+      await vi.waitFor(() =>
+        expect(onSelect).toHaveBeenCalledWith([
+          { file, folder: globalAssetFolder.current, subfolderPath: '', replace: false },
         ]),
       );
     });
@@ -364,9 +498,6 @@ describe('SelectAssetsDialog', () => {
       await expect.element(dialog.getByRole('button', { name: 'Select' })).toBeEnabled();
 
       const folder2024 = folders.getByRole('option', { name: '2024' });
-
-      // A Sveltia UI list box starts handling clicks and keys 100 ms after it’s mounted
-      await sleep(150);
 
       // A click selects a subfolder, and another click clears the selection
       await folder2024.click();
@@ -448,9 +579,7 @@ describe('SelectAssetsDialog', () => {
       const folder2024 = folders.getByRole('option', { name: '2024' });
       const folder2025 = folders.getByRole('option', { name: '2025' });
 
-      // A Sveltia UI list box starts handling clicks and keys 100 ms after it’s mounted
       await expect.element(folder2024).toBeVisible();
-      await sleep(150);
 
       // Without a selection, the folder being browsed is picked
       await expect
@@ -567,7 +696,8 @@ describe('SelectAssetsDialog', () => {
     const { onSelect } = await renderDialog({ kind: undefined });
     const dialog = page.getByRole('dialog', { name: 'Select File' });
 
-    await sleep(150);
+    // Files of any kind are listed
+    await expect.element(dialog.getByRole('listbox', { name: 'Available Files' })).toBeVisible();
     await dialog.getByRole('option', { name: 'Enter URL' }).click();
     await expect.element(dialog.getByText('Enter URL of the file:')).toBeInTheDocument();
 
@@ -584,7 +714,6 @@ describe('SelectAssetsDialog', () => {
     const dialog = page.getByRole('dialog', { name: 'Select Image' });
 
     // The URL entry can be turned off
-    await sleep(150);
     expect(dialog.getByRole('option', { name: 'Enter URL' }).elements()).toHaveLength(0);
 
     props.canEnterURL = true;
@@ -599,12 +728,35 @@ describe('SelectAssetsDialog', () => {
     await expect.element(insert).toBeDisabled();
   });
 
+  test('selects the entered URL again on coming back from another location', async () => {
+    const { onSelect } = await renderDialog();
+    const dialog = page.getByRole('dialog', { name: 'Select Image' });
+    const insert = dialog.getByRole('button', { name: 'Insert' });
+
+    await dialog.getByRole('option', { name: 'Enter URL' }).click();
+    await dialog.getByRole('textbox').fill('https://example.com/x.png');
+    await expect.element(insert).toBeEnabled();
+
+    // Nothing is selected in the repository folder
+    await dialog.getByRole('option', { name: 'Global Assets' }).click();
+    await expect.element(insert).toBeDisabled();
+
+    // The URL is still in the text box, and selected again
+    await dialog.getByRole('option', { name: 'Enter URL' }).click();
+    await expect.element(dialog.getByRole('textbox')).toHaveValue('https://example.com/x.png');
+    await expect.element(insert).toBeEnabled();
+    await insert.click();
+
+    await vi.waitFor(() =>
+      expect(onSelect).toHaveBeenCalledWith([{ url: 'https://example.com/x.png' }]),
+    );
+  });
+
   test('lists the assets on a cloud storage service', async () => {
     const list = vi.fn().mockResolvedValue([createMockExternalAsset({ fileName: 'cloud.png' })]);
     const { onSelect } = await renderDialog({}, { list });
     const dialog = page.getByRole('dialog');
 
-    await sleep(150);
     await dialog.getByRole('option', { name: 'Test Cloud' }).click();
     await waitForGrid(1);
     expect(list).toHaveBeenCalledWith(expect.objectContaining({ kind: 'image' }));
@@ -633,7 +785,6 @@ describe('SelectAssetsDialog', () => {
 
     // The button is for the repository folder until a cloud service is picked
     await expect.element(dialog.getByRole('button', { name: 'New Folder' })).toBeInTheDocument();
-    await sleep(150);
     await dialog.getByRole('option', { name: 'Test Cloud' }).click();
     await expect
       .element(page.getByRole('listbox', { name: 'Folders' }))
@@ -655,7 +806,6 @@ describe('SelectAssetsDialog', () => {
   test('shows the credit for a stock photo service', async () => {
     await renderDialog();
 
-    await sleep(150);
     await page.getByRole('option', { name: 'Lorem Picsum' }).click();
 
     await expect
@@ -669,7 +819,6 @@ describe('SelectAssetsDialog', () => {
     await initTestConfig({ media_libraries: { stock_assets: { providers: ['pexels'] } } });
     await renderDialog();
 
-    await sleep(150);
     await page.getByRole('option', { name: 'Pexels' }).click();
     await expect.element(page.getByRole('textbox', { name: /API Key/ })).toBeVisible();
     expect(page.getByRole('link', { name: /Photos provided by/ }).elements()).toHaveLength(0);
@@ -688,12 +837,54 @@ describe('SelectAssetsDialog', () => {
     try {
       await renderDialog();
 
-      await sleep(150);
       await page.getByRole('option', { name: 'Lorem Picsum' }).click();
       await expect
         .element(page.getByRole('option', { name: 'Lorem Picsum' }))
         .toHaveAttribute('aria-selected', 'true');
       expect(page.getByRole('link', { name: /Photos provided by/ }).elements()).toHaveLength(0);
+    } finally {
+      allStockAssetProviders.picsum = picsum;
+    }
+  });
+
+  test('lets a stock photo service know which photo has been inserted', async () => {
+    const { picsum } = allStockAssetProviders;
+
+    const photos = [
+      createMockExternalAsset({ fileName: 'a.jpg', folder: 'photos' }),
+      createMockExternalAsset({ fileName: 'b.jpg', folder: 'photos' }),
+    ];
+
+    // A failure doesn’t get in the way of the insertion
+    const trackDownload = vi.fn().mockRejectedValue(new Error('Boom'));
+
+    allStockAssetProviders.picsum = {
+      ...picsum,
+      list: vi.fn().mockResolvedValue(photos),
+      trackDownload,
+    };
+
+    try {
+      const { onSelect } = await renderDialog();
+      const dialog = page.getByRole('dialog');
+
+      await dialog.getByRole('option', { name: 'Lorem Picsum' }).click();
+      await waitForGrid(2);
+      // A photo picked and then replaced by another is not reported
+      await getOption('photos/a.jpg').click();
+      await getOption('photos/b.jpg').click();
+      await expect.element(getOption('photos/b.jpg')).toHaveAttribute('aria-selected', 'true');
+      expect(trackDownload).not.toHaveBeenCalled();
+
+      await dialog.getByRole('button', { name: 'Insert' }).click();
+
+      await vi.waitFor(() =>
+        expect(onSelect).toHaveBeenCalledWith([
+          { url: 'https://cdn.example.com/photos/b.jpg', credit: undefined },
+        ]),
+      );
+      expect(trackDownload).toHaveBeenCalledTimes(1);
+      expect(trackDownload).toHaveBeenCalledWith(photos[1], expect.anything());
     } finally {
       allStockAssetProviders.picsum = picsum;
     }
@@ -750,6 +941,121 @@ describe('SelectAssetsDialog', () => {
     );
     // The very same `File` object is passed on, not a clone that would have to be read again
     expect(onSelect.mock.calls[0][0][0].file).toBe(file);
+  });
+
+  test('lists only the existing files of the accepted types, but any dropped file', async () => {
+    const { onSelect } = await renderDialog({
+      kind: undefined,
+      accept: '.txt',
+      fieldConfig: { name: 'file', widget: 'file', accept: '.txt' },
+    });
+
+    const dialog = page.getByRole('dialog', { name: 'Select File' });
+
+    // An existing file is never transformed, so one of another type can’t be used
+    await waitForGrid(1);
+    await expect.element(getOption(assets[2].path)).toBeInTheDocument();
+
+    // A dropped file is only checked once inserted and processed, as a transformation can change
+    // its format, so it’s listed and selected anyway
+    const file = await createMockImageFile({ name: 'kite.png' });
+
+    dropFiles([file]);
+    await waitForGrid(2);
+    await dialog.getByRole('button', { name: 'Insert' }).click();
+    await vi.waitFor(() =>
+      expect(onSelect).toHaveBeenCalledWith([
+        { file, folder: globalAssetFolder.current, subfolderPath: '', replace: false },
+      ]),
+    );
+  });
+
+  test('lists a dropped file of another kind in the Select Image dialog', async () => {
+    await renderDialog({ accept: 'image/png' });
+    await waitForGrid(2);
+    dropFiles([new File(['x'], 'notes.txt', { type: 'text/plain' })]);
+    await waitForGrid(3);
+  });
+
+  test('ignores the unsaved assets of an earlier draft state that are read late', async () => {
+    const draft = $state({ originalEntry: undefined, files: /** @type {any} */ ({}) });
+    /** @type {((assets: any[]) => void)[]} */
+    const resolvers = [];
+
+    onTestFinished(() => {
+      vi.mocked(getUnsavedAssets).mockReset();
+    });
+    // Read the draft’s files synchronously like the real function, so their changes are tracked
+    vi.mocked(getUnsavedAssets).mockImplementation(({ draft: _draft }) => {
+      void Object.keys(_draft.files);
+
+      return new Promise((resolve) => {
+        resolvers.push(resolve);
+      });
+    });
+
+    await renderDialog({ draft });
+    await vi.waitFor(() => expect(resolvers).toHaveLength(1));
+    // The draft’s files change, and the reads are answered in reverse order
+    draft.files['blob:a'] = { file: new File(['a'], 'a.png'), folder: globalAssetFolder.current };
+    await vi.waitFor(() => expect(resolvers).toHaveLength(2));
+    resolvers[1]([{ name: 'latest.png' }]);
+    await vi.waitFor(() =>
+      expect(vi.mocked(listAssets).mock.lastCall?.[0].unsavedAssets).toEqual([
+        { name: 'latest.png' },
+      ]),
+    );
+    resolvers[0]([{ name: 'stale.png' }]);
+    await sleep(50);
+
+    expect(vi.mocked(listAssets).mock.lastCall?.[0].unsavedAssets).toEqual([
+      { name: 'latest.png' },
+    ]);
+  });
+
+  test('releases the URLs of dropped files when closed, but not the draft’s', async () => {
+    const createObjectURL = vi.spyOn(URL, 'createObjectURL');
+    const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL');
+
+    try {
+      // An unsaved file already picked for the entry, whose blob URL is the field value
+      const pending = await createMockImageFile({ name: 'pending.png' });
+      const draftURL = URL.createObjectURL(pending);
+
+      const { onClose } = await renderDialog({
+        draft: {
+          originalEntry: undefined,
+          files: { [draftURL]: { file: pending, folder: globalAssetFolder.current } },
+        },
+      });
+
+      const dialog = page.getByRole('dialog');
+
+      await waitForGrid(3);
+
+      const file = await createMockImageFile({ name: 'new.png', width: 5 });
+
+      dropFiles([file]);
+      await waitForGrid(4);
+
+      const droppedURL =
+        createObjectURL.mock.results[
+          createObjectURL.mock.calls.findIndex(([blob]) => blob === file)
+        ]?.value;
+
+      expect(droppedURL).toMatch(/^blob:/);
+
+      // The tiles are removed along with the dialog, and the draft’s URL has to survive that
+      // @see https://github.com/sveltia/sveltia-cms/issues/1030
+      await dialog.getByRole('button', { name: 'Cancel' }).click();
+      await vi.waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+      await expect.poll(() => revokeObjectURL.mock.calls.flat()).toContain(droppedURL);
+      await sleep(100);
+      expect(revokeObjectURL.mock.calls.flat()).not.toContain(draftURL);
+    } finally {
+      createObjectURL.mockRestore();
+      revokeObjectURL.mockRestore();
+    }
   });
 
   test('asks whether to replace a dropped file that already exists', async () => {
@@ -885,7 +1191,6 @@ describe('SelectAssetsDialog', () => {
 
       const dialog = page.getByRole('dialog');
 
-      await sleep(150);
       await dialog.getByRole('option', { name: 'Cloudinary' }).click();
       expect(cloudinaryDialogOpen.current).toBe(true);
 

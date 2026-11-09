@@ -481,15 +481,34 @@ entry_not_found: Nie znaleziono wpisu.
 # Entry creation restrictions: tooltip and advisory messages
 creating_entries_disabled_by_admin: Tworzenie nowych wpisów w tej kolekcji zostało wyłączone przez administratora.
 # {$quota} is the collection’s maximum entry count
-creating_entries_disabled_by_quota: Nie możesz dodać nowych wpisów do tej kolekcji, ponieważ osiągnęła ona limit {$quota} wpisów.
+creating_entries_disabled_by_quota: |
+  .input {$quota :integer}
+  .match $quota
+    one  {{ Nie możesz dodać nowych wpisów do tej kolekcji, ponieważ osiągnęła ona limit {$quota} wpisu. }}
+    few  {{ Nie możesz dodać nowych wpisów do tej kolekcji, ponieważ osiągnęła ona limit {$quota} wpisów. }}
+    many {{ Nie możesz dodać nowych wpisów do tej kolekcji, ponieważ osiągnęła ona limit {$quota} wpisów. }}
+    *    {{ Nie możesz dodać nowych wpisów do tej kolekcji, ponieważ osiągnęła ona limit {$quota} wpisów. }}
 # {$quota} is the collection limit and {$remaining} is the number of entries that can still be created
 creating_entries_nearing_quota: |
+  .input {$quota :integer}
   .input {$remaining :integer}
-  .match $remaining
-    one  {{ Ta kolekcja zbliża się do limitu {$quota} wpisów. Możesz utworzyć jeszcze tylko {$remaining} wpis. }}
-    few  {{ Ta kolekcja zbliża się do limitu {$quota} wpisów. Możesz utworzyć jeszcze tylko {$remaining} wpisy. }}
-    many {{ Ta kolekcja zbliża się do limitu {$quota} wpisów. Możesz utworzyć jeszcze tylko {$remaining} wpisów. }}
-    *    {{ Ta kolekcja zbliża się do limitu {$quota} wpisów. Możesz utworzyć jeszcze tylko {$remaining} wpisów. }}
+  .match $quota $remaining
+    one  one  {{ Ta kolekcja zbliża się do limitu {$quota} wpisu. Możesz utworzyć jeszcze tylko {$remaining} wpis. }}
+    one  few  {{ Ta kolekcja zbliża się do limitu {$quota} wpisu. Możesz utworzyć jeszcze tylko {$remaining} wpisy. }}
+    one  many {{ Ta kolekcja zbliża się do limitu {$quota} wpisu. Możesz utworzyć jeszcze tylko {$remaining} wpisów. }}
+    one  *    {{ Ta kolekcja zbliża się do limitu {$quota} wpisu. Możesz utworzyć jeszcze tylko {$remaining} wpisów. }}
+    few  one  {{ Ta kolekcja zbliża się do limitu {$quota} wpisów. Możesz utworzyć jeszcze tylko {$remaining} wpis. }}
+    few  few  {{ Ta kolekcja zbliża się do limitu {$quota} wpisów. Możesz utworzyć jeszcze tylko {$remaining} wpisy. }}
+    few  many {{ Ta kolekcja zbliża się do limitu {$quota} wpisów. Możesz utworzyć jeszcze tylko {$remaining} wpisów. }}
+    few  *    {{ Ta kolekcja zbliża się do limitu {$quota} wpisów. Możesz utworzyć jeszcze tylko {$remaining} wpisów. }}
+    many one  {{ Ta kolekcja zbliża się do limitu {$quota} wpisów. Możesz utworzyć jeszcze tylko {$remaining} wpis. }}
+    many few  {{ Ta kolekcja zbliża się do limitu {$quota} wpisów. Możesz utworzyć jeszcze tylko {$remaining} wpisy. }}
+    many many {{ Ta kolekcja zbliża się do limitu {$quota} wpisów. Możesz utworzyć jeszcze tylko {$remaining} wpisów. }}
+    many *    {{ Ta kolekcja zbliża się do limitu {$quota} wpisów. Możesz utworzyć jeszcze tylko {$remaining} wpisów. }}
+    *    one  {{ Ta kolekcja zbliża się do limitu {$quota} wpisów. Możesz utworzyć jeszcze tylko {$remaining} wpis. }}
+    *    few  {{ Ta kolekcja zbliża się do limitu {$quota} wpisów. Możesz utworzyć jeszcze tylko {$remaining} wpisy. }}
+    *    many {{ Ta kolekcja zbliża się do limitu {$quota} wpisów. Możesz utworzyć jeszcze tylko {$remaining} wpisów. }}
+    *    *    {{ Ta kolekcja zbliża się do limitu {$quota} wpisów. Możesz utworzyć jeszcze tylko {$remaining} wpisów. }}
 
 # Navigation: back links and list labels
 back_to_collection: Powrót do kolekcji
@@ -1636,7 +1655,7 @@ config:
     oauth_implicit_flow: Skonfigurowana metoda uwierzytelniania (implicit flow) nie jest obsługiwana w Sveltia CMS. Użyj innej <a>metody uwierzytelniania</a>.
     github_pkce_unsupported: Autoryzacja PKCE nie jest jeszcze obsługiwana z powodu ograniczeń GitHub. Użyj innej <a>metody uwierzytelniania</a>.
     oauth_no_app_id: Identyfikator aplikacji OAuth nie jest zdefiniowany.
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: Opcja `open_authoring` wymaga trybu publikacji `editorial_workflow`. Szczegóły znajdziesz w <a>dokumentacji</a>.
     # Don’t localize `auth_methods`
     no_auth_methods: Opcja `auth_methods` musi zawierać co najmniej jedną metodę.
@@ -1758,8 +1777,6 @@ config:
   # Warning messages (logged to console)
   warning:
     oauth_no_app_id: Identyfikator aplikacji OAuth nie jest zdefiniowany. Użytkownicy muszą podać token dostępu, aby się zalogować.
-    editorial_workflow_unsupported: Obieg redakcyjny nie jest jeszcze obsługiwany w Sveltia CMS.
-    open_authoring_unsupported_backend: Open Authoring jest obecnie obsługiwany tylko z backendem GitHub.
     # {$prop} is the unsupported option name that will be ignored
     unsupported_ignored_option: Opcja `{$prop}` nie jest obsługiwana w Sveltia CMS. Zostanie zignorowana.
     # Don’t localize `picker_utc`, `input_timezone`, and `output_utc`
@@ -1905,8 +1922,6 @@ workflow:
       few  {{ {$count} z nich nie zostały jeszcze opublikowane, więc Twoje nieopublikowane zmiany zostaną odrzucone. Opublikowane wersje pozostaną opublikowane. }}
       many {{ {$count} z nich nie zostało jeszcze opublikowanych, więc Twoje nieopublikowane zmiany zostaną odrzucone. Opublikowane wersje pozostaną opublikowane. }}
       *    {{ {$count} z nich nie zostało jeszcze opublikowanych, więc Twoje nieopublikowane zmiany zostaną odrzucone. Opublikowane wersje pozostaną opublikowane. }}
-  # Confirmation dialog shown before merging the pull request. Keep the wording free of Git jargon.
-  confirm_publishing_entry: Czy na pewno chcesz opublikować ten wpis? Twoje zmiany zaczną obowiązywać natychmiast.
   # Workflow page: toast notifications shown while an entry is being published from a card, and
   # once publishing has completed
   publishing_entry: Publikowanie wpisu…
@@ -2060,13 +2075,23 @@ prefs:
       description: Pokaż podkreślenie linków w podglądzie wpisu i etykietach interfejsu użytkownika.
       switch_label: Zawsze podkreślaj linki
 
-  # Advanced panel
-  advanced:
-    title: Zaawansowane
-    beta:
-      title: Funkcje beta
-      description: Włącz niektóre funkcje beta, które mogą być niestabilne lub nieprzetłumaczone.
-      switch_label: Dołącz do programu beta
+  # Data Management panel
+  data:
+    clear_data:
+      title: Wyczyść dane
+      # Clear File Cache button
+      file_cache:
+        description: Usuń zapisaną lokalnie w pamięci podręcznej zawartość plików i miniatury obrazów, aby zwolnić miejsce lub rozwiązać problemy spowodowane nieaktualnymi danymi.
+        button_label: Wyczyść pamięć podręczną plików
+        confirmation: Zapisana lokalnie w pamięci podręcznej zawartość plików i miniatury obrazów zostaną usunięte. Twoje niezapisane szkice i ustawienia zostaną zachowane, a usunięte dane zostaną w razie potrzeby ponownie pobrane lub wygenerowane. Po zakończeniu CMS zostanie przeładowany.
+      # Erase All Data button
+      all_data:
+        description: Usuń wszystko, co CMS przechowuje w tej przeglądarce, w tym pliki w pamięci podręcznej, niezapisane szkice i ustawienia. Nie wpłynie to na nic, co zostało już zapisane w repozytorium.
+        button_label: Wymaż wszystkie dane
+        confirmation: Wszystkie dane przechowywane w tej przeglądarce zostaną usunięte, w tym zawartość plików w pamięci podręcznej, miniatury obrazów, niezapisane szkice, ustawienia i stan logowania. Nie wpłynie to na repozytorium, ale wszystkie niezapisane zmiany zostaną utracone i konieczne będzie ponowne zalogowanie. Po zakończeniu CMS zostanie przeładowany.
+
+  # Developer panel
+  developer:
     developer_mode:
       title: Tryb programisty
       description: Włącz niektóre funkcje skierowane do programistów, w tym szczegółowe logi w konsoli i natywne menu kontekstowe.
@@ -2084,18 +2109,6 @@ prefs:
         field_label: Nagłówek autoryzacji (np. Bearer <token>) (opcjonalnie)
         saved: Nagłówek autoryzacji zapisany.
         removed: Nagłówek autoryzacji usunięty.
-    clear_data:
-      title: Wyczyść dane
-      # Clear File Cache button
-      file_cache:
-        description: Usuń zapisaną lokalnie w pamięci podręcznej zawartość plików i miniatury obrazów, aby zwolnić miejsce lub rozwiązać problemy spowodowane nieaktualnymi danymi.
-        button_label: Wyczyść pamięć podręczną plików
-        confirmation: Zapisana lokalnie w pamięci podręcznej zawartość plików i miniatury obrazów zostaną usunięte. Twoje niezapisane szkice i ustawienia zostaną zachowane, a usunięte dane zostaną w razie potrzeby ponownie pobrane lub wygenerowane. Po zakończeniu CMS zostanie przeładowany.
-      # Erase All Data button
-      all_data:
-        description: Usuń wszystko, co CMS przechowuje w tej przeglądarce, w tym pliki w pamięci podręcznej, niezapisane szkice i ustawienia. Nie wpłynie to na nic, co zostało już zapisane w repozytorium.
-        button_label: Wymaż wszystkie dane
-        confirmation: Wszystkie dane przechowywane w tej przeglądarce zostaną usunięte, w tym zawartość plików w pamięci podręcznej, miniatury obrazów, niezapisane szkice, ustawienia i stan logowania. Nie wpłynie to na repozytorium, ale wszystkie niezapisane zmiany zostaną utracone i konieczne będzie ponowne zalogowanie. Po zakończeniu CMS zostanie przeładowany.
 
 # ==============================================================================
 # Keyboard Shortcuts

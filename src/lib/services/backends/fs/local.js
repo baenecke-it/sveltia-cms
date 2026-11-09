@@ -1,6 +1,16 @@
-import { allBackendServices } from '$lib/services/backends';
-import { loadFiles, readFile, saveChanges } from '$lib/services/backends/fs/shared/files';
+import {
+  clearLocalGitCache,
+  getLocalGitStatus,
+  saveAndCommitChanges,
+} from '$lib/services/backends/fs/git';
+import { getScopedRootDirHandle, readFile } from '$lib/services/backends/fs/shared/handles';
+import { loadFiles } from '$lib/services/backends/fs/shared/load';
+import { saveChanges } from '$lib/services/backends/fs/shared/save';
+import { gitBackendServices } from '$lib/services/backends/git/services';
+import { createLocalizedError } from '$lib/services/backends/git/shared/errors';
+import { getRootDir } from '$lib/services/backends/root-dir';
 import { cmsConfig } from '$lib/services/config';
+import { prefs } from '$lib/services/user/prefs.svelte';
 import { getRepositoryDatabase } from '$lib/services/utils/database';
 
 /**
@@ -8,9 +18,11 @@ import { getRepositoryDatabase } from '$lib/services/utils/database';
  * @import {
  * Asset,
  * BackendService,
+ * CommitOptions,
  * CommitResults,
  * FileChange,
  * InternalCmsConfig,
+ * LocalGitStatus,
  * RepositoryInfo,
  * SignInOptions,
  * User,
@@ -55,6 +67,13 @@ let rootDirHandleDB = undefined;
  */
 let assetHashDB = undefined;
 /**
+ * Handle of the repository’s root directory, which the user has picked.
+ * @type {FileSystemDirectoryHandle | undefined}
+ */
+let repoRootDirHandle = undefined;
+/**
+ * Handle of the directory the files are read and written in: the configured root directory within
+ * the repository, or the repository’s root directory itself.
  * @type {FileSystemDirectoryHandle | undefined}
  */
 let rootDirHandle = undefined;
@@ -128,7 +147,7 @@ export const getRootDirHandle = async ({ forceReload = false, showPicker = true 
 const init = () => {
   const { name: service } = /** @type {InternalCmsConfig} */ (cmsConfig.current).backend;
 
-  remoteRepository = allBackendServices[service]?.init?.();
+  remoteRepository = gitBackendServices[service]?.init?.();
 
   rootDirHandleDB = getRepositoryDatabase(remoteRepository, 'file-system-handles') ?? null;
   assetHashDB = getRepositoryDatabase(remoteRepository, 'asset-hashes') ?? null;
@@ -147,10 +166,20 @@ const init = () => {
 const signIn = async ({ auto = false }) => {
   const handle = await getRootDirHandle({ showPicker: !auto });
 
-  if (handle) {
-    rootDirHandle = handle;
-  } else {
+  if (!handle) {
     throw new Error('Directory handle could not be acquired');
+  }
+
+  // The user picks the repository root, which is verified by its `.git`, and the files are read and
+  // written in the configured root directory within it
+  try {
+    rootDirHandle = await getScopedRootDirHandle(handle);
+    repoRootDirHandle = handle;
+  } catch {
+    throw createLocalizedError('Failed to open the root directory.', 'root_dir_not_found', {
+      repo: `${repository.owner}/${repository.repo}`,
+      dir: getRootDir(),
+    });
   }
 
   return { backendName };
@@ -161,7 +190,14 @@ const signIn = async ({ auto = false }) => {
  * directory handle.
  */
 const signOut = async () => {
-  await rootDirHandleDB?.delete(ROOT_DIR_HANDLE_KEY);
+  try {
+    await rootDirHandleDB?.delete(ROOT_DIR_HANDLE_KEY);
+  } catch {
+    // The handle is only a convenience for the next sign-in, so an IndexedDB failure is ignored
+  }
+
+  // Free the memory the Git index takes in a large repository
+  clearLocalGitCache();
 };
 
 /**
@@ -175,12 +211,37 @@ const fetchFiles = async () => {
 };
 
 /**
- * Save entries or assets locally.
+ * Save entries or assets locally. If the user has turned it on, the changes are then committed to
+ * the current branch of the local Git repository.
  * @param {FileChange[]} changes File changes to be saved.
- * @returns {Promise<CommitResults>} Commit results, including a pseudo commit SHA, saved files, and
- * their blob SHAs.
+ * @param {CommitOptions} options Commit options.
+ * @returns {Promise<CommitResults>} Commit results, including the commit SHA, which is a pseudo SHA
+ * unless the changes have been committed, saved files, and their blob SHAs.
  */
-const commitChanges = async (changes) => saveChanges(rootDirHandle, changes);
+const commitChanges = async (changes, options) => {
+  /**
+   * Save the changes to the files.
+   * @returns {Promise<CommitResults>} Results.
+   */
+  const save = () => saveChanges(rootDirHandle, changes);
+
+  if (prefs.localGitCommits && repoRootDirHandle) {
+    return saveAndCommitChanges({ repoRootDirHandle, changes, options, save });
+  }
+
+  // Free the memory the Git index takes in a large repository, in case commits were turned off
+  clearLocalGitCache();
+
+  return save();
+};
+
+/**
+ * Check whether the saved changes can be committed to the local Git repository right now.
+ * @returns {Promise<LocalGitStatus | undefined>} Status, or `undefined` if the user hasn’t signed
+ * in with the local backend.
+ */
+export const checkLocalGitStatus = async () =>
+  repoRootDirHandle ? getLocalGitStatus(repoRootDirHandle) : undefined;
 
 /**
  * Read an asset file from the file system. An asset uploaded or moved during the session has no

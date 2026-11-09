@@ -1,8 +1,11 @@
+import { getValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
 import { getListItemIndexes, indexListItems } from '$lib/services/contents/entry/content-index';
 import { getComputedValue } from '$lib/services/contents/fields/compute/helpers';
 import { getListFieldInfo } from '$lib/services/contents/fields/list/helpers';
 import { COMPONENT_NAME_PREFIX_REGEX } from '$lib/services/contents/fields/rich-text';
 import { getComponentDef } from '$lib/services/contents/fields/rich-text/components/definitions';
+import { getDraftI18nConfig } from '$lib/services/contents/i18n/config';
+import { isFieldLocalized } from '$lib/services/contents/i18n/fields';
 
 /**
  * @import {
@@ -242,8 +245,7 @@ export const collectComponentComputeFields = (valueMap, getIndex) => {
  * @returns {boolean} Result.
  */
 const isLocaleTarget = ({ fieldConfig, locale, defaultLocale, i18nEnabled }) =>
-  locale === defaultLocale ||
-  (i18nEnabled && [true, 'translate', 'duplicate'].includes(fieldConfig.i18n ?? false));
+  locale === defaultLocale || (i18nEnabled && isFieldLocalized(fieldConfig.i18n));
 
 /**
  * Resolve every Compute field in the given locale’s content and write the results back. The content
@@ -252,12 +254,14 @@ const isLocaleTarget = ({ fieldConfig, locale, defaultLocale, i18nEnabled }) =>
  * @param {EntryDraft} args.draft Entry draft.
  * @param {DraftValueStoreKey} args.valueStoreKey Key the values are stored under.
  * @param {InternalLocaleCode} args.locale Locale code.
- * @param {FlattenedEntryContent} args.valueMap Flattened entry content for the locale.
+ * @param {FlattenedEntryContent} args.valueMap Flattened entry content for the locale, a snapshot
+ * the values are read from.
+ * @param {FlattenedEntryContent} args.target Value map of the draft to write the values to.
  * @returns {boolean} Whether any value has changed.
  */
-const updateLocaleComputedValues = ({ draft, valueStoreKey, locale, valueMap }) => {
-  const { collectionName, fileName, collection, collectionFile, fields, isIndexFile } = draft;
-  const { i18nEnabled, defaultLocale } = (collectionFile ?? collection)._i18n;
+const updateLocaleComputedValues = ({ draft, valueStoreKey, locale, valueMap, target }) => {
+  const { collectionName, fileName, fields, isIndexFile } = draft;
+  const { i18nEnabled, defaultLocale } = getDraftI18nConfig(draft);
   /** @type {ListItemIndex | undefined} */
   let index;
 
@@ -277,6 +281,11 @@ const updateLocaleComputedValues = ({ draft, valueStoreKey, locale, valueMap }) 
       : collectComputeFields({ fields, valueMap, getIndex });
 
   let changed = false;
+  /**
+   * Values to compute the fields from: the snapshot, until a field changes.
+   * @type {FlattenedEntryContent}
+   */
+  let values = valueMap;
 
   computeFields.forEach(({ keyPath, fieldConfig }) => {
     // The values of a rich text editor component belong to the document text, which is edited in
@@ -292,14 +301,29 @@ const updateLocaleComputedValues = ({ draft, valueStoreKey, locale, valueMap }) 
       fieldConfig,
       keyPath,
       locale,
-      valueMap,
+      valueMap: values,
       collectionName,
       fileName,
       isIndexFile,
+      // A field of a rich text editor component can refer to the component’s other fields as well
+      // as to the entry’s fields
+      ...(valueStoreKey === 'extraValues'
+        ? {
+            // Every key path collected from the store starts with a component’s prefix
+            keyPathPrefix: /** @type {RegExpMatchArray} */ (
+              keyPath.match(COMPONENT_NAME_PREFIX_REGEX)
+            )[0],
+            entryValueMap: getValueMapSnapshot(draft, locale),
+          }
+        : {}),
     });
 
-    if (valueMap[keyPath] !== value) {
-      valueMap[keyPath] = value;
+    if (values[keyPath] !== value) {
+      target[keyPath] = value;
+      // A Compute field can refer to another one, which is resolved first, so the value is updated
+      // in a copy of the snapshot as well. The snapshot is shared, so it’s left as it is
+      values = values === valueMap ? { ...valueMap } : values;
+      values[keyPath] = value;
       changed = true;
     }
   });
@@ -335,12 +359,16 @@ export const updateComputedValues = (draft) => {
         return;
       }
 
-      Object.entries(draft[valueStoreKey]).forEach(([locale, valueMap]) => {
+      Object.entries(draft[valueStoreKey]).forEach(([locale, target]) => {
+        // The values are read from the shared snapshot, rather than through the draft’s value map,
+        // whose every read is tracked and whose keys are listed by a proxy trap
+        const valueMap = getValueMapSnapshot(draft, locale, valueStoreKey);
+
         if (!currentLocales[locale] || !Object.keys(valueMap).length) {
           return;
         }
 
-        if (updateLocaleComputedValues({ draft, valueStoreKey, locale, valueMap })) {
+        if (updateLocaleComputedValues({ draft, valueStoreKey, locale, valueMap, target })) {
           changed = true;
         }
       });

@@ -5,70 +5,41 @@
   import PageContainer from '$lib/components/common/page-container.svelte';
   import WorkflowEntryCard from '$lib/components/workflow/workflow-entry-card.svelte';
   import { announcedPageStatus } from '$lib/services/app/navigation';
-  import { allEntries } from '$lib/services/contents';
+  import { getCollection } from '$lib/services/contents/collection';
   import { retainDeployPolling } from '$lib/services/deployments/poll';
   import {
-    hasPublishedVersion,
+    checkPublishedVersion,
     publishingBranches,
     unpublishedEntries,
     workflowDataReady,
   } from '$lib/services/workflow';
-  import { WORKFLOW_STATUS_LABELS } from '$lib/services/workflow/constants';
+  import {
+    COLUMN_LABELS,
+    getDiscardMessages,
+    getPublishMessages,
+    groupEntriesByStatus,
+    STATUS_UPDATE_MESSAGES,
+  } from '$lib/services/workflow/board';
   import { deployingEntries } from '$lib/services/workflow/deploy';
   import { getDiscardDialogStrings, getPublishDialogStrings } from '$lib/services/workflow/dialogs';
-  import { openAuthoring, workflowStages } from '$lib/services/workflow/open-authoring';
   import {
     discardWorkflowEntry,
     publishWorkflowEntry,
     updateWorkflowStatus,
   } from '$lib/services/workflow/save';
+  import {
+    boardStages,
+    getEntryStage,
+    getWorkflowStages,
+    workflowPageLabelKey,
+  } from '$lib/services/workflow/stages';
   import { canMoveToStatus, canPublish } from '$lib/services/workflow/validate';
+  import { getWorkflowErrorMessage } from '$lib/services/workflow/verify';
 
   /**
    * @import { UnpublishedEntry, WorkflowStatus } from '$lib/types/private';
+   * @import { ToastMessages } from '$lib/services/workflow/board';
    */
-
-  /**
-   * Column headings. The `drafts` heading is plural, unlike the singular status label used in the
-   * entry editor’s status button.
-   * @type {Record<WorkflowStatus, string>}
-   */
-  const COLUMN_LABELS = { ...WORKFLOW_STATUS_LABELS, draft: 'status.drafts' };
-
-  /**
-   * @typedef {object} ToastMessages
-   * @property {string} info I18n string key shown while the action is in progress.
-   * @property {string} success I18n string key shown once the action has completed.
-   * @property {string} error I18n string key shown when the action has failed.
-   */
-
-  /** @type {ToastMessages} */
-  const STATUS_UPDATE_MESSAGES = {
-    info: 'workflow.updating_status',
-    success: 'workflow.status_updated',
-    error: 'workflow.status_change_failed',
-  };
-
-  /** @type {ToastMessages} */
-  const DELETION_MESSAGES = {
-    info: 'workflow.deleting_entry',
-    success: 'workflow.entry_deleted',
-    error: 'deleting_entry_failed',
-  };
-
-  /** @type {ToastMessages} */
-  const CANCELLATION_MESSAGES = {
-    info: 'workflow.cancelling_deletion',
-    success: 'workflow.deletion_cancelled',
-    error: 'workflow.cancelling_deletion_failed',
-  };
-
-  /** @type {ToastMessages} */
-  const PUBLISHING_MESSAGES = {
-    info: 'workflow.publishing_entry',
-    success: 'workflow.entry_published',
-    error: 'workflow.publishing_entry_failed',
-  };
 
   // `$state.raw` rather than `$state`, because the latter deeply proxies the entry, and the proxy
   // would end up back in the store when the status is saved. `structuredClone()` throws on a proxy,
@@ -109,10 +80,8 @@
     },
   }) => busyBranches.includes(branch) || publishingBranches.current.includes(branch);
 
-  // `allEntries.current` is a dependency, because the entry can be published from another view
-  const publishedVersionExists = $derived(
-    !!targetEntry && !!allEntries.current && hasPublishedVersion(targetEntry),
-  );
+  // The entry can be published from another view, so the check depends on `allEntries`
+  const publishedVersionExists = $derived(checkPublishedVersion(targetEntry));
   // For an entry awaiting deletion the two actions are reversed: the first one calls the removal
   // off, and the second one carries it out
   const targetIsDeletion = $derived(targetEntry?.workflow.status === 'pending_deletion');
@@ -121,16 +90,27 @@
   );
   const publishDialogStrings = $derived(getPublishDialogStrings({ deletion: targetIsDeletion }));
 
+  /**
+   * Get the stage the given entry is in, which decides the column it’s placed in.
+   * @param {UnpublishedEntry} entry Entry.
+   * @returns {WorkflowStatus} Stage.
+   */
+  const getStage = (entry) => getEntryStage(entry, getCollection(entry.workflow.collectionName));
+
+  /**
+   * Check whether the given entry can be moved to the given stage. The collections can be
+   * configured with different stages, and an entry can only go to one of its own collection’s.
+   * @param {UnpublishedEntry} entry Entry.
+   * @param {WorkflowStatus} status Stage.
+   * @returns {boolean} Result.
+   */
+  const isStageAvailable = (entry, status) =>
+    getWorkflowStages(getCollection(entry.workflow.collectionName)).includes(status);
+
   // A pending deletion has a status of its own, so it never lands in a stage column. It’s listed
   // below the board instead, and its cards don’t drag: there are no stages to move it through
-  const columns = $derived(
-    workflowStages.current.map((status) => ({
-      status,
-      entries: unpublishedEntries.current.filter((entry) => entry.workflow.status === status),
-    })),
-  );
-  const pendingDeletions = $derived(
-    unpublishedEntries.current.filter(({ workflow }) => workflow.status === 'pending_deletion'),
+  const { columns, pendingDeletions } = $derived(
+    groupEntriesByStatus(boardStages.current, unpublishedEntries.current, getStage),
   );
 
   // Keep the deploy state fresh while the board is open, so a preview link turns live as soon as
@@ -157,16 +137,18 @@
 
     busyBranches = [...busyBranches, branch];
     toastStatus = 'info';
-    toastMessage = messages.info;
+    toastMessage = _(messages.info);
     showToast = true;
 
     try {
       await request;
       toastStatus = 'success';
-      toastMessage = messages.success;
+      toastMessage = _(messages.success);
     } catch (/** @type {any} */ ex) {
       toastStatus = 'error';
-      toastMessage = messages.error;
+      // A failure that trying again wouldn’t fix says why, e.g. a publish refused over what the
+      // pull request holds, or another request open from the branch
+      toastMessage = getWorkflowErrorMessage(ex, messages.error);
       // eslint-disable-next-line no-console
       console.error(ex);
     } finally {
@@ -185,8 +167,26 @@
    */
   const reportValidationErrors = (messageKey) => {
     toastStatus = 'error';
-    toastMessage = messageKey;
+    toastMessage = _(messageKey);
     showToast = true;
+  };
+
+  /**
+   * Ask for confirmation before deleting the given entry, or calling its pending deletion off.
+   * @param {UnpublishedEntry} entry Entry.
+   */
+  const confirmDelete = (entry) => {
+    targetEntry = entry;
+    showDeleteDialog = true;
+  };
+
+  /**
+   * Ask for confirmation before publishing the given entry, or carrying out its pending deletion.
+   * @param {UnpublishedEntry} entry Entry.
+   */
+  const confirmPublish = (entry) => {
+    targetEntry = entry;
+    showPublishDialog = true;
   };
 
   /**
@@ -199,7 +199,7 @@
     draggedEntry = undefined;
     dropTarget = undefined;
 
-    if (!entry || entry.workflow.status === status) {
+    if (!entry || getStage(entry) === status || !isStageAvailable(entry, status)) {
       return;
     }
 
@@ -221,18 +221,32 @@
 
     announced = true;
 
-    const [draft, review, ready = 0] = columns.map(({ entries }) => entries.length);
+    /**
+     * Get the number of entries in the given column.
+     * @param {WorkflowStatus} status Column status.
+     * @returns {number | undefined} Count, or `undefined` if the board has no such column.
+     */
+    const count = (status) => columns.find((column) => column.status === status)?.entries.length;
+    // The board always has a Drafts column
+    const draft = /** @type {number} */ (count('draft'));
+    const [review, ready] = [count('pending_review'), count('pending_publish')];
     const deletion = pendingDeletions.length;
 
-    // The board has no Ready column for an Open Authoring contributor, so its count is left out of
-    // the announcement rather than reported as zero
-    announcedPageStatus.current = openAuthoring.current
-      ? _('viewing_open_authoring_workflow', { values: { draft, review, deletion } })
-      : _('viewing_editorial_workflow', { values: { draft, review, ready, deletion } });
+    // A column the board doesn’t have is left out of the announcement rather than reported as
+    // zero: there’s no Ready column for an Open Authoring contributor, no In Review column when the
+    // review stage is left out, and no column but the drafts with Preview Workflow
+    announcedPageStatus.current =
+      review === undefined
+        ? ready === undefined
+          ? _('viewing_preview_workflow', { values: { draft, deletion } })
+          : _('viewing_editorial_workflow_without_review', { values: { draft, ready, deletion } })
+        : ready === undefined
+          ? _('viewing_open_authoring_workflow', { values: { draft, review, deletion } })
+          : _('viewing_editorial_workflow', { values: { draft, review, ready, deletion } });
   });
 </script>
 
-<PageContainer aria-label={_('editorial_workflow')}>
+<PageContainer aria-label={_(workflowPageLabelKey.current)}>
   {#snippet main()}
     {#if !workflowDataReady.current}
       <EmptyState>
@@ -243,7 +257,12 @@
       need a column wrapper of their own -->
       <!-- The column count varies: an Open Authoring contributor can’t publish, so the board
       leaves out the stage that says an entry is ready to go live -->
-      <div role="none" class="board" style:--column-count={columns.length}>
+      <div
+        role="none"
+        class="board"
+        class:single={columns.length === 1}
+        style:--column-count={columns.length}
+      >
         <div role="none" class="columns">
           {#each columns as { status, entries } (status)}
             <Group class="column" aria-labelledby="{status}-column-title">
@@ -256,7 +275,7 @@
                 class:drop-target={dropTarget === status}
                 aria-label={_(COLUMN_LABELS[status])}
                 ondragover={(/** @type {DragEvent} */ event) => {
-                  if (!draggedEntry) {
+                  if (!draggedEntry || !isStageAvailable(draggedEntry, status)) {
                     return;
                   }
 
@@ -290,14 +309,8 @@
                       draggedEntry = undefined;
                       dropTarget = undefined;
                     }}
-                    onDelete={() => {
-                      targetEntry = entry;
-                      showDeleteDialog = true;
-                    }}
-                    onPublish={() => {
-                      targetEntry = entry;
-                      showPublishDialog = true;
-                    }}
+                    onDelete={() => confirmDelete(entry)}
+                    onPublish={() => confirmPublish(entry)}
                   />
                 {:else}
                   <EmptyState>
@@ -320,14 +333,8 @@
                   <WorkflowEntryCard
                     {entry}
                     busy={isBusy(entry)}
-                    onDelete={() => {
-                      targetEntry = entry;
-                      showDeleteDialog = true;
-                    }}
-                    onPublish={() => {
-                      targetEntry = entry;
-                      showPublishDialog = true;
-                    }}
+                    onDelete={() => confirmDelete(entry)}
+                    onPublish={() => confirmPublish(entry)}
                   />
                 {/each}
               </div>
@@ -364,11 +371,7 @@
 
     /* v8 ignore next 7 -- the dialog is only opened for an entry */
     if (entry) {
-      await runAction(
-        entry,
-        discardWorkflowEntry(entry),
-        targetIsDeletion ? CANCELLATION_MESSAGES : DELETION_MESSAGES,
-      );
+      await runAction(entry, discardWorkflowEntry(entry), getDiscardMessages(targetIsDeletion));
     }
   }}
 >
@@ -393,11 +396,7 @@
       return;
     }
 
-    await runAction(
-      entry,
-      publishWorkflowEntry(entry),
-      targetIsDeletion ? DELETION_MESSAGES : PUBLISHING_MESSAGES,
-    );
+    await runAction(entry, publishWorkflowEntry(entry), getPublishMessages(targetIsDeletion));
   }}
 >
   {publishDialogStrings.message}
@@ -406,7 +405,7 @@
 <!-- The `id` makes the auto-hide timer restart when the message changes -->
 {#if toastMessage}
   <Toast id={toastMessage} bind:show={showToast}>
-    <Alert status={toastStatus}>{_(toastMessage)}</Alert>
+    <Alert status={toastStatus}>{toastMessage}</Alert>
   </Toast>
 {/if}
 
@@ -422,6 +421,17 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+  }
+
+  /*
+   * With a single column, as with Preview Workflow, the cards would be stretched across the page,
+   * so they’re laid out in a grid instead, both in the column and in the trays below it
+   */
+
+  .board.single .entries {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    align-content: start;
   }
 
   .tray {

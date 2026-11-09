@@ -18,6 +18,22 @@ import { isObject } from '@sveltia/utils/object';
  */
 
 /**
+ * Default maximum number of output tokens. A translation of a long entry needs a large budget, and
+ * a model that thinks spends part of it on reasoning, so this is well above the length of a typical
+ * answer while staying within the output limit of every default model used by the integrations.
+ */
+export const DEFAULT_MAX_TOKENS = 16_000;
+
+/**
+ * Create the error thrown when a response was cut off at the output token limit, so that the
+ * truncated, likely unparsable, text isn’t returned as if it were complete.
+ * @param {string} apiLabel API name, e.g. `Messages`, which is followed by `API`.
+ * @returns {Error} Error.
+ */
+export const createTruncationError = (apiLabel) =>
+  new Error(`The response from the ${apiLabel} API was cut off at the token limit.`);
+
+/**
  * Get the request headers for an API that authenticates with a bearer token.
  * @param {string} apiKey API key.
  * @param {Record<string, string>} headers Additional headers, which take precedence.
@@ -35,11 +51,12 @@ const getBearerHeaders = (apiKey, headers) => ({
  * @param {string} args.endpoint API endpoint URL.
  * @param {Record<string, string>} args.headers Request headers.
  * @param {Record<string, any>} args.body Request body, serialized as JSON.
- * @param {string} args.apiLabel API name to be used in an error message, e.g. `Messages`.
+ * @param {string} args.apiLabel API name to be used in an error message, e.g. `Messages`, which
+ * is followed by `API error`.
  * @returns {Promise<Record<string, any>>} Parsed response body.
  * @throws {Error} When the API returns a non-OK response.
  */
-const postJSON = async ({ endpoint, headers, body, apiLabel }) => {
+export const postJSON = async ({ endpoint, headers, body, apiLabel }) => {
   const response = await fetch(endpoint, {
     method: 'POST',
     headers,
@@ -75,7 +92,7 @@ export const chatCompletions = async ({
   systemPrompt,
   userMessage,
   temperature = 0.3,
-  maxTokens = 4000,
+  maxTokens = DEFAULT_MAX_TOKENS,
   reasoning = 'high',
   extraBody = {},
 }) => {
@@ -96,6 +113,11 @@ export const chatCompletions = async ({
       ...extraBody,
     },
   });
+
+  // The content can be empty or cut off mid-way when the budget runs out, e.g. on reasoning
+  if (data.choices?.[0]?.finish_reason === 'length') {
+    throw createTruncationError('Chat Completions');
+  }
 
   if (!data.choices || !Array.isArray(data.choices) || !data.choices[0]?.message?.content) {
     throw new Error('Invalid response format from Chat Completions API.');
@@ -118,7 +140,8 @@ export const responses = async ({
   model,
   systemPrompt,
   userMessage,
-  maxTokens = 4000,
+  maxTokens = DEFAULT_MAX_TOKENS,
+  reasoning,
   extraBody = {},
 }) => {
   const data = await postJSON({
@@ -131,9 +154,17 @@ export const responses = async ({
       input: userMessage,
       store: false,
       max_output_tokens: maxTokens,
+      // Reasoning tokens count toward `max_output_tokens`; without this, the model’s default effort
+      // applies
+      ...(reasoning ? { reasoning: { effort: reasoning } } : {}),
       ...extraBody,
     },
   });
+
+  // An incomplete response can also be cut off by a content filter, which is reported as invalid
+  if (data.status === 'incomplete' && data.incomplete_details?.reason === 'max_output_tokens') {
+    throw createTruncationError('Responses');
+  }
 
   // Try to get output_text directly first (simpler response format)
   if (typeof data.output_text === 'string') {
@@ -191,8 +222,8 @@ export const messages = async ({
   model,
   systemPrompt,
   userMessage,
-  temperature = 0.3,
-  maxTokens = 4000,
+  maxTokens = DEFAULT_MAX_TOKENS,
+  reasoning,
   extraBody = {},
 }) => {
   /** @type {Record<string, string>} */
@@ -210,16 +241,36 @@ export const messages = async ({
     body: {
       model,
       max_tokens: maxTokens,
-      temperature,
       system: systemPrompt,
       messages: [{ role: 'user', content: userMessage }],
+      // Other reasoning levels are left to the model’s default effort
+      ...(reasoning === 'none' ? { thinking: { type: 'disabled' } } : {}),
       ...extraBody,
     },
   });
 
-  if (!data.content || !Array.isArray(data.content) || !data.content[0]) {
+  if (data.stop_reason === 'refusal') {
+    throw new Error('The request was declined by the Messages API.');
+  }
+
+  if (data.stop_reason === 'max_tokens') {
+    throw createTruncationError('Messages');
+  }
+
+  // The response can begin with `thinking` blocks and split the answer into several text blocks
+  /** @type {string[]} */
+  const texts = Array.isArray(data.content)
+    ? data.content
+        .filter(
+          (/** @type {unknown} */ block) =>
+            isObject(block) && block.type === 'text' && typeof block.text === 'string',
+        )
+        .map((/** @type {{ text: string }} */ { text }) => text)
+    : [];
+
+  if (!texts.length) {
     throw new Error('Invalid response format from Messages API.');
   }
 
-  return data.content[0].text.trim();
+  return texts.join('').trim();
 };

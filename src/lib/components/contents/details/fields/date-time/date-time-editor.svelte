@@ -3,24 +3,25 @@
   Implement the editor for a DateTime field.
   @see https://decapcms.org/docs/widgets/#Datetime
   @see https://sveltiacms.app/en/docs/fields/datetime
-  @todo Replace the native `<input>` with a custom component.
 -->
 <script>
   import { _ } from '@sveltia/i18n';
-  import { Button } from '@sveltia/ui';
+  import { Button, DateTimeInput } from '@sveltia/ui';
 
+  import DateTimePreview from '$lib/components/contents/details/fields/date-time/date-time-preview.svelte';
+  import { isAutoNowField } from '$lib/services/contents/fields/date-time/auto-now';
   import { parseDateTimeConfig } from '$lib/services/contents/fields/date-time/config';
-  import {
-    getCurrentDateTime,
-    getCurrentValue,
-    getDate,
-    getInputValue,
-    shouldUpdateValue,
-  } from '$lib/services/contents/fields/date-time/helpers';
+  import { getDate } from '$lib/services/contents/fields/date-time/parse';
   import {
     getInitialTimeZone,
     getTimeZoneLabel,
   } from '$lib/services/contents/fields/date-time/timezone';
+  import {
+    getCurrentDateTime,
+    getCurrentValue,
+    getInputValue,
+    shouldUpdateValue,
+  } from '$lib/services/contents/fields/date-time/value';
   import { watch } from '$lib/services/utils/state.svelte';
 
   /**
@@ -37,6 +38,9 @@
   /** @type {FieldEditorProps & Props} */
   let {
     /* eslint-disable prefer-const */
+    locale,
+    keyPath,
+    typedKeyPath,
     fieldId,
     fieldConfig,
     currentValue = $bindable(),
@@ -55,6 +59,15 @@
   const timeZone = $derived(getInitialTimeZone(currentValue, fieldConfig));
 
   /**
+   * Value of the input right after it was last synced with {@link currentValue}. The value is only
+   * written back once the user has changed the input from this, so a stored value the input can’t
+   * represent isn’t replaced, or erased, as soon as the editor is opened. This also keeps a
+   * read-only field’s value as it is: the input drops the seconds with its default `step`, so
+   * writing it back would truncate a value like one set by `auto_now`.
+   */
+  let syncedInputValue = '';
+
+  /**
    * Update {@link inputValue} based on {@link currentValue}. Only update if the input is not
    * currently focused to avoid interfering with user typing.
    */
@@ -69,12 +82,23 @@
     if (_inputValue !== undefined && _inputValue !== inputValue) {
       inputValue = _inputValue;
     }
+
+    syncedInputValue = inputValue;
   };
 
   /**
-   * Update {@link currentValue} based on {@link inputValue}.
+   * Update {@link currentValue} based on {@link inputValue}, if the user has changed it.
    */
   const setCurrentValue = () => {
+    if (inputValue === syncedInputValue) {
+      return;
+    }
+
+    // The input now reflects the value written below. While the input is focused,
+    // `setInputValue()` doesn’t run, so record it here: otherwise changing the input back to the
+    // value it had when it was focused would be ignored
+    syncedInputValue = inputValue;
+
     const newValue = getCurrentValue({ inputValue, currentValue, fieldConfig, timeZone });
 
     // Avoid a cycle dependency & infinite loop
@@ -116,46 +140,54 @@
   };
 </script>
 
-<div role="none">
-  <input
-    {...{ type, min, max, step }}
-    bind:value={inputValue}
-    {readonly}
-    aria-readonly={readonly}
-    aria-required={required}
-    aria-invalid={invalid}
-    aria-labelledby="{fieldId}-label"
-    aria-errormessage="{fieldId}-error"
-    onfocus={handleFocus}
-    onblur={handleBlur}
-  />
-  {#if !readonly}
-    <Button
-      variant="tertiary"
-      label={_(dateOnly ? 'today' : 'now')}
-      onclick={() => {
-        inputValue = getCurrentDateTime(fieldConfig, timeZone);
-      }}
+{#if readonly && isAutoNowField(fieldConfig)}
+  <!-- The value is set on save, so it’s shown as text like in the preview rather than an input.
+  The field is editable in a rich text editor component, where the option is ignored -->
+  <DateTimePreview {locale} {keyPath} {typedKeyPath} {fieldConfig} {currentValue} />
+{:else}
+  <div role="none">
+    <DateTimeInput
+      {type}
+      {min}
+      {max}
+      {step}
+      bind:value={inputValue}
+      {readonly}
+      {required}
+      {invalid}
+      aria-labelledby="{fieldId}-label"
+      aria-errormessage="{fieldId}-error"
+      onfocus={handleFocus}
+      onblur={handleBlur}
     />
-  {/if}
-  {#if !readonly && !required}
-    <Button
-      variant="tertiary"
-      label={_('clear')}
-      disabled={!currentValue}
-      onclick={() => {
-        currentValue = '';
-      }}
-    />
-  {/if}
-</div>
-
-{#if singleCustomTimeZone}
-  <div role="none" class="timezone">
-    {getTimeZoneLabel(singleCustomTimeZone, getDate(currentValue, fieldConfig))}
+    {#if !readonly}
+      <Button
+        variant="tertiary"
+        label={_(dateOnly ? 'today' : 'now')}
+        onclick={() => {
+          inputValue = getCurrentDateTime(fieldConfig, timeZone);
+        }}
+      />
+    {/if}
+    {#if !readonly && !required}
+      <Button
+        variant="tertiary"
+        label={_('clear')}
+        disabled={!currentValue}
+        onclick={() => {
+          currentValue = '';
+        }}
+      />
+    {/if}
   </div>
-{:else if utc}
-  <div role="none" class="timezone">UTC</div>
+
+  {#if singleCustomTimeZone}
+    <div role="none" class="timezone">
+      {getTimeZoneLabel(singleCustomTimeZone, getDate(currentValue, fieldConfig))}
+    </div>
+  {:else if utc}
+    <div role="none" class="timezone">UTC</div>
+  {/if}
 {/if}
 
 <style>

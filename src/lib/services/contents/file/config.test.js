@@ -145,6 +145,38 @@ describe('Test getEntryPathRegEx()', () => {
     expect('content/posts/my-post.md'.match(regex)?.groups?.subPath).toBe('my-post');
   });
 
+  test('escapes locale codes with characters special to regular expressions', () => {
+    const _i18n = {
+      ...baseI18nOptions,
+      allLocales: ['en', 'zh+', 'fr)'],
+      structure: /** @type {'multiple_files'} */ ('multiple_files'),
+      structureMap: {
+        i18nSingleFile: false,
+        i18nSingleFileDefaultRoot: false,
+        i18nMultiFile: true,
+        i18nMultiFolder: false,
+        i18nMultiRootFolder: false,
+      },
+    };
+
+    const args = { extension: 'md', format: /** @type {const} */ ('frontmatter') };
+    const regex = getEntryPathRegEx({ ...args, basePath: 'content', _i18n });
+
+    expect('content/post.zh+.md'.match(regex)?.groups?.locale).toBe('zh+');
+    expect('content/post.zhh.md'.match(regex)).toBeNull();
+
+    const omitted = getEntryPathRegEx({
+      ...args,
+      basePath: 'content',
+      indexFileName: '_index',
+      indexFileExtension: 'json',
+      _i18n: { ..._i18n, omitDefaultLocaleFromFilePath: true },
+    });
+
+    expect('content/post.fr).md'.match(omitted)?.groups?.locale).toBe('fr)');
+    expect('content/post.md'.match(omitted)?.groups?.subPath).toBe('post');
+  });
+
   test('generates regex for a nested collection with an unlimited depth', () => {
     const _i18n = {
       ...baseI18nOptions,
@@ -1498,6 +1530,46 @@ describe('Test getFileConfig()', () => {
       fmDelimiters: undefined,
       yamlQuote: false,
     });
+  });
+
+  test('entry collection storing all the entries in one file', () => {
+    const expected = {
+      extension: 'json',
+      format: 'json',
+      basePath: undefined,
+      subPath: undefined,
+      fullPathRegEx: undefined,
+      fullPath: 'data/members.json',
+      fmDelimiters: undefined,
+      yamlQuote: false,
+      arrayFile: true,
+    };
+
+    expect(
+      getFileConfig({
+        rawCollection: /** @type {any} */ ({
+          name: 'members',
+          file: '/data/members.json',
+          fields: [],
+        }),
+        _i18n: i18nDisabled,
+      }),
+    ).toEqual(expected);
+
+    // The folder collection options are ignored, the parser reports them
+    expect(
+      getFileConfig({
+        rawCollection: /** @type {any} */ ({
+          name: 'members',
+          file: 'data/members.json',
+          fields: [],
+          path: '{{slug}}/index',
+          nested: { depth: 2 },
+          index_file: true,
+        }),
+        _i18n: i18nSingleFile,
+      }),
+    ).toEqual(expected);
   });
 
   test('file collection without i18n', () => {

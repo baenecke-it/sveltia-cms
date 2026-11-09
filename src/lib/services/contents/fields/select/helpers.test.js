@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest';
 import {
   getEmptyOptionValue,
   getOptionLabel,
+  getOptionValue,
   getOptionValueType,
   getPreviewLabels,
   isOptionValue,
@@ -134,6 +135,40 @@ describe('Test getOptionLabel()', () => {
     expect(result).toEqual([]);
   });
 
+  test('should not mix up values of different types that stringify the same way', () => {
+    /** @type {SelectField} */
+    const fieldConfig = {
+      ...baseFieldConfig,
+      name: 'mixed',
+      multiple: false,
+      options: [
+        { label: 'Number one', value: 1 },
+        { label: 'String one', value: '1' },
+        { label: 'True', value: true },
+        { label: 'String true', value: 'true' },
+        { label: 'None', value: null },
+        { label: 'String null', value: 'null' },
+      ],
+    };
+
+    const keyPath = 'mixed';
+
+    /**
+     * Get the label of a value.
+     * @param {any} value Value.
+     * @returns {any} Label.
+     */
+    const getLabel = (value) =>
+      getOptionLabel({ fieldConfig, valueMap: { mixed: value }, keyPath });
+
+    expect(getLabel(1)).toBe('Number one');
+    expect(getLabel('1')).toBe('String one');
+    expect(getLabel(true)).toBe('True');
+    expect(getLabel('true')).toBe('String true');
+    expect(getLabel(null)).toBe('None');
+    expect(getLabel('null')).toBe('String null');
+  });
+
   test('should return cached result on subsequent calls', () => {
     /** @type {SelectField} */
     const fieldConfig = {
@@ -254,6 +289,17 @@ describe('Test getPreviewLabels()', () => {
         currentValue: 'apple',
       }),
     ).toEqual([]);
+  });
+});
+
+describe('getOptionValue', () => {
+  test('should return the value of a labeled option or a plain value as is', () => {
+    expect(getOptionValue({ label: 'Yes', value: true })).toBe(true);
+    expect(getOptionValue({ label: 'None', value: null })).toBeNull();
+    expect(getOptionValue('a')).toBe('a');
+    expect(getOptionValue(0)).toBe(0);
+    expect(getOptionValue(null)).toBeNull();
+    expect(getOptionValue(undefined)).toBeUndefined();
   });
 });
 

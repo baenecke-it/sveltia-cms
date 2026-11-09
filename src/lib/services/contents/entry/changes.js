@@ -1,10 +1,6 @@
-import { backend } from '$lib/services/backends';
-import { getPreviousSha } from '$lib/services/contents/draft/save/changes';
-import { buildSingleFileContent } from '$lib/services/contents/draft/save/content';
-import { serializeContent } from '$lib/services/contents/draft/save/serialize';
+import { getArrayItemTarget } from '$lib/services/contents/draft/save/changes';
+import { buildEntryFileChanges } from '$lib/services/contents/draft/save/file-changes';
 import { resolveFileConfig } from '$lib/services/contents/file/config';
-import { formatEntryFile } from '$lib/services/contents/file/format';
-import { getRepositoryDatabase } from '$lib/services/utils/database';
 
 /**
  * @import { IndexedDB } from '@sveltia/utils/storage';
@@ -14,11 +10,13 @@ import { getRepositoryDatabase } from '$lib/services/utils/database';
  * InternalCollection,
  * InternalCollectionFile,
  * InternalEntryCollection,
+ * InternalLocaleCode,
  * } from '$lib/types/private';
+ * @import { EntryFilePlan } from '$lib/services/contents/draft/save/file-changes';
  */
 
 /**
- * Build a synthetic draft object suitable for {@link serializeContent} and the field validator.
+ * Build a synthetic draft object suitable for {@link formatEntryData} and the field validator.
  * Bulk operations that re-save existing entries — reordering, cascading relation updates — don’t
  * go through the entry editor, so there’s no real draft to serialize with; only the few properties
  * read by the serializer and the validator are needed. The shape is identical for every entry in a
@@ -39,20 +37,6 @@ export const createSyntheticDraft = ({ collection, collectionFile, isIndexFile =
   fields: collectionFile?.fields ?? /** @type {InternalEntryCollection} */ (collection).fields,
   isIndexFile,
 });
-
-/**
- * Resolve a usable file-cache `IndexedDB` handle: prefer the caller-provided one (so the same
- * handle is shared across composite operations like delete + renumber), otherwise open one.
- * @param {IndexedDB} [provided] Caller-provided handle.
- * @returns {IndexedDB | undefined} Cache handle, or `undefined` if no backend is configured.
- */
-export const resolveCacheDB = (provided) => {
-  if (provided) {
-    return provided;
-  }
-
-  return getRepositoryDatabase(backend.current?.repository, 'file-cache');
-};
 
 /**
  * Build the `update` {@link FileChange}(s) needed to re-save an existing entry whose content has
@@ -76,53 +60,27 @@ export const buildEntryUpdateChanges = async ({
 }) => {
   const config = /** @type {InternalCollectionFile} */ (collectionFile ?? collection);
 
-  const {
-    _i18n: {
-      i18nEnabled,
-      allLocales,
-      defaultLocale,
-      structureMap: { i18nSingleFile, i18nSingleFileDefaultRoot } = {},
-    },
-  } = config;
+  return buildEntryFileChanges({
+    draft,
+    config,
+    _file: resolveFileConfig({ collection, collectionFile, isIndexFile: draft.isIndexFile }),
+    entry,
+    cacheDB,
+    /**
+     * Plan the change to a file of the entry.
+     * @param {InternalLocaleCode} [locale] Locale of the file, or `undefined` for the single file.
+     * @returns {EntryFilePlan | undefined} Planned change.
+     */
+    planChange: (locale) => {
+      if (locale === undefined) {
+        const { slug, path } = entry.locales[config._i18n.defaultLocale];
 
-  const _file = resolveFileConfig({ collection, collectionFile, isIndexFile: draft.isIndexFile });
-
-  if (!i18nEnabled || i18nSingleFile || i18nSingleFileDefaultRoot) {
-    const { slug, path } = entry.locales[defaultLocale];
-
-    const [previousSha, data] = await Promise.all([
-      getPreviousSha({ cacheDB, previousPath: path }),
-      formatEntryFile({ content: buildSingleFileContent({ config, entry, draft }), _file }),
-    ]);
-
-    return [/** @type {FileChange} */ ({ action: 'update', slug, path, previousSha, data })];
-  }
-
-  const localeChanges = await Promise.all(
-    allLocales.map(async (locale) => {
-      const le = entry.locales[locale];
-
-      if (!le?.content) {
-        return undefined;
+        return { action: 'update', slug, path, currentPath: path, ...getArrayItemTarget(entry) };
       }
 
-      const [previousSha, data] = await Promise.all([
-        getPreviousSha({ cacheDB, previousPath: le.path }),
-        formatEntryFile({
-          content: serializeContent({ draft, locale, valueMap: le.content }),
-          _file,
-        }),
-      ]);
+      const { slug, path, content } = entry.locales[locale] ?? {};
 
-      return /** @type {FileChange} */ ({
-        action: 'update',
-        slug: le.slug,
-        path: le.path,
-        previousSha,
-        data,
-      });
-    }),
-  );
-
-  return /** @type {FileChange[]} */ (localeChanges.filter(Boolean));
+      return content ? { action: 'update', slug, path, currentPath: path } : undefined;
+    },
+  });
 };

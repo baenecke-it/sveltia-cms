@@ -1,6 +1,8 @@
+import { tick } from 'svelte';
 import { describe, expect, test, vi } from 'vitest';
 import { page } from 'vitest/browser';
-import { render } from 'vitest-browser-svelte';
+
+import { renderFieldEditor } from '$lib/test/field.svelte';
 
 import DateTimeEditor from './date-time-editor.svelte';
 
@@ -23,23 +25,13 @@ const renderEditor = async ({
   config = {},
   required = true,
   readonly = false,
-} = {}) => {
-  const props = $state({
-    locale: 'en',
-    keyPath: 'date',
-    typedKeyPath: 'date',
-    fieldId: 'date',
-    fieldLabel: 'Date',
+} = {}) =>
+  renderFieldEditor(DateTimeEditor, {
     fieldConfig: /** @type {DateTimeField} */ ({ name: 'date', widget: 'datetime', ...config }),
+    fieldLabel: 'Date',
     currentValue,
-    required,
-    readonly,
+    props: { required, readonly },
   });
-
-  const { container } = await render(DateTimeEditor, props);
-
-  return { props, container };
-};
 
 /**
  * Get the native input.
@@ -80,6 +72,64 @@ describe('DateTimeEditor', () => {
     input.dispatchEvent(new Event('input', { bubbles: true }));
 
     await expect.poll(() => props.currentValue).toBe('2024-03-01');
+  });
+
+  test.each([false, true])(
+    'keeps a stored value the input can’t show (read-only: %s)',
+    async (readonly) => {
+      const { props, container } = await renderEditor({ currentValue: 'garbage', readonly });
+
+      await new Promise((resolve) => {
+        setTimeout(resolve, 50);
+      });
+      expect(getInput(container).value).toBe('');
+      expect(props.currentValue).toBe('garbage');
+    },
+  );
+
+  test('replaces a stored value the input can’t show once the input is changed', async () => {
+    const { props, container } = await renderEditor({
+      currentValue: 'garbage',
+      config: { time_format: false },
+    });
+
+    const input = getInput(container);
+
+    input.value = '2024-03-01';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await expect.poll(() => props.currentValue).toBe('2024-03-01');
+
+    // Clearing the input clears the value
+    input.value = '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await expect.poll(() => props.currentValue).toBe('');
+  });
+
+  test('writes a change back to the value the input had when it was focused', async () => {
+    const { props, container } = await renderEditor({
+      currentValue: '2024-01-15',
+      config: { time_format: false },
+    });
+
+    const input = getInput(container);
+
+    input.focus();
+    input.value = '2024-01-16';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await expect.poll(() => props.currentValue).toBe('2024-01-16');
+
+    input.value = '2024-01-15';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await expect.poll(() => props.currentValue).toBe('2024-01-15');
+
+    // Typing the value it was changed to from elsewhere in the meantime leaves it as it is
+    props.currentValue = '2024-02-01';
+    await tick();
+    input.value = '2024-02-01';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await tick();
+    expect(props.currentValue).toBe('2024-02-01');
+    input.blur();
   });
 
   test('leaves the input alone while it’s being edited', async () => {
@@ -133,6 +183,29 @@ describe('DateTimeEditor', () => {
     await renderEditor({ currentValue: '2024-01-15', readonly: true });
 
     expect(page.getByRole('button').elements()).toHaveLength(0);
+  });
+
+  test('keeps the seconds of a read-only value the input can’t show', async () => {
+    const { props, container } = await renderEditor({
+      currentValue: '2024-01-15T10:30:07Z',
+      config: { output_utc: true },
+      readonly: true,
+    });
+
+    await expect.poll(() => getInput(container).value).not.toBe('');
+    expect(props.currentValue).toBe('2024-01-15T10:30:07Z');
+  });
+
+  test('shows a value set automatically on save as text', async () => {
+    const { container } = await renderEditor({
+      currentValue: '2024-01-15T10:30:07Z',
+      config: { auto_now: true, input_timezone: 'utc' },
+      readonly: true,
+    });
+
+    expect(container.querySelector('input')).toBeNull();
+    expect(page.getByRole('button').elements()).toHaveLength(0);
+    expect(container.querySelector('p')).toHaveTextContent('Jan 15, 2024, 10:30 AM — UTC');
   });
 
   test('notes the time zone', async () => {

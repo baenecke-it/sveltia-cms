@@ -10,6 +10,7 @@ import { sortAssets } from '$lib/services/assets/view/sort';
 
 import {
   assetGroups,
+  folderSummary,
   getAdjacentAssets,
   getFolderLabelByCollection,
   listedAssetIndexMap,
@@ -27,12 +28,16 @@ import {
 const {
   _publishedAssets,
   _selectedAssets,
+  _focusedAsset,
   _uploadingAssets,
   _selectedAssetFolder,
   _browsedDirPath,
+  _focusedSubfolder,
+  _selectedSubfolderPath,
   _backend,
   _currentView,
   _prefs,
+  _locale,
 } = await vi.hoisted(async () => {
   const { createRawState } = await import('$lib/services/utils/state.svelte');
 
@@ -42,16 +47,23 @@ const {
     /** @type {{ current: any[] }} */
     _selectedAssets: createRawState([]),
     /** @type {{ current: any }} */
+    _focusedAsset: createRawState(undefined),
+    /** @type {{ current: any }} */
     _uploadingAssets: createRawState({ folder: undefined, files: [] }),
     /** @type {{ current: any }} */
     _selectedAssetFolder: createRawState(undefined),
     /** @type {{ current: any }} */
     _browsedDirPath: createRawState(undefined),
     /** @type {{ current: any }} */
+    _focusedSubfolder: createRawState(undefined),
+    _selectedSubfolderPath: createRawState(''),
+    /** @type {{ current: any }} */
     _backend: createRawState(null),
     /** @type {{ current: any }} */
     _currentView: createRawState({ type: 'grid', showInfo: true }),
     _prefs: { devModeEnabled: false },
+    /** @type {{ current: string | undefined }} */
+    _locale: { current: 'en' },
   };
 });
 
@@ -66,6 +78,7 @@ vi.mock('@sveltia/i18n', () => ({
 
     return translations[key] || key;
   },
+  locale: _locale,
 }));
 
 vi.mock('$lib/services/contents/collection', () => ({
@@ -78,9 +91,10 @@ vi.mock('$lib/services/contents/collection/files', () => ({
   getCollectionFileLabel: vi.fn(),
 }));
 
-vi.mock('$lib/services/assets', () => ({
+vi.mock('$lib/services/assets/state', () => ({
   publishedAssets: _publishedAssets,
   selectedAssets: _selectedAssets,
+  focusedAsset: _focusedAsset,
   uploadingAssets: _uploadingAssets,
 }));
 
@@ -90,8 +104,12 @@ vi.mock('$lib/services/assets/folders', () => ({
 
 vi.mock('$lib/services/assets/subfolders', () => ({
   browsedDirPath: _browsedDirPath,
-  getDirName: (/** @type {string} */ path) =>
-    path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '',
+  focusedSubfolder: _focusedSubfolder,
+  selectedSubfolderPath: _selectedSubfolderPath,
+  getAssetsInDir: (/** @type {{ dirPath: string, assets: any[] }} */ { dirPath, assets }) =>
+    assets.filter(
+      ({ path }) => (path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '') === dirPath,
+    ),
   getSubfolders: vi.fn((/** @type {{ dirPath: string, assets: any[] }} */ { dirPath, assets }) => {
     const prefix = dirPath ? `${dirPath}/` : '';
 
@@ -164,9 +182,12 @@ describe('assets/view/index', () => {
     _prefs.devModeEnabled = false;
     _publishedAssets.current = [];
     _selectedAssets.current = [];
+    _focusedAsset.current = undefined;
     _uploadingAssets.current = { folder: undefined, files: [] };
     _selectedAssetFolder.current = undefined;
     _browsedDirPath.current = undefined;
+    _focusedSubfolder.current = undefined;
+    _selectedSubfolderPath.current = '';
     currentView.current = { type: 'grid', showInfo: true };
     await wait();
   });
@@ -448,6 +469,9 @@ describe('assets/view/index', () => {
     });
 
     it('should map each asset path to its position via listedAssetIndexMap', () => {
+      vi.mocked(sortAssets).mockImplementation((assets) => assets);
+      vi.mocked(groupAssets).mockImplementation((assets) => ({ '*': assets }));
+
       const indexMap = listedAssetIndexMap.current;
 
       expect([...indexMap]).toEqual([
@@ -457,12 +481,108 @@ describe('assets/view/index', () => {
       expect(indexMap.get('missing')).toBeUndefined();
     });
 
+    it('should number the assets in the order they are sorted and grouped in', () => {
+      // The rows of every group make up one grid, so the index runs across the groups
+      vi.mocked(sortAssets).mockImplementation((assets) => [...assets].reverse());
+      vi.mocked(groupAssets).mockImplementation((assets) =>
+        Object.fromEntries(assets.map((asset, index) => [`group-${index}`, [asset]])),
+      );
+
+      expect([...listedAssetIndexMap.current]).toEqual([
+        ['blog/photo2.jpg', 0],
+        ['images/photo1.jpg', 1],
+      ]);
+
+      // A filtered-out asset has no row
+      vi.mocked(filterAssets).mockImplementationOnce((assets) => assets.slice(1));
+      _publishedAssets.current = [..._publishedAssets.current];
+
+      expect([...listedAssetIndexMap.current]).toEqual([['images/photo1.jpg', 0]]);
+    });
+
     it('should reset the selected assets when the listed assets change', async () => {
       _selectedAssets.current = [createAsset('images/photo1.jpg', globalFolder)];
       _selectedAssetFolder.current = blogFolder;
       await wait();
 
       expect(_selectedAssets.current).toEqual([]);
+    });
+
+    it('should reset the selected assets when the filter changes', async () => {
+      const selection = [createAsset('images/photo1.jpg', globalFolder)];
+
+      await wait();
+      _selectedAssets.current = selection;
+      // Switching between grid and list doesn’t change the filter, so the selection is kept
+      currentView.current = { type: 'list', showInfo: true };
+      await wait();
+
+      expect(_selectedAssets.current).toEqual(selection);
+
+      currentView.current = {
+        type: 'list',
+        showInfo: true,
+        filter: { field: 'kind', pattern: 'video' },
+      };
+      await wait();
+
+      expect(_selectedAssets.current).toEqual([]);
+    });
+
+    it('should drop the focus from an asset the filter hides', async () => {
+      await wait();
+
+      const [photo1] = _publishedAssets.current;
+
+      _focusedAsset.current = photo1;
+      // A filter the focused asset matches keeps the focus
+      vi.mocked(filterAssets).mockImplementation((assets, filter) =>
+        filter?.pattern
+          ? assets.filter(({ name }) => name.includes(String(filter.pattern)))
+          : assets,
+      );
+      currentView.current = {
+        type: 'grid',
+        showInfo: true,
+        filter: { field: 'name', pattern: '1' },
+      };
+      await wait();
+
+      expect(_focusedAsset.current).toBe(photo1);
+
+      // The focused asset is filtered out, so the toolbar actions must no longer apply to it
+      currentView.current = {
+        type: 'grid',
+        showInfo: true,
+        filter: { field: 'name', pattern: '2' },
+      };
+      await wait();
+
+      expect(_focusedAsset.current).toBeUndefined();
+
+      vi.mocked(filterAssets).mockImplementation((assets) => assets);
+    });
+
+    it('should drop the focus from an asset no longer listed', async () => {
+      _focusedAsset.current = createAsset('images/photo1.jpg', globalFolder);
+      _selectedAssetFolder.current = blogFolder;
+      await wait();
+
+      expect(_focusedAsset.current).toBeUndefined();
+    });
+
+    it('should keep the focus on an asset replaced with an updated copy', async () => {
+      await wait();
+
+      [_focusedAsset.current] = _publishedAssets.current;
+      // An upload replaces the asset objects, e.g. with a new SHA
+      _publishedAssets.current = _publishedAssets.current.map((/** @type {any} */ a) => ({
+        ...a,
+        sha: `${a.sha}-new`,
+      }));
+      await wait();
+
+      expect(_focusedAsset.current?.path).toBe('images/photo1.jpg');
     });
 
     it('should not log the assets to the console when dev mode is disabled', async () => {
@@ -542,6 +662,8 @@ describe('assets/view/index', () => {
       });
 
       it('should offset the asset row indexes by the subfolder count', () => {
+        vi.mocked(sortAssets).mockImplementation((assets) => assets);
+        vi.mocked(groupAssets).mockImplementation((assets) => ({ '*': assets }));
         _browsedDirPath.current = 'images';
 
         expect([...listedAssetIndexMap.current]).toEqual([['images/photo1.jpg', 2]]);
@@ -627,6 +749,85 @@ describe('assets/view/index', () => {
 
       expect(assetGroups.current).not.toBe(groups);
       expect(assetGroups.current).toEqual({ '*': _publishedAssets.current });
+    });
+  });
+
+  describe('folderSummary', () => {
+    const globalFolder = { collectionName: undefined, internalPath: 'images', label: 'Images' };
+
+    beforeEach(() => {
+      _publishedAssets.current = [
+        createAsset('images/photo1.jpg', globalFolder),
+        createAsset('images/2024/photo2.jpg', globalFolder),
+        createAsset('images/2024/summer/photo3.jpg', globalFolder),
+        createAsset('images/2024/summer/photo4.jpg', globalFolder),
+      ];
+    });
+
+    it('should be undefined without a selected folder', () => {
+      expect(folderSummary.current).toBeUndefined();
+    });
+
+    it('should describe the selected folder', () => {
+      _selectedAssetFolder.current = globalFolder;
+      _browsedDirPath.current = 'images';
+
+      expect(folderSummary.current).toEqual({
+        name: 'Images',
+        path: 'images',
+        folderCount: 1,
+        assetCount: 1,
+      });
+    });
+
+    it('should describe the subfolder being browsed', () => {
+      _selectedAssetFolder.current = globalFolder;
+      _selectedSubfolderPath.current = '2024/summer';
+      _browsedDirPath.current = 'images/2024/summer';
+
+      expect(folderSummary.current).toEqual({
+        name: 'summer',
+        path: 'images/2024/summer',
+        folderCount: 0,
+        assetCount: 2,
+      });
+    });
+
+    it('should describe a folder that is not browsed by subfolder', () => {
+      const allAssetsFolder = { collectionName: undefined, internalPath: undefined };
+
+      _selectedAssetFolder.current = allAssetsFolder;
+
+      expect(folderSummary.current).toEqual({
+        name: 'All Assets',
+        path: undefined,
+        folderCount: undefined,
+        assetCount: 4,
+      });
+    });
+
+    it('should wait for the locale to label the folder', () => {
+      _selectedAssetFolder.current = globalFolder;
+      _locale.current = undefined;
+
+      try {
+        expect(folderSummary.current?.name).toBeUndefined();
+      } finally {
+        _locale.current = 'en';
+      }
+    });
+
+    it('should describe the focused subfolder', () => {
+      _selectedAssetFolder.current = globalFolder;
+      _browsedDirPath.current = 'images';
+      _focusedSubfolder.current = { name: '2024', path: 'images/2024' };
+
+      expect(folderSummary.current).toEqual({
+        name: '2024',
+        path: 'images/2024',
+        folderCount: 1,
+        assetCount: 1,
+      });
     });
   });
 

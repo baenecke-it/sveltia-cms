@@ -1,10 +1,21 @@
+import { flushSync } from 'svelte';
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import { page, userEvent } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
 import { customComponentRegistry } from '$lib/services/api/registries';
-import { EntryDraftState, setEntryDraftRoot } from '$lib/services/contents/draft/state.svelte';
-import { initTestConfig } from '$lib/test/config';
+import { globalAssetFolder } from '$lib/services/assets/folders';
+import {
+  createValueMap,
+  getValueMapVersion,
+} from '$lib/services/contents/draft/create/versioned-map.svelte';
+import {
+  EntryDraftState,
+  getEntryDraftByElement,
+  setEntryDraftRoot,
+} from '$lib/services/contents/draft/state.svelte';
+import { trackPendingFieldUpdate } from '$lib/services/contents/editor/pending';
+import { createMockAsset, createMockImageFile, initTestConfig, setAssets } from '$lib/test/config';
 import { createMockDraft } from '$lib/test/draft';
 
 import EditorComponent from './editor-component.svelte';
@@ -24,8 +35,13 @@ const wrappers = [];
  * @param {object} [options] Options.
  * @param {boolean} [options.contained] Whether the pane elements are there. Otherwise the
  * component can’t tell which locale and field it belongs to.
- * @returns {Promise<{ draft: any, onChange: any, wrapper: HTMLElement, component: any }>} Draft,
- * handler, wrapper and component.
+ * @returns {Promise<{
+ * draft: any,
+ * entryDraft: EntryDraftState,
+ * onChange: any,
+ * wrapper: HTMLElement,
+ * component: any,
+ * }>} Draft, its state, handler, wrapper and component.
  */
 const renderComponent = async (props, { contained = true } = {}) => {
   const draft = createMockDraft({
@@ -63,7 +79,7 @@ const renderComponent = async (props, { contained = true } = {}) => {
     }),
   });
 
-  return { draft, onChange, wrapper, component };
+  return { draft, entryDraft, onChange, wrapper, component };
 };
 
 /**
@@ -183,6 +199,47 @@ describe('EditorComponent', () => {
       expect(onChange).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'remove' }));
     });
 
+    test('lets the field controls within the block handle the keys first', async () => {
+      const listFields = [{ name: 'tags', label: 'Tags', widget: 'list' }];
+
+      customComponentRegistry.set(
+        'tags',
+        /** @type {any} */ ({ id: 'tags', label: 'Tags', fields: listFields }),
+      );
+
+      try {
+        const { wrapper } = await renderComponent({
+          componentName: 'tags',
+          label: 'Tags',
+          fields: listFields,
+          summary: undefined,
+          values: { tags: ['a'] },
+        });
+
+        const group = page.getByRole('group', { name: 'Tags' });
+        const items = group.getByRole('textbox', { name: 'Item Value' });
+        const outerListener = vi.fn();
+
+        await expect.element(items.first()).toHaveValue('a');
+        // The outer editor’s listener, which the keys pressed within the block must not reach
+        wrapper.addEventListener('keydown', outerListener);
+
+        // A listener added to a control directly gets the key
+        const input = /** @type {HTMLInputElement} */ (items.first().element());
+        const inputListener = vi.fn();
+
+        input.addEventListener('keydown', inputListener);
+        input.focus();
+        // A listener the list delegates to Svelte gets the Enter key too, and adds an item
+        await userEvent.keyboard('{Enter}');
+        expect(inputListener).toHaveBeenCalledOnce();
+        await expect.poll(() => items.elements().length).toBe(2);
+        expect(outerListener).not.toHaveBeenCalled();
+      } finally {
+        customComponentRegistry.delete('tags');
+      }
+    });
+
     test('leaves the keys pressed within a nested rich text editor alone', async () => {
       // The nested editor would otherwise build nodes from the stub definitions in the registry
       const nestedFields = [
@@ -260,6 +317,26 @@ describe('EditorComponent', () => {
       ).toHaveLength(2);
     });
 
+    test('has no expander button without fields, but can be removed', async () => {
+      const { onChange, wrapper } = await renderComponent({
+        componentName: 'divider',
+        label: 'Divider',
+        fields: [],
+        summary: undefined,
+        values: undefined,
+      });
+
+      const group = page.getByRole('group', { name: 'Divider' });
+
+      await expect.element(group).toMatchTextContent('Divider');
+      expect(group.getByRole('button', { name: /^(Expand|Collapse)$/ }).elements()).toHaveLength(0);
+      expect(wrapper.querySelector('.item-list')).toBeNull();
+      expect(wrapper.querySelector('.component')?.classList.contains('expanded')).toBe(false);
+
+      await group.getByRole('button', { name: 'Remove' }).click();
+      expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'remove' }));
+    });
+
     test('shows the first text field or the label without a summary template', async () => {
       // A field without a widget is a string field
       const { wrapper } = await renderComponent({
@@ -307,6 +384,246 @@ describe('EditorComponent', () => {
         .poll(() => getStoredValues(draft))
         .toEqual({ title: 'Hello', url: '1', __sc_component_name: 'card' });
     });
+    test('doesn’t put the values back into the draft once unmounted', async () => {
+      const draft = createMockDraft({
+        fields: [{ name: 'body', widget: 'markdown' }],
+        values: { _default: { body: '' } },
+      });
+
+      const entryDraft = new EntryDraftState();
+      const wrapper = document.createElement('div');
+
+      const props = $state({
+        componentName: 'card',
+        label: 'Card',
+        fields,
+        summary: '{{title}}',
+        onChange: vi.fn(),
+        values: { title: 'Hello' },
+      });
+
+      entryDraft.current = draft;
+      wrapper.dataset.locale = '_default';
+      wrapper.dataset.keyPath = 'body';
+      document.body.appendChild(wrapper);
+      wrappers.push(wrapper);
+      setEntryDraftRoot(wrapper, entryDraft);
+
+      const { unmount } = await render(EditorComponent, { target: wrapper, props });
+
+      await expect.poll(() => getStoredValues(draft).title).toBe('Hello');
+
+      // The changed values are written to the draft in a microtask, by which time the component
+      // has removed its values on its way out
+      props.values = { title: 'Hi' };
+      flushSync();
+      await unmount();
+
+      expect(getStoredValues(draft)).toEqual({});
+    });
+
+    test('doesn’t write the values the draft already holds', async () => {
+      const draft = createMockDraft({
+        fields: [{ name: 'body', widget: 'markdown' }],
+        values: { _default: { body: '' } },
+      });
+
+      const entryDraft = new EntryDraftState();
+      const wrapper = document.createElement('div');
+
+      const props = $state({
+        componentName: 'card',
+        label: 'Card',
+        fields,
+        summary: '{{title}}',
+        onChange: vi.fn(),
+        values: { title: 'Hello' },
+      });
+
+      entryDraft.current = draft;
+      wrapper.dataset.locale = '_default';
+      wrapper.dataset.keyPath = 'body';
+      document.body.appendChild(wrapper);
+      wrappers.push(wrapper);
+      setEntryDraftRoot(wrapper, entryDraft);
+
+      await render(EditorComponent, { target: wrapper, props });
+      await expect.poll(() => getStoredValues(draft).title).toBe('Hello');
+
+      // Count the writes from here on, the way the app’s value maps do
+      const valueMap = createValueMap($state.snapshot(draft.extraValues._default));
+
+      draft.extraValues._default = valueMap;
+      flushSync();
+
+      const version = getValueMapVersion(valueMap);
+
+      // The rich text editor hands the reported values back, e.g. after re-rendering the node
+      props.values = /** @type {any} */ (getStoredValues(draft));
+      flushSync();
+      await new Promise((resolve) => {
+        setTimeout(resolve);
+      });
+
+      expect(getValueMapVersion(valueMap)).toBe(version);
+    });
+
+    test('writes the values to the draft that replaced the previous one in the meantime', async () => {
+      /**
+       * Create a draft holding no component values.
+       * @returns {any} Draft.
+       */
+      const createDraft = () =>
+        createMockDraft({
+          fields: [{ name: 'body', widget: 'markdown' }],
+          values: { _default: { body: '' } },
+        });
+
+      const draft = createDraft();
+      const entryDraft = new EntryDraftState();
+      const wrapper = document.createElement('div');
+
+      const props = $state({
+        componentName: 'card',
+        label: 'Card',
+        fields,
+        summary: '{{title}}',
+        onChange: vi.fn(),
+        values: { title: 'Hello' },
+      });
+
+      entryDraft.current = draft;
+      wrapper.dataset.locale = '_default';
+      wrapper.dataset.keyPath = 'body';
+      document.body.appendChild(wrapper);
+      wrappers.push(wrapper);
+      setEntryDraftRoot(wrapper, entryDraft);
+
+      await render(EditorComponent, { target: wrapper, props });
+      await expect.poll(() => getStoredValues(draft).title).toBe('Hello');
+
+      // The draft is replaced, e.g. reset after a save, before the changed values are written
+      const newDraft = createDraft();
+
+      props.values = { title: 'Hi' };
+      flushSync();
+      entryDraft.current = newDraft;
+
+      await expect.poll(() => getStoredValues(newDraft).title).toBe('Hi');
+    });
+  });
+
+  describe('inline mode', () => {
+    const statusFields = [
+      { name: 'value', label: 'Value', widget: 'select', options: ['draft', 'done'] },
+    ];
+
+    beforeAll(() => {
+      customComponentRegistry.set(
+        'status',
+        /** @type {any} */ ({
+          id: 'status',
+          label: 'Status',
+          mode: 'inline',
+          fields: statusFields,
+        }),
+      );
+    });
+
+    afterAll(() => {
+      customComponentRegistry.delete('status');
+    });
+
+    test('renders only the control of the field, which updates the component', async () => {
+      const { draft, onChange, wrapper } = await renderComponent({
+        componentName: 'status',
+        label: 'Status',
+        mode: 'inline',
+        inline: true,
+        fields: statusFields,
+        summary: undefined,
+        values: { value: 'draft' },
+      });
+
+      const group = page.getByRole('group', { name: 'Status' });
+      // Even with a few options, which would otherwise be radio buttons
+      const select = group.getByRole('combobox', { name: 'Value' });
+
+      await expect.element(select).toHaveTextContent('draft');
+      await expect.element(group).toHaveAttribute('data-component-name', 'status');
+      await expect.element(group).toHaveAttribute('contenteditable', 'false');
+      expect(wrapper.querySelector('.component')).toHaveClass('inline-field');
+      // No label, hint, menu or dialog
+      expect(wrapper.querySelector('h4, header, .hint, dialog')).toBeNull();
+      expect(wrapper.querySelector('.field.inline')).toHaveAttribute('data-field-type', 'select');
+
+      await expect
+        .poll(() => getStoredValues(draft))
+        .toEqual({ value: 'draft', __sc_component_name: 'status' });
+
+      await select.click();
+      await page.getByRole('option', { name: 'done' }).click();
+      await vi.waitFor(() =>
+        expect(onChange).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            type: 'update',
+            detail: expect.objectContaining({ value: 'done' }),
+          }),
+        ),
+      );
+    });
+
+    test('is removed with the Backspace key while focused', async () => {
+      const { onChange, wrapper } = await renderComponent({
+        componentName: 'status',
+        label: 'Status',
+        mode: 'inline',
+        inline: true,
+        fields: statusFields,
+        values: { value: 'draft' },
+      });
+
+      await expect.element(page.getByRole('combobox', { name: 'Value' })).toBeInTheDocument();
+
+      const chip = /** @type {HTMLElement} */ (wrapper.querySelector('.component'));
+
+      chip.focus();
+      await userEvent.keyboard('{Backspace}');
+      expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ type: 'remove' }));
+    });
+
+    test('falls back to the block mode for fields the mode can’t have', async () => {
+      // A component registered after the configuration was checked, e.g. by a late script
+      const { wrapper } = await renderComponent({
+        mode: 'inline',
+        inline: true,
+        values: { title: 'Hello' },
+      });
+
+      await expect.element(page.getByRole('textbox', { name: 'Title' })).toHaveValue('Hello');
+      expect(wrapper.querySelector('.component')).toHaveClass('wrapper');
+      expect(wrapper.querySelector('.inline-field')).toBeNull();
+    });
+
+    test('has no control outside an entry editor pane', async () => {
+      const { wrapper } = await renderComponent(
+        {
+          componentName: 'status',
+          label: 'Status',
+          mode: 'inline',
+          inline: true,
+          fields: statusFields,
+          values: { value: 'draft' },
+        },
+        { contained: false },
+      );
+
+      await expect.element(page.getByRole('group', { name: 'Status' })).toBeInTheDocument();
+      await new Promise((resolve) => {
+        setTimeout(resolve, 100);
+      });
+      expect(wrapper.querySelector('.field')).toBeNull();
+    });
   });
 
   describe('dialog mode', () => {
@@ -340,6 +657,85 @@ describe('EditorComponent', () => {
         ),
       );
       await expect.element(placeholder).toHaveTextContent('Hi');
+    });
+
+    test('lets a component nested in the dialog find the draft and locale', async () => {
+      const { entryDraft } = await renderComponent({
+        mode: 'dialog',
+        values: { title: 'Hello', url: '' },
+      });
+
+      await page.getByRole('button', { name: 'Card' }).click();
+
+      const dialog = page.getByRole('dialog', { name: 'Card' });
+
+      await expect.element(dialog.getByRole('textbox', { name: 'Title' })).toBeVisible();
+
+      // The dialog is rendered outside the editor, so its fields can’t be found from the elements
+      // around the component; the element holding them tells a nested component instead
+      const title = dialog.getByRole('textbox', { name: 'Title' }).element();
+      const fieldsElement = /** @type {HTMLElement} */ (title.closest('[data-locale]'));
+
+      expect(fieldsElement.closest('dialog')).not.toBeNull();
+      expect(fieldsElement.dataset.locale).toBe('_default');
+      expect(getEntryDraftByElement(title)).toBe(entryDraft);
+    });
+
+    test('waits for a change still on its way to the draft before confirming', async () => {
+      const { draft, onChange } = await renderComponent({
+        mode: 'dialog',
+        values: { title: 'Hello', url: '' },
+      });
+
+      await page.getByRole('button', { name: 'Card' }).click();
+
+      const dialog = page.getByRole('dialog', { name: 'Card' });
+
+      await expect.element(dialog.getByRole('textbox', { name: 'Title' })).toHaveValue('Hello');
+
+      // A rich text field in the dialog converts what was just typed with a short delay
+      /** @type {PromiseWithResolvers<void>} */
+      const { promise, resolve } = Promise.withResolvers();
+
+      trackPendingFieldUpdate(promise);
+      await dialog.getByRole('button', { name: 'Update' }).click();
+      expect(onChange).not.toHaveBeenCalled();
+
+      const key = /** @type {string} */ (
+        Object.keys(draft.extraValues._default).find((k) => k.endsWith(':title'))
+      );
+
+      draft.extraValues._default[key] = 'Late';
+      resolve();
+
+      await vi.waitFor(() =>
+        expect(onChange).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'update',
+            detail: expect.objectContaining({ title: 'Late' }),
+          }),
+        ),
+      );
+      await expect.element(dialog).not.toBeInTheDocument();
+    });
+
+    test('adds no space between an inline placeholder and the text before it', async () => {
+      const { wrapper } = await renderComponent({
+        mode: 'dialog',
+        inline: true,
+        values: { title: 'Hello', url: '' },
+      });
+
+      // Lexical puts the text before an inline node in a sibling element
+      const text = document.createElement('span');
+
+      text.textContent = 'Text ';
+      wrapper.prepend(text);
+
+      const placeholder = page.getByRole('button', { name: 'Card' });
+
+      await expect.element(placeholder).toBeVisible();
+      expect(getComputedStyle(placeholder.element()).marginInlineStart).toBe('0px');
     });
 
     test('shows the first text field or the label without a summary template', async () => {
@@ -422,6 +818,52 @@ describe('EditorComponent', () => {
       expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'remove' }));
     });
 
+    test('is inserted right away without a dialog when there are no fields', async () => {
+      const { onChange, wrapper } = await renderComponent({
+        mode: 'dialog',
+        componentName: 'divider',
+        label: 'Divider',
+        fields: [],
+        summary: undefined,
+        values: undefined,
+      });
+
+      await expect
+        .poll(() => onChange.mock.calls.at(-1)?.[0])
+        .toEqual(expect.objectContaining({ type: 'update' }));
+      expect(onChange.mock.calls.at(-1)[0].detail).toEqual({ __sc_component_name: 'divider' });
+      expect(onChange).toHaveBeenCalledOnce();
+
+      const placeholder = page.getByRole('img', { name: 'Divider' });
+
+      await expect.element(placeholder).toHaveTextContent('Divider');
+
+      // Neither a click nor the Enter key opens a dialog, but the Backspace key removes it
+      await placeholder.click();
+      await userEvent.keyboard('{Enter}');
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      wrapper
+        .querySelector('.placeholder')
+        ?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }));
+      expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'remove' }));
+    });
+
+    test('is not updated again without fields when it already exists', async () => {
+      const { draft, onChange } = await renderComponent({
+        mode: 'dialog',
+        componentName: 'divider',
+        label: 'Divider',
+        fields: [],
+        summary: undefined,
+        values: { __sc_component_name: 'divider' },
+      });
+
+      await expect.element(page.getByRole('img', { name: 'Divider' })).toBeInTheDocument();
+      // The values are stored by the same watcher that would report a new component
+      await expect.poll(() => getStoredValues(draft)).toEqual({ __sc_component_name: 'divider' });
+      expect(onChange).not.toHaveBeenCalled();
+    });
+
     test('has no fields to edit outside an entry editor pane', async () => {
       await renderComponent({ mode: 'dialog', values: undefined }, { contained: false });
 
@@ -450,6 +892,172 @@ describe('EditorComponent', () => {
       expect(
         onChange.mock.calls.filter((/** @type {any[]} */ [event]) => event.type === 'remove'),
       ).toHaveLength(2);
+    });
+
+    test('opens the dialog with the Space key, which doesn’t reach the editor', async () => {
+      await renderComponent({ mode: 'dialog', values: { title: 'Hello' } });
+
+      const placeholder = page.getByRole('button', { name: 'Card' });
+      const space = new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true });
+
+      placeholder.element().dispatchEvent(space);
+      expect(space.defaultPrevented).toBe(true);
+      await expect.element(page.getByRole('dialog', { name: 'Card' })).toBeInTheDocument();
+    });
+
+    describe('thumbnail', () => {
+      const iconFields = [
+        { name: 'icon', label: 'Icon', widget: 'image' },
+        { name: 'title', label: 'Title', widget: 'string', required: false },
+      ];
+
+      const iconProps = {
+        componentName: 'icon',
+        label: 'Icon',
+        mode: 'dialog',
+        inline: true,
+        summary: undefined,
+        thumbnail: 'icon',
+        fields: iconFields,
+      };
+
+      beforeAll(async () => {
+        customComponentRegistry.set(
+          'icon',
+          /** @type {any} */ ({ id: 'icon', label: 'Icon', fields: iconFields }),
+        );
+        setAssets([
+          createMockAsset({
+            name: 'photo.png',
+            file: await createMockImageFile(),
+            asset: { folder: globalAssetFolder.current },
+          }),
+          createMockAsset({ name: 'notes.docx', asset: { folder: globalAssetFolder.current } }),
+          createMockAsset({
+            name: 'broken.png',
+            file: new File(['broken'], 'broken.png', { type: 'image/png' }),
+            asset: { folder: globalAssetFolder.current },
+          }),
+        ]);
+      });
+
+      afterAll(() => {
+        customComponentRegistry.delete('icon');
+        setAssets([]);
+      });
+
+      /**
+       * Get the `src` of the thumbnail in the placeholder.
+       * @returns {string | null | undefined} Source.
+       */
+      const getThumbnailSrc = () =>
+        page
+          .getByRole('button', { name: 'Icon' })
+          .element()
+          .querySelector('img')
+          ?.getAttribute('src');
+
+      test('shows only the image when there is no text to show', async () => {
+        await renderComponent({
+          ...iconProps,
+          values: { icon: '/static/uploads/photo.png', title: '' },
+        });
+
+        const placeholder = page.getByRole('button', { name: 'Icon' });
+
+        await expect.poll(getThumbnailSrc).toMatch(/^blob:/);
+        await expect.element(placeholder).toHaveTextContent('');
+        await expect.element(placeholder).toHaveClass('thumbnail-only');
+
+        const { width, height } = /** @type {HTMLElement} */ (
+          placeholder.element().querySelector('.preview')
+        ).getBoundingClientRect();
+
+        expect([width, height]).toEqual([20, 20]);
+      });
+
+      test('shows the image along with the text', async () => {
+        await renderComponent({
+          ...iconProps,
+          values: { icon: '/static/uploads/photo.png', title: 'Star' },
+        });
+
+        const placeholder = page.getByRole('button', { name: 'Icon' });
+
+        await expect.poll(getThumbnailSrc).toMatch(/^blob:/);
+        await expect.element(placeholder).toHaveTextContent('Star');
+        await expect.element(placeholder).not.toHaveClass('thumbnail-only');
+      });
+
+      test('shows the image along with a summary without placeholders', async () => {
+        await renderComponent({
+          ...iconProps,
+          summary: 'Symbol',
+          values: { icon: '/static/uploads/photo.png', title: '' },
+        });
+
+        const placeholder = page.getByRole('button', { name: 'Icon' });
+
+        await expect.poll(getThumbnailSrc).toMatch(/^blob:/);
+        await expect.element(placeholder).toHaveTextContent('Symbol');
+      });
+
+      test('shows the label for a file that is not an image', async () => {
+        await renderComponent({
+          ...iconProps,
+          values: { icon: '/static/uploads/notes.docx', title: '' },
+        });
+
+        const placeholder = page.getByRole('button', { name: 'Icon' });
+
+        await expect.element(placeholder).toHaveTextContent('Icon');
+        expect(getThumbnailSrc()).toBeUndefined();
+      });
+
+      test('shows the label instead of an image that fails to load', async () => {
+        await renderComponent({
+          ...iconProps,
+          values: { icon: 'data:image/png;base64,AAAA', title: '' },
+        });
+
+        const placeholder = page.getByRole('button', { name: 'Icon' });
+
+        // The label is shown until the draft, which the thumbnail is looked up with, is resolved
+        await expect.poll(() => placeholder.element().dataset.keyPathPrefix).toMatch(/^body:/);
+        await expect.element(placeholder).toHaveTextContent('Icon');
+        await expect.element(placeholder).not.toHaveClass('thumbnail-only');
+        expect(placeholder.element().querySelector('.preview')).toBeNull();
+      });
+
+      test('shows the label instead of an asset that fails to load', async () => {
+        await renderComponent({
+          ...iconProps,
+          values: { icon: '/static/uploads/broken.png', title: '' },
+        });
+
+        const placeholder = page.getByRole('button', { name: 'Icon' });
+
+        await expect.poll(() => placeholder.element().dataset.keyPathPrefix).toMatch(/^body:/);
+        await expect.element(placeholder).toHaveTextContent('Icon');
+        await expect.poll(() => placeholder.element().querySelector('.preview')).toBeNull();
+      });
+
+      test('is not shown in block mode', async () => {
+        await renderComponent({
+          ...iconProps,
+          mode: 'block',
+          // Collapsed, so the Image field editor and its own preview aren’t rendered either
+          collapsed: true,
+          values: { icon: '/static/uploads/photo.png', title: '' },
+        });
+
+        const group = page.getByRole('group', { name: 'Icon' });
+
+        await expect.element(group).toBeVisible();
+        // Wait for the draft, which the thumbnail is looked up with, to be resolved
+        await expect.poll(() => group.element().dataset.keyPathPrefix).toMatch(/^body:/);
+        expect(group.element().querySelector('.preview')).toBeNull();
+      });
     });
   });
 });

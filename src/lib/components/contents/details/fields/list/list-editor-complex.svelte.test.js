@@ -1,11 +1,13 @@
-import { sleep } from '@sveltia/utils/misc';
-import { beforeAll, describe, expect, test, vi } from 'vitest';
+import { createElement } from 'react';
+import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
 import { page, userEvent } from 'vitest/browser';
 
+import { customFieldTypeRegistry } from '$lib/services/api/registries';
 import { globalAssetFolder } from '$lib/services/assets/folders';
 import { env } from '$lib/services/user/env.svelte';
 import { createMockAsset, createMockImageFile, initTestConfig, setAssets } from '$lib/test/config';
 import { createMockDraft, renderWithDraft } from '$lib/test/draft';
+import { renderFieldEditor } from '$lib/test/field.svelte';
 
 import ListEditorComplex from './list-editor-complex.svelte';
 
@@ -13,6 +15,12 @@ import ListEditorComplex from './list-editor-complex.svelte';
  * @import { ComplexListField } from '$lib/types/public';
  */
 
+// The custom field type components are rendered with React and receive Immutable Maps
+vi.mock('$lib/services/app/dependencies', async (importOriginal) => ({
+  ...(await importOriginal()),
+  loadModule: vi.fn(() => import('immutable')),
+  loadChunk: vi.fn(() => import('$lib/chunks/react-dom.js')),
+}));
 vi.mock('$lib/services/user/env.svelte', async () => {
   const { createState } = await import('$lib/services/utils/state.svelte');
 
@@ -46,22 +54,18 @@ const sectionsField = {
  * Render the editor within a draft.
  * @param {ComplexListField} fieldConfig Field configuration.
  * @param {Record<string, any>} values Flattened values.
+ * @param {Record<string, any>} [props] Any other props, e.g. `required`.
  * @returns {Promise<{ draft: any, container: HTMLElement, entryDraft: any }>} Draft, container
  * and draft state.
  */
-const renderEditor = async (fieldConfig, values) => {
+const renderEditor = async (fieldConfig, values, props = {}) => {
   const draft = createMockDraft({ fields: [fieldConfig], values: { _default: values } });
 
-  const { container, entryDraft } = await renderWithDraft(ListEditorComplex, {
+  const { container, entryDraft } = await renderFieldEditor(ListEditorComplex, {
+    fieldConfig,
+    locale: '_default',
+    props,
     draft,
-    props: {
-      locale: '_default',
-      keyPath: fieldConfig.name,
-      typedKeyPath: fieldConfig.name,
-      fieldId: fieldConfig.name,
-      fieldLabel: fieldConfig.label ?? fieldConfig.name,
-      fieldConfig,
-    },
   });
 
   return { draft, container, entryDraft };
@@ -120,10 +124,9 @@ describe('ListEditorComplex', () => {
 
     await expect
       .poll(() => getStoredItems(draft, 'authors'))
-      .toEqual([
-        { name: 'Melvin', role: '' },
-        { name: 'Anonymous', role: '' },
-      ]);
+      // The existing item's unset `role` is left alone by its editor, while the new item gets the
+      // subfield defaults
+      .toEqual([{ name: 'Melvin' }, { name: 'Anonymous', role: '' }]);
   });
 
   test('duplicates and removes an item', async () => {
@@ -147,6 +150,59 @@ describe('ListEditorComplex', () => {
       .toEqual([{ name: 'Melvin', role: 'Editor' }]);
   });
 
+  test('moves focus to the next item, or the previous one, after removing an item', async () => {
+    const { draft, container } = await renderEditor(authorsField, {
+      'authors.0.name': 'Melvin',
+      'authors.1.name': 'Elsie',
+      'authors.2.name': 'Sarah',
+    });
+
+    /**
+     * Get the expander button of the item at the given position.
+     * @param {number} index Item index.
+     * @returns {HTMLButtonElement | null | undefined} Button.
+     */
+    const getExpander = (index) =>
+      container.querySelectorAll('.item-wrapper')[index]?.querySelector('button');
+
+    // Removing the middle item focuses the one that takes its place
+    await page.getByRole('button', { name: 'Remove' }).nth(1).click();
+    await expect
+      .poll(() => getStoredItems(draft, 'authors').map(({ name }) => name))
+      .toEqual(['Melvin', 'Sarah']);
+    await expect.poll(() => document.activeElement).toBe(getExpander(1));
+
+    // Removing the last item focuses the previous one
+    await page.getByRole('button', { name: 'Remove' }).nth(1).click();
+    await expect
+      .poll(() => getStoredItems(draft, 'authors').map(({ name }) => name))
+      .toEqual(['Melvin']);
+    await expect.poll(() => document.activeElement).toBe(getExpander(0));
+    expect(getExpander(0)).toBeInstanceOf(HTMLButtonElement);
+  });
+
+  test('doesn’t take the original position of the item it duplicates', async () => {
+    const { draft } = await renderEditor(authorsField, {
+      'authors.0.name': 'Melvin',
+      'authors.0.role': 'Editor',
+    });
+
+    const values = draft.currentValues._default;
+
+    // The first duplication tags the existing item with its original position
+    await page.getByRole('button', { name: 'List Item Options' }).nth(0).click();
+    await page.getByRole('menuitem', { name: 'Duplicate' }).click();
+    await expect.poll(() => values['authors.0.__sc_item_original_key_path']).toBe('authors.0');
+    await expect.poll(() => getStoredItems(draft, 'authors')).toHaveLength(2);
+
+    // A copy of the tagged item is new, so a revert doesn’t treat it as the original item
+    await page.getByRole('button', { name: 'List Item Options' }).nth(0).click();
+    await page.getByRole('menuitem', { name: 'Duplicate' }).click();
+    await expect.poll(() => getStoredItems(draft, 'authors')).toHaveLength(3);
+    expect(values['authors.0.__sc_item_original_key_path']).toBe('authors.0');
+    expect(values['authors.1.__sc_item_original_key_path']).toBeUndefined();
+  });
+
   test('reorders an item with the keyboard', async () => {
     const { draft } = await renderEditor(authorsField, {
       'authors.0.name': 'a',
@@ -160,6 +216,107 @@ describe('ListEditorComplex', () => {
     await expect
       .poll(() => getStoredItems(draft, 'authors').map(({ name }) => name))
       .toEqual(['b', 'c', 'a']);
+  });
+
+  test('reorders an item with the Move Up/Down buttons beside the drag handle', async () => {
+    const { draft } = await renderEditor(authorsField, {
+      'authors.0.name': 'a',
+      'authors.1.name': 'b',
+      'authors.2.name': 'c',
+    });
+
+    const first = page.getByRole('group', { name: 'Item 1 of 3' });
+
+    // The buttons are there with a mouse, along with the handle
+    await expect.element(first.getByRole('button', { name: 'Reorder Item' })).toBeVisible();
+    await expect.element(first.getByRole('button', { name: 'Move Up' })).toBeDisabled();
+    await first.getByRole('button', { name: 'Move Down' }).click();
+
+    await expect
+      .poll(() => getStoredItems(draft, 'authors').map(({ name }) => name))
+      .toEqual(['b', 'a', 'c']);
+    // The focus follows the item to its new position
+    await expect
+      .element(
+        page.getByRole('group', { name: 'Item 2 of 3' }).getByRole('button', { name: 'Move Down' }),
+      )
+      .toHaveFocus();
+  });
+
+  test('hides the header end buttons until the item is hovered or has focus', async () => {
+    await renderEditor(authorsField, { 'authors.0.name': 'a', 'authors.1.name': 'b' });
+
+    // Without hover, there’s no rule hiding the buttons for the test to check
+    expect(matchMedia('(hover: hover)').matches).toBe(true);
+
+    const first = page.getByRole('group', { name: 'Item 1 of 2' });
+    const names = ['Move Up', 'Move Down', 'List Item Options', 'Remove'];
+
+    /**
+     * Get the opacity of the buttons at the end of the first item’s header.
+     * @returns {string[]} Opacities.
+     */
+    const getOpacities = () =>
+      names.map(
+        (name) => getComputedStyle(first.getByRole('button', { name }).first().element()).opacity,
+      );
+
+    await userEvent.unhover(first);
+    await expect.poll(getOpacities).toEqual(['0', '0', '0', '0']);
+    await userEvent.hover(first);
+    await expect.poll(getOpacities).toEqual(['1', '1', '1', '1']);
+    await userEvent.unhover(first);
+    await expect.poll(getOpacities).toEqual(['0', '0', '0', '0']);
+    // A keyboard user in the item can see the buttons
+    first.getByRole('textbox').first().element().focus();
+    await expect.poll(getOpacities).toEqual(['1', '1', '1', '1']);
+    // The handle stays visible
+    await expect
+      .element(
+        page
+          .getByRole('group', { name: 'Item 2 of 2' })
+          .getByRole('button', { name: 'Reorder Item' }),
+      )
+      .toHaveStyle({ opacity: '1' });
+
+    // The options button stays visible while its menu is open, wherever the pointer and focus are
+    const options = first.getByRole('button', { name: 'List Item Options' });
+
+    await options.click();
+    await expect.element(options).toHaveAttribute('aria-expanded', 'true');
+    await userEvent.unhover(first);
+    await expect.element(options).toHaveStyle({ opacity: '1' });
+    await userEvent.keyboard('{Escape}');
+    await expect.element(options).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  test('shows the position of each item, following a move', async () => {
+    const { container } = await renderEditor(authorsField, {
+      'authors.0.name': 'a',
+      'authors.1.name': 'b',
+      'authors.2.name': 'c',
+    });
+
+    /**
+     * Get the positions shown in the item headers, in the order on screen.
+     * @returns {string[]} Positions.
+     */
+    const getPositions = () =>
+      [...container.querySelectorAll('.item .position')].map((el) => el.textContent.trim());
+
+    await expect.poll(getPositions).toEqual(['1', '2', '3']);
+
+    const first = page.getByRole('group', { name: 'Item 1 of 3' });
+
+    await expect.element(first.getByRole('textbox').first()).toHaveValue('a');
+
+    await page.getByRole('button', { name: 'Reorder Item' }).nth(0).element().focus();
+    await userEvent.keyboard('{End}');
+
+    await expect.poll(getPositions).toEqual(['1', '2', '3']);
+    await expect
+      .element(page.getByRole('group', { name: 'Item 3 of 3' }).getByRole('textbox').first())
+      .toHaveValue('a');
   });
 
   test('collapses the items to their summaries', async () => {
@@ -200,7 +357,7 @@ describe('ListEditorComplex', () => {
       .toEqual([{ type: 'hero', heading: '' }]);
     await expect
       .element(page.getByRole('button', { name: 'Collapse' }).nth(1))
-      .toHaveTextContent('expand_more Hero');
+      .toHaveTextContent('expand_more 1 Hero');
   });
 
   test('warns about an item of an unknown type', async () => {
@@ -267,6 +424,26 @@ describe('ListEditorComplex (more)', () => {
         [...container.querySelectorAll('.item-body .summary')].map((el) => el.textContent?.trim()),
       )
       .toEqual(['a', 'c', 'new']);
+  });
+
+  test('adds an item with an empty pair to a list with a single KeyValue subfield', async () => {
+    /** @type {ComplexListField} */
+    const pairsField = {
+      name: 'pairs',
+      widget: 'list',
+      label: 'Pairs',
+      label_singular: 'Pair',
+      field: { name: 'pair', widget: 'keyvalue' },
+    };
+
+    const { draft } = await renderEditor(pairsField, { 'pairs.0.foo': 'bar' });
+
+    await page.getByRole('button', { name: /Add\W+Pair/ }).click();
+
+    // The empty key is kept as is, not turned into an array index
+    await expect.poll(() => draft.currentValues._default['pairs.1.']).toBe('');
+    expect(Object.keys(draft.currentValues._default)).not.toContain('pairs.1.0');
+    expect(draft.currentValues._default['pairs.0.foo']).toBe('bar');
   });
 
   test('removes and reorders the items of a list with a single subfield', async () => {
@@ -336,12 +513,11 @@ describe('ListEditorComplex (more)', () => {
       .poll(() => getStoredItems(draft, 'authors').map(({ name }) => name))
       .toEqual(['Anonymous', 'Melvin']);
 
-    // The limit is reached
-    await expect.element(page.getByRole('button', { name: /Add\W+Author/ })).toBeDisabled();
-    await expect.poll(() => document.querySelector('dialog.popup')).toBeNull();
-    await page.getByRole('button', { name: 'List Item Options' }).nth(0).click();
-    await expect.element(page.getByRole('menuitem', { name: 'Duplicate' })).toBeDisabled();
-    await expect.element(page.getByRole('menuitem', { name: 'Add Item Below' })).toBeDisabled();
+    // The limit is reached, so the add button and the item options are gone
+    await expect
+      .poll(() => page.getByRole('button', { name: /Add\W+Author/ }).elements())
+      .toHaveLength(0);
+    expect(page.getByRole('button', { name: 'List Item Options' }).elements()).toHaveLength(0);
   });
 
   test('starts minimized when configured, expanding once an item is added', async () => {
@@ -400,7 +576,6 @@ describe('ListEditorComplex (more)', () => {
     await renderEditor({ ...authorsField, allow_duplicate: false }, { 'authors.0.name': 'Melvin' });
 
     await page.getByRole('button', { name: 'List Item Options' }).click();
-    await sleep(150);
     expect(page.getByRole('menuitem', { name: 'Duplicate' }).elements()).toHaveLength(0);
     await expect.element(page.getByRole('menuitem', { name: 'Add Item Above' })).toBeVisible();
   });
@@ -517,12 +692,33 @@ describe('ListEditorComplex (more)', () => {
         clientY: bottom - 1,
       }),
     );
+
+    // The positions follow the drag preview before the item is dropped
+    await expect.poll(() => first.querySelector('.position')?.textContent.trim()).toBe('2');
+    expect(first).toHaveAttribute('aria-label', 'Item 2 of 2');
+
     second.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer }));
     first.dispatchEvent(new DragEvent('dragend', { bubbles: true }));
 
     await expect
       .poll(() => getStoredItems(draft, 'authors').map(({ name }) => name))
       .toEqual(['b', 'a']);
+  });
+
+  test('describes a dragged item with the summary of its type', async () => {
+    const { container } = await renderEditor(
+      { ...sectionsField, types: [{ ...sectionsField.types[0], summary: '{{fields.heading}}' }] },
+      { 'sections.0.type': 'hero', 'sections.0.heading': 'Welcome' },
+    );
+
+    await expect.poll(() => container.querySelectorAll('.item').length).toBe(1);
+
+    const item = /** @type {HTMLElement} */ (container.querySelector('.item'));
+    const dataTransfer = new DataTransfer();
+
+    item.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer }));
+    expect(dataTransfer.getData('text/plain')).toBe('Welcome');
+    item.dispatchEvent(new DragEvent('dragend', { bubbles: true }));
   });
 
   test('grabs an item with the reorder control', async () => {
@@ -575,6 +771,23 @@ describe('ListEditorComplex (more)', () => {
 
     await expect.element(page.getByRole('button', { name: /Add\W+Author/ })).toBeDisabled();
     await expect.element(page.getByRole('button', { name: 'List Item Options' })).toBeDisabled();
+    // Removing the item would remove it from the default locale as well
+    await expect.element(page.getByRole('button', { name: 'Remove' })).toBeDisabled();
+  });
+
+  test('locks the items of a read-only field', async () => {
+    // e.g. a List field duplicated in another locale along with its Object field
+    await renderEditor(
+      authorsField,
+      { 'authors.0.name': 'Melvin', 'authors.1.name': 'Elsie' },
+      {
+        readonly: true,
+      },
+    );
+
+    await expect.element(page.getByRole('button', { name: /Add\W+Author/ })).toBeDisabled();
+    await expect.element(page.getByRole('button', { name: 'Remove' }).nth(0)).toBeDisabled();
+    await expect.element(page.getByRole('button', { name: 'Reorder Item' }).nth(0)).toBeDisabled();
   });
 
   test('writes a change to every locale for a duplicated field', async () => {
@@ -608,6 +821,95 @@ describe('ListEditorComplex (more)', () => {
     await page.getByRole('button', { name: 'Remove' }).click();
     await expect.poll(() => draft.currentValues.en['authors.0.name']).toBeUndefined();
     expect(draft.currentValues.fr['authors.0.name']).toBeUndefined();
+  });
+
+  describe('a translatable list with a duplicated subfield', () => {
+    // https://github.com/sveltia/sveltia-cms/issues/1065
+    /** @type {ComplexListField} */
+    const residencesField = {
+      name: 'residences',
+      widget: 'list',
+      label_singular: 'Residence',
+      i18n: true,
+      fields: [
+        { name: 'name', widget: 'string', i18n: 'duplicate' },
+        { name: 'description', widget: 'text', i18n: true },
+      ],
+    };
+
+    /**
+     * Render the editor for the given locale of an entry with two residences in both locales.
+     * @param {string} locale Locale.
+     * @returns {Promise<any>} Draft.
+     */
+    const renderResidences = async (locale) => {
+      const draft = createMockDraft({
+        fields: [residencesField],
+        i18n: {
+          i18nEnabled: true,
+          allLocales: ['fr', 'en'],
+          initialLocales: ['fr', 'en'],
+          defaultLocale: 'fr',
+          structure: /** @type {const} */ ('single_file'),
+        },
+        values: {
+          fr: {
+            'residences.0.name': 'A',
+            'residences.0.description': 'A (fr)',
+            'residences.1.name': 'B',
+            'residences.1.description': 'B (fr)',
+          },
+          en: {
+            'residences.0.name': 'A',
+            'residences.0.description': 'A (en)',
+            'residences.1.name': 'B',
+            'residences.1.description': 'B (en)',
+          },
+        },
+      });
+
+      await renderWithDraft(ListEditorComplex, {
+        draft,
+        props: {
+          locale,
+          keyPath: 'residences',
+          typedKeyPath: 'residences',
+          fieldId: 'residences',
+          fieldLabel: 'Residences',
+          fieldConfig: residencesField,
+        },
+      });
+
+      return draft;
+    };
+
+    test('removes an item from every locale', async () => {
+      const draft = await renderResidences('fr');
+
+      await page.getByRole('button', { name: 'Remove' }).nth(0).click();
+      await expect.poll(() => draft.currentValues.fr['residences.1.name']).toBeUndefined();
+      expect(draft.currentValues.fr['residences.0.description']).toBe('B (fr)');
+      // The translation follows its item rather than staying at its position
+      expect(draft.currentValues.en['residences.0.name']).toBe('B');
+      expect(draft.currentValues.en['residences.0.description']).toBe('B (en)');
+      expect(draft.currentValues.en['residences.1.name']).toBeUndefined();
+    });
+
+    test('adds an item to every locale', async () => {
+      const draft = await renderResidences('fr');
+
+      await page.getByRole('button', { name: /Add\W+Residence/ }).click();
+      await expect.poll(() => draft.currentValues.fr['residences.2.name']).toBe('');
+      expect(draft.currentValues.en['residences.2.name']).toBe('');
+      expect(draft.currentValues.en['residences.1.description']).toBe('B (en)');
+    });
+
+    test('locks the items in another locale', async () => {
+      await renderResidences('en');
+
+      await expect.element(page.getByRole('button', { name: /Add\W+Residence/ })).toBeDisabled();
+      await expect.element(page.getByRole('button', { name: 'Remove' }).nth(0)).toBeDisabled();
+    });
   });
 
   test('does nothing once the draft is gone', async () => {
@@ -674,6 +976,41 @@ describe('ListEditorComplex (more)', () => {
     });
 
     await expect.element(page.getByRole('button', { name: /Add\W+Author/ })).toBeDisabled();
+  });
+
+  test('adds items with their defaults in another locale within a rich text editor component', async () => {
+    const i18n = {
+      i18nEnabled: true,
+      allLocales: ['en', 'fr'],
+      initialLocales: ['en', 'fr'],
+      defaultLocale: 'en',
+      structure: /** @type {const} */ ('multiple_folders'),
+    };
+
+    const draft = createMockDraft({ fields: [], i18n, values: { en: {}, fr: {} } });
+
+    await renderWithDraft(ListEditorComplex, {
+      draft,
+      props: {
+        locale: 'fr',
+        keyPath: 'body:c1:authors',
+        typedKeyPath: 'body:c1:authors',
+        fieldId: 'authors',
+        fieldLabel: 'Authors',
+        fieldConfig: authorsField,
+      },
+      context: { 'field-editor': { valueStoreKey: 'extraValues', parentComponentNames: ['yt'] } },
+    });
+
+    const addButton = page.getByRole('button', { name: /Add\W+Author/ });
+
+    // The subfields have no `i18n` option, but the values live in the French document
+    await expect.element(addButton).toBeEnabled();
+    await addButton.click();
+
+    await expect.poll(() => draft.extraValues.fr['body:c1:authors.0.name']).toBe('Anonymous');
+    expect(draft.extraValues.fr['body:c1:authors.0.role']).toBe('');
+    expect(draft.currentValues.fr).toEqual({});
   });
 
   /** @type {ComplexListField} */
@@ -781,5 +1118,167 @@ describe('ListEditorComplex (more)', () => {
     // The summary defaults to the first field
     await expect.element(page.getByText('/static/uploads/photo.png')).toBeInTheDocument();
     expect(container.querySelector('.item-body .summary img')).toBeNull();
+  });
+});
+
+describe('ListEditorComplex (single item)', () => {
+  /** @type {ComplexListField} */
+  const authorField = { ...authorsField, max: 1 };
+
+  test('shows a required item without the list controls', async () => {
+    const { container } = await renderEditor(authorField, { 'authors.0.name': 'Melvin' });
+
+    await expect.element(page.getByRole('textbox').nth(0)).toHaveValue('Melvin');
+    // No item count, list toggle, reorder controls or Remove button; only the item’s own toggle
+    expect(page.getByText('1 Author').elements()).toHaveLength(0);
+    expect(page.getByRole('button', { name: 'Collapse' }).elements()).toHaveLength(1);
+    expect(page.getByRole('button', { name: 'Reorder Item' }).elements()).toHaveLength(0);
+    expect(page.getByRole('button', { name: 'Remove' }).elements()).toHaveLength(0);
+    // Nor a position, which would always be 1
+    expect(container.querySelector('.position')).toBeNull();
+    expect(container.querySelector('.item')).not.toHaveAttribute('aria-label');
+    // The list is labelled with the field name instead of the item count
+    expect(container.querySelector('[hidden]')?.textContent).toBe('Author');
+  });
+
+  test('keeps the item open when the list would start minimized', async () => {
+    const { container } = await renderEditor(
+      { ...authorField, minimize_collapsed: true },
+      { 'authors.0.name': 'Melvin' },
+    );
+
+    await expect.element(page.getByRole('textbox').nth(0)).toBeVisible();
+    expect(container.querySelector('.item-list.collapsed')).toBeNull();
+  });
+
+  test('lets an optional item be removed and added again', async () => {
+    const { draft } = await renderEditor(
+      authorField,
+      { 'authors.0.name': 'Melvin' },
+      { required: false },
+    );
+
+    await page.getByRole('button', { name: 'Remove' }).click();
+    await expect.poll(() => getStoredItems(draft, 'authors')).toEqual([]);
+    // The empty list shows the Add button alone, still without an item count
+    expect(page.getByText('0 Authors').elements()).toHaveLength(0);
+
+    await page.getByRole('button', { name: /Add\W+Author/ }).click();
+    await expect
+      .poll(() => getStoredItems(draft, 'authors').map(({ name }) => name))
+      .toEqual(['Anonymous']);
+    await expect
+      .poll(() => page.getByRole('button', { name: /Add\W+Author/ }).elements())
+      .toHaveLength(0);
+  });
+
+  test('lets the item of a list with variable types be removed to choose another type', async () => {
+    await renderEditor({ ...sectionsField, max: 1 }, { 'sections.0.type': 'hero' });
+
+    await expect.element(page.getByRole('button', { name: 'Remove' })).toBeVisible();
+    expect(page.getByRole('button', { name: 'Reorder Item' }).elements()).toHaveLength(0);
+  });
+
+  test('locks the item in a locale whose values follow the default locale', async () => {
+    // The field editor makes a field duplicated from the default locale read-only there
+    await renderEditor(
+      authorField,
+      { 'authors.0.name': 'Melvin' },
+      { required: false, readonly: true },
+    );
+
+    // The optional item can’t be removed there, which would remove it from the default locale
+    await expect.element(page.getByRole('button', { name: 'Remove' })).toBeDisabled();
+  });
+
+  test('can’t add the item in a locale whose values follow the default locale', async () => {
+    await renderEditor(authorField, {}, { required: false, readonly: true });
+
+    await expect.element(page.getByRole('button', { name: /Add\W+Author/ })).toBeDisabled();
+  });
+
+  test('shows the list controls for more items than the limit', async () => {
+    await renderEditor(authorField, { 'authors.0.name': 'Melvin', 'authors.1.name': 'Elsie' });
+
+    // The extra item has to be removable
+    await expect.element(page.getByText('2 Authors')).toBeVisible();
+    expect(page.getByRole('button', { name: 'Remove' }).elements()).toHaveLength(2);
+    expect(page.getByRole('button', { name: 'Reorder Item' }).elements()).toHaveLength(2);
+  });
+});
+
+describe('ListEditorComplex with a custom field type', () => {
+  /** @type {ComplexListField} */
+  const photosField = {
+    name: 'photos',
+    widget: 'list',
+    label: 'Photos',
+    label_singular: 'Photo',
+    collapsed: true,
+    field: { name: 'photo', widget: 'photo-picker', default: 'c/3.jpg' },
+  };
+
+  /**
+   * Get the text of the collapsed items’ summaries.
+   * @param {HTMLElement} container Container.
+   * @returns {(string | undefined)[]} Summaries.
+   */
+  const getSummaries = (container) =>
+    [...container.querySelectorAll('.item-body .summary')].map((el) => el.textContent?.trim());
+
+  /**
+   * A custom field control.
+   * @returns {any} React element.
+   */
+  const PickerControl = () => createElement('span', null, 'Picker');
+
+  /**
+   * A custom field summary.
+   * @param {any} props Props.
+   * @returns {any} React element.
+   */
+  const PhotoSummary = ({ value, field }) =>
+    createElement('strong', { className: 'photo-summary' }, `${field.get('name')}: ${value}`);
+
+  beforeAll(() => {
+    customFieldTypeRegistry.set('photo-picker', { control: PickerControl, summary: PhotoSummary });
+    customFieldTypeRegistry.set('plain-picker', { control: PickerControl });
+  });
+
+  afterAll(() => {
+    customFieldTypeRegistry.delete('photo-picker');
+    customFieldTypeRegistry.delete('plain-picker');
+  });
+
+  test('draws collapsed items with the summary component of the type', async () => {
+    const { draft, container } = await renderEditor(photosField, {
+      'photos.0': 'a/1.jpg',
+      'photos.1': 'b/2.jpg',
+    });
+
+    await expect.poll(() => getSummaries(container)).toEqual(['photo: a/1.jpg', 'photo: b/2.jpg']);
+    expect(container.querySelectorAll('.item-body .summary .photo-summary')).toHaveLength(2);
+
+    // After a reorder
+    await page.getByRole('button', { name: 'Reorder Item' }).nth(0).element().focus();
+    await userEvent.keyboard('{End}');
+    await expect.poll(() => getSummaries(container)).toEqual(['photo: b/2.jpg', 'photo: a/1.jpg']);
+
+    // After an item is added and everything collapsed again
+    await page.getByRole('button', { name: /Add\W+Photo/ }).click();
+    await expect.poll(() => draft.currentValues._default['photos.2']).toBe('c/3.jpg');
+    await page.getByRole('button', { name: 'Collapse All' }).click();
+    await expect
+      .poll(() => getSummaries(container))
+      .toEqual(['photo: b/2.jpg', 'photo: a/1.jpg', 'photo: c/3.jpg']);
+  });
+
+  test('draws the summary text for a type without a summary component', async () => {
+    const { container } = await renderEditor(
+      { ...photosField, field: { name: 'photo', widget: 'plain-picker' } },
+      { 'photos.0': 'a/1.jpg' },
+    );
+
+    await expect.poll(() => getSummaries(container)).toEqual(['a/1.jpg']);
   });
 });

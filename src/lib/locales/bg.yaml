@@ -477,13 +477,20 @@ entry_not_found: Записът не е намерен.
 # Entry creation restrictions: tooltip and advisory messages
 creating_entries_disabled_by_admin: Създаването на нови записи в тази колекция е забранено от администратора.
 # {$quota} is the collection’s maximum entry count
-creating_entries_disabled_by_quota: Не можете да добавяте нови записи в тази колекция, защото тя достигна ограничението си от {$quota} записа.
+creating_entries_disabled_by_quota: |
+  .input {$quota :integer}
+  .match $quota
+    one {{ Не можете да добавяте нови записи в тази колекция, защото тя достигна ограничението си от {$quota} запис. }}
+    *   {{ Не можете да добавяте нови записи в тази колекция, защото тя достигна ограничението си от {$quota} записа. }}
 # {$quota} is the collection limit and {$remaining} is the number of entries that can still be created
 creating_entries_nearing_quota: |
+  .input {$quota :integer}
   .input {$remaining :integer}
-  .match $remaining
-    one {{ Тази колекция наближава ограничението си от {$quota} записа. Можете да създадете още само {$remaining} запис. }}
-    *   {{ Тази колекция наближава ограничението си от {$quota} записа. Можете да създадете още само {$remaining} записа. }}
+  .match $quota $remaining
+    one one {{ Тази колекция наближава ограничението си от {$quota} запис. Можете да създадете още само {$remaining} запис. }}
+    one *   {{ Тази колекция наближава ограничението си от {$quota} запис. Можете да създадете още само {$remaining} записа. }}
+    *   one {{ Тази колекция наближава ограничението си от {$quota} записа. Можете да създадете още само {$remaining} запис. }}
+    *   *   {{ Тази колекция наближава ограничението си от {$quota} записа. Можете да създадете още само {$remaining} записа. }}
 
 # Navigation: back links and list labels
 back_to_collection: Обратно към колекцията
@@ -1558,7 +1565,7 @@ config:
     oauth_implicit_flow: Конфигурираният метод за удостоверяване (implicit flow) не се поддържа в Sveltia CMS. Използвайте друг <a>метод за удостоверяване</a>.
     github_pkce_unsupported: PKCE оторизацията все още не се поддържа поради ограничения на GitHub. Използвайте друг <a>метод за удостоверяване</a>.
     oauth_no_app_id: Идентификаторът на OAuth приложението не е дефиниран.
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: Опцията `open_authoring` изисква режим на публикуване `editorial_workflow`. Вижте <a>документацията</a> за подробности.
     # Don’t localize `auth_methods`
     no_auth_methods: Опцията `auth_methods` трябва да съдържа поне един метод.
@@ -1680,8 +1687,6 @@ config:
   # Warning messages (logged to console)
   warning:
     oauth_no_app_id: Идентификаторът на OAuth приложението не е дефиниран. За да влязат, потребителите трябва да предоставят токен за достъп.
-    editorial_workflow_unsupported: Редакционният процес все още не се поддържа в Sveltia CMS.
-    open_authoring_unsupported_backend: Open Authoring в момента се поддържа само с бекенда на GitHub.
     # {$prop} is the unsupported option name that will be ignored
     unsupported_ignored_option: Опцията `{$prop}` не се поддържа в Sveltia CMS. Тя ще бъде пренебрегната.
     # Don’t localize `picker_utc`, `input_timezone`, and `output_utc`
@@ -1821,8 +1826,6 @@ workflow:
     .match $count
       one {{ Един от тях все още не е публикуван, така че непубликуваните ви промени ще бъдат отхвърлени. Всяка публикувана версия ще остане публикувана. }}
       *   {{ {$count} от тях все още не са публикувани, така че непубликуваните ви промени ще бъдат отхвърлени. Всички публикувани версии ще останат публикувани. }}
-  # Confirmation dialog shown before merging the pull request. Keep the wording free of Git jargon.
-  confirm_publishing_entry: Сигурни ли сте, че искате да публикувате този запис? Промените ви ще влязат в сила веднага.
   # Workflow page: toast notifications shown while an entry is being published from a card, and
   # once publishing has completed
   publishing_entry: Публикуване на записа…
@@ -1976,13 +1979,23 @@ prefs:
       description: Показване на подчертаване на връзките в прегледа на записа и в етикетите на потребителския интерфейс.
       switch_label: Винаги подчертавай връзките
 
-  # Advanced panel
-  advanced:
-    title: Разширени
-    beta:
-      title: Бета функции
-      description: Включване на някои бета функции, които може да са нестабилни или непреведени.
-      switch_label: Присъединяване към бета програмата
+  # Data Management panel
+  data:
+    clear_data:
+      title: Изчистване на данните
+      # Clear File Cache button
+      file_cache:
+        description: Изтриване на локално кешираното съдържание на файлове и миниатюри на изображения, за да се освободи място за съхранение или да се решат проблеми, причинени от остарели данни.
+        button_label: Изчистване на файловия кеш
+        confirmation: Локално кешираното съдържание на файлове и миниатюрите на изображения ще бъдат изтрити. Незапазените ви чернови и настройки ще бъдат запазени, а изтритите данни ще бъдат изтеглени или генерирани отново при нужда. CMS ще бъде презаредена след приключване.
+      # Erase All Data button
+      all_data:
+        description: Изтриване на всичко, което CMS съхранява в този браузър, включително кешираните файлове, незапазените чернови и настройките. Всичко, което вече е запазено в хранилището ви, няма да бъде засегнато.
+        button_label: Изтриване на всички данни
+        confirmation: Всички данни, съхранени в този браузър, ще бъдат изтрити, включително кешираното съдържание на файлове, миниатюрите на изображения, незапазените чернови, настройките и състоянието на входа. Хранилището ви няма да бъде засегнато, но всички незапазени промени ще бъдат загубени и ще трябва да влезете отново. CMS ще бъде презаредена след приключване.
+
+  # Developer panel
+  developer:
     developer_mode:
       title: Режим за разработчици
       description: Включване на някои функции за разработчици, включително подробни записи в конзолата и системни контекстни менюта.
@@ -2000,18 +2013,6 @@ prefs:
         field_label: Заглавка Authorization (например Bearer <token>) (незадължително)
         saved: Заглавката Authorization е запазена.
         removed: Заглавката Authorization е премахната.
-    clear_data:
-      title: Изчистване на данните
-      # Clear File Cache button
-      file_cache:
-        description: Изтриване на локално кешираното съдържание на файлове и миниатюри на изображения, за да се освободи място за съхранение или да се решат проблеми, причинени от остарели данни.
-        button_label: Изчистване на файловия кеш
-        confirmation: Локално кешираното съдържание на файлове и миниатюрите на изображения ще бъдат изтрити. Незапазените ви чернови и настройки ще бъдат запазени, а изтритите данни ще бъдат изтеглени или генерирани отново при нужда. CMS ще бъде презаредена след приключване.
-      # Erase All Data button
-      all_data:
-        description: Изтриване на всичко, което CMS съхранява в този браузър, включително кешираните файлове, незапазените чернови и настройките. Всичко, което вече е запазено в хранилището ви, няма да бъде засегнато.
-        button_label: Изтриване на всички данни
-        confirmation: Всички данни, съхранени в този браузър, ще бъдат изтрити, включително кешираното съдържание на файлове, миниатюрите на изображения, незапазените чернови, настройките и състоянието на входа. Хранилището ви няма да бъде засегнато, но всички незапазени промени ще бъдат загубени и ще трябва да влезете отново. CMS ще бъде презаредена след приключване.
 
 # ==============================================================================
 # Keyboard Shortcuts

@@ -1499,7 +1499,7 @@ config:
     oauth_implicit_flow: Sveltia CMS 不支援設定的認證方法（隱式授權）。請改用其他<a>認證方法</a>。
     github_pkce_unsupported: 由於 GitHub 的限制，暫不支援 PKCE 授權。請改用其他<a>認證方法</a>。
     oauth_no_app_id: 未定義 OAuth 應用程式 ID。
-    # Don’t localize `open_authoring` and `editorial_workflow`
+    # Don’t localize `open_authoring`, `editorial_workflow` and `preview`
     open_authoring_no_workflow: '`open_authoring` 選項需要搭配 `editorial_workflow` 發布模式。詳見<a>說明文件</a>。'
     # Don’t localize `auth_methods`
     no_auth_methods: '`auth_methods` 選項必須至少包含一種方法。'
@@ -1621,8 +1621,6 @@ config:
   # Warning messages (logged to console)
   warning:
     oauth_no_app_id: 未定義 OAuth 應用程式 ID。使用者需要提供存取權杖才能登入。
-    editorial_workflow_unsupported: Sveltia CMS 暫不支援編輯工作流程。
-    open_authoring_unsupported_backend: Open Authoring 目前僅支援 GitHub 後端。
     # {$prop} is the unsupported option name that will be ignored
     unsupported_ignored_option: Sveltia CMS 不支援 `{$prop}` 選項。該選項將會被忽略。
     # Don’t localize `picker_utc`, `input_timezone`, and `output_utc`
@@ -1758,8 +1756,6 @@ workflow:
     .input {$count :integer}
     .match $count
       * {{ 其中有 {$count} 個尚未發布，因此您未發布的變更將被捨棄。已發布的版本則會維持發布狀態。 }}
-  # Confirmation dialog shown before merging the pull request. Keep the wording free of Git jargon.
-  confirm_publishing_entry: 確定要發布這個項目嗎？您的變更會立即生效。
   # Workflow page: toast notifications shown while an entry is being published from a card, and
   # once publishing has completed
   publishing_entry: 正在發布項目……
@@ -1913,13 +1909,23 @@ prefs:
       description: 在項目預覽和介面標籤中顯示連結底線。
       switch_label: 一律顯示連結底線
 
-  # Advanced panel
-  advanced:
-    title: 進階
-    beta:
-      title: Beta 功能
-      description: 啟用一些可能不穩定或尚未完整翻譯的 Beta 功能。
-      switch_label: 加入 Beta 計畫
+  # Data Management panel
+  data:
+    clear_data:
+      title: 清除資料
+      # Clear File Cache button
+      file_cache:
+        description: 刪除本機快取的檔案內容和圖片縮圖，以釋放儲存空間或解決過期資料造成的問題。
+        button_label: 清除檔案快取
+        confirmation: 本機快取的檔案內容和圖片縮圖將被刪除。您未儲存的草稿和設定會保留，刪除的資料會在需要時重新下載或產生。完成後 CMS 將重新載入。
+      # Erase All Data button
+      all_data:
+        description: 刪除 CMS 在此瀏覽器中儲存的所有內容，包括快取檔案、未儲存的草稿和設定。已儲存到倉庫的內容不受影響。
+        button_label: 清除所有資料
+        confirmation: 此瀏覽器中儲存的所有資料將被刪除，包括快取的檔案內容、圖片縮圖、未儲存的草稿、設定和登入狀態。您的倉庫不受影響，但任何未儲存的變更都將遺失，並且您需要重新登入。完成後 CMS 將重新載入。
+
+  # Developer panel
+  developer:
     developer_mode:
       title: 開發者模式
       description: 啟用一些給開發者用的功能，包括詳細的主控台記錄和原生快顯選單。
@@ -1937,18 +1943,6 @@ prefs:
         field_label: Authorization 標頭（例如 Bearer <token>）（選填）
         saved: Authorization 標頭已儲存。
         removed: Authorization 標頭已移除。
-    clear_data:
-      title: 清除資料
-      # Clear File Cache button
-      file_cache:
-        description: 刪除本機快取的檔案內容和圖片縮圖，以釋放儲存空間或解決過期資料造成的問題。
-        button_label: 清除檔案快取
-        confirmation: 本機快取的檔案內容和圖片縮圖將被刪除。您未儲存的草稿和設定會保留，刪除的資料會在需要時重新下載或產生。完成後 CMS 將重新載入。
-      # Erase All Data button
-      all_data:
-        description: 刪除 CMS 在此瀏覽器中儲存的所有內容，包括快取檔案、未儲存的草稿和設定。已儲存到倉庫的內容不受影響。
-        button_label: 清除所有資料
-        confirmation: 此瀏覽器中儲存的所有資料將被刪除，包括快取的檔案內容、圖片縮圖、未儲存的草稿、設定和登入狀態。您的倉庫不受影響，但任何未儲存的變更都將遺失，並且您需要重新登入。完成後 CMS 將重新載入。
 
 # ==============================================================================
 # Keyboard Shortcuts

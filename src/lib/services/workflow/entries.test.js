@@ -1,12 +1,13 @@
-import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { createFileList } from '$lib/services/backends/process';
+import { cmsConfig } from '$lib/services/config';
 import { allEntries } from '$lib/services/contents';
 import { prepareEntries } from '$lib/services/contents/file/process';
 import { convertPullRequest, convertPullRequests } from '$lib/services/workflow/entries';
 
 vi.mock('$lib/services/backends/process');
-vi.mock('$lib/services/backends/git/shared/fetch', () => ({
+vi.mock('$lib/services/backends/git/shared/parse-files', () => ({
   parseAssetFileInfo: vi.fn((file) => ({ ...file, kind: 'image' })),
 }));
 vi.mock('$lib/services/contents/file/process');
@@ -45,6 +46,56 @@ describe('workflow/entries', () => {
 
       expect(result).toEqual({ entries: [], assets: [] });
       expect(createFileList).not.toHaveBeenCalled();
+    });
+
+    describe('with a root directory', () => {
+      beforeEach(() => {
+        // @ts-ignore Partial configuration
+        cmsConfig.current = { backend: { name: 'github', repo: 'o/r', root_dir: 'apps/site' } };
+      });
+
+      afterEach(() => {
+        cmsConfig.current = undefined;
+      });
+
+      test('converts a branch named before the option was set, with its files in the directory', async () => {
+        await convertPullRequest(
+          createPullRequest({
+            files: [
+              { path: 'content/posts/hello.md', sha: 'a', size: 1, text: '#', deleted: false },
+            ],
+          }),
+        );
+
+        expect(createFileList).toHaveBeenCalled();
+      });
+
+      test.each([
+        ['a file outside the directory', { path: '../other/content/hello.md' }],
+        [
+          'a file moved from outside the directory',
+          { path: 'content/posts/hello.md', previousPath: '../other/content/hello.md' },
+        ],
+      ])('skips a branch named without the directory, with %s', async (_label, file) => {
+        const result = await convertPullRequest(
+          createPullRequest({ files: [{ sha: 'a', size: 1, text: '#', deleted: false, ...file }] }),
+        );
+
+        expect(result).toEqual({ entries: [], assets: [] });
+        expect(createFileList).not.toHaveBeenCalled();
+      });
+
+      test('converts a branch named with the directory, whatever its files', async () => {
+        await convertPullRequest(
+          createPullRequest({
+            branch: 'cms/apps/site/posts/hello',
+            files: [{ path: '../../package.json', sha: 'a', size: 1, text: '{}', deleted: false }],
+          }),
+        );
+
+        // A change outside the directory is caught when the entry is published
+        expect(createFileList).toHaveBeenCalled();
+      });
     });
 
     test('skips deleted files but keeps binary ones, which can be assets', async () => {
@@ -491,6 +542,189 @@ describe('workflow/entries', () => {
 
         expect(Object.keys(entries[0].locales)).toEqual(['en']);
         expect(entries[0].slug).toBe('new');
+      });
+
+      describe('a locale turned off for a published entry', () => {
+        beforeEach(() => {
+          allEntries.current = [
+            /** @type {any} */ ({
+              id: 'published',
+              slug: 'hello',
+              subPath: 'hello',
+              locales: {
+                en: { slug: 'hello', path: 'content/posts/en/hello.md', content: {} },
+                ja: { slug: 'hello', path: 'content/posts/ja/hello.md', content: {} },
+              },
+            }),
+          ];
+        });
+
+        test('treats a pull request deleting only that locale’s file as an edit', async () => {
+          // Saving the entry with Japanese turned off and nothing else changed deletes the Japanese
+          // file only, so the pull request carries no entry file to parse. It’s not an Unpublish of
+          // the whole entry: the entry keeps the pull request’s status and its English locale.
+          vi.mocked(createFileList)
+            .mockReturnValueOnce(/** @type {any} */ ({ entryFiles: [], assetFiles: [] }))
+            .mockReturnValueOnce(
+              /** @type {any} */ ({
+                entryFiles: [
+                  { path: 'content/posts/ja/hello.md', folder: { collectionName: 'posts' } },
+                ],
+                assetFiles: [],
+              }),
+            );
+
+          const { entries } = await convertPullRequest(
+            createPullRequest({
+              files: [
+                {
+                  path: 'content/posts/ja/hello.md',
+                  sha: 'a',
+                  size: 1,
+                  text: undefined,
+                  deleted: true,
+                },
+              ],
+            }),
+          );
+
+          expect(prepareEntries).not.toHaveBeenCalled();
+          expect(entries).toHaveLength(1);
+          expect(entries[0].id).toBe('published');
+          expect(entries[0].slug).toBe('hello');
+          expect(Object.keys(entries[0].locales)).toEqual(['en']);
+
+          expect(entries[0].workflow).toMatchObject({
+            status: 'draft',
+            collectionName: 'posts',
+            fileName: undefined,
+            previousPaths: ['content/posts/ja/hello.md'],
+          });
+        });
+
+        test('keeps the pull request’s status for such an edit', async () => {
+          vi.mocked(createFileList)
+            .mockReturnValueOnce(/** @type {any} */ ({ entryFiles: [], assetFiles: [] }))
+            .mockReturnValueOnce(
+              /** @type {any} */ ({
+                entryFiles: [
+                  {
+                    path: 'content/posts/ja/hello.md',
+                    folder: { collectionName: 'posts', fileName: 'hello' },
+                  },
+                ],
+                assetFiles: [],
+              }),
+            );
+
+          const { entries } = await convertPullRequest({
+            ...createPullRequest({
+              files: [
+                {
+                  path: 'content/posts/ja/hello.md',
+                  sha: 'a',
+                  size: 1,
+                  text: undefined,
+                  deleted: true,
+                },
+              ],
+            }),
+            status: 'pending_review',
+          });
+
+          expect(entries[0].workflow.status).toBe('pending_review');
+          // A file collection’s file name comes from the deleted file
+          expect(entries[0].workflow.fileName).toBe('hello');
+        });
+
+        test('still treats a pull request deleting every locale’s file as a removal', async () => {
+          vi.mocked(createFileList)
+            .mockReturnValueOnce(/** @type {any} */ ({ entryFiles: [], assetFiles: [] }))
+            .mockReturnValueOnce(
+              /** @type {any} */ ({
+                entryFiles: [
+                  { path: 'content/posts/en/hello.md', folder: { collectionName: 'posts' } },
+                  { path: 'content/posts/ja/hello.md', folder: { collectionName: 'posts' } },
+                ],
+                assetFiles: [],
+              }),
+            );
+
+          const { entries } = await convertPullRequest(
+            createPullRequest({
+              files: ['en', 'ja'].map((locale) => ({
+                path: `content/posts/${locale}/hello.md`,
+                sha: locale,
+                size: 1,
+                text: undefined,
+                deleted: true,
+              })),
+            }),
+          );
+
+          expect(entries).toHaveLength(1);
+          expect(entries[0].workflow.status).toBe('pending_deletion');
+          expect(Object.keys(entries[0].locales).toSorted()).toEqual(['en', 'ja']);
+        });
+
+        test('leaves out the removed locale when another locale’s file changed too', async () => {
+          // The published locales are merged into the entry parsed from the pull request, but not
+          // the Japanese one the pull request deletes, so the editor doesn’t show Japanese as
+          // enabled again, and the next save doesn’t recreate its file
+          vi.mocked(createFileList)
+            .mockReturnValueOnce(
+              /** @type {any} */ ({
+                entryFiles: [
+                  {
+                    path: 'content/posts/en/hello.md',
+                    text: 'x',
+                    folder: { collectionName: 'posts' },
+                  },
+                ],
+                assetFiles: [],
+              }),
+            )
+            .mockReturnValueOnce(
+              /** @type {any} */ ({
+                entryFiles: [
+                  { path: 'content/posts/ja/hello.md', folder: { collectionName: 'posts' } },
+                ],
+                assetFiles: [],
+              }),
+            );
+
+          vi.mocked(prepareEntries).mockResolvedValue({
+            entries: [
+              /** @type {any} */ ({
+                id: 'draft',
+                slug: 'hello',
+                subPath: 'hello',
+                locales: {
+                  en: { slug: 'hello', path: 'content/posts/en/hello.md', content: {} },
+                },
+              }),
+            ],
+            errors: [],
+          });
+
+          const { entries } = await convertPullRequest(
+            createPullRequest({
+              files: [
+                { path: 'content/posts/en/hello.md', sha: 'a', size: 1, text: 'x', deleted: false },
+                {
+                  path: 'content/posts/ja/hello.md',
+                  sha: 'b',
+                  size: 1,
+                  text: undefined,
+                  deleted: true,
+                },
+              ],
+            }),
+          );
+
+          expect(entries[0].workflow.status).toBe('draft');
+          expect(Object.keys(entries[0].locales)).toEqual(['en']);
+        });
       });
     });
 

@@ -1,7 +1,6 @@
 <script>
   import { _ } from '@sveltia/i18n';
   import { EmptyState } from '@sveltia/ui';
-  import { sleep } from '@sveltia/utils/misc';
 
   import CloudinaryPanel from '$lib/components/assets/browser/cloudinary-panel.svelte';
   import AssetListContainer from '$lib/components/assets/list/asset-list-container.svelte';
@@ -35,6 +34,24 @@
   const viewType = $derived(currentView.current.type);
   const uploadDisabled = $derived(!service.upload);
   const subfolderCount = $derived(listedExternalSubfolders.current.length);
+  /**
+   * Row index of each listed asset, counted across the groups rather than within each one, as the
+   * rows of every group make up one grid. The subfolders come first, so they offset the index.
+   */
+  const rowIndexMap = $derived(
+    new Map(
+      Object.values(externalAssetGroups.current)
+        .flat(1)
+        .map(({ id }, index) => [id, index + subfolderCount]),
+    ),
+  );
+
+  /**
+   * Get the row index of a listed asset.
+   * @param {ExternalAsset} asset Asset.
+   * @returns {number} 0-based index.
+   */
+  const getRowIndex = (asset) => /** @type {number} */ (rowIndexMap.get(asset.id));
 </script>
 
 {#if service.authType === 'widget'}
@@ -82,11 +99,8 @@
         <SubfolderListItem {subfolder} rowIndex={index} {viewType} />
       {/each}
     {/snippet}
-    {#snippet renderItem(/** @type {ExternalAsset} */ asset, /** @type {number} */ index)}
-      {#await sleep() then}
-        <!-- The subfolders come first, so the row index of an asset is offset by their count -->
-        <AssetListItem {asset} index={index + subfolderCount} {viewType} />
-      {/await}
+    {#snippet renderItem(/** @type {ExternalAsset} */ asset)}
+      <AssetListItem {asset} index={getRowIndex(asset)} {viewType} />
     {/snippet}
     {#snippet emptyAction()}
       <UploadAssetsButton label={_('upload_assets')} />

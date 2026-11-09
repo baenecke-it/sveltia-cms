@@ -1,11 +1,14 @@
 import mime from 'mime';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { createMockAssetFolder } from '$lib/test/factories';
+
 import {
   ASSET_KINDS,
   canCreateThumbnail,
   canEditAsset,
   canPreviewAsset,
+  canPreviewFile,
   DOC_EXTENSION_REGEX,
   getAssetKind,
   getMediaKind,
@@ -13,6 +16,7 @@ import {
   getMediaKindFromType,
   hasPDFThumbnail,
   isMediaKind,
+  isPDF,
   MEDIA_KINDS,
 } from './kinds';
 
@@ -84,6 +88,15 @@ describe('assets/kinds', () => {
     });
   });
 
+  describe('isPDF', () => {
+    it('should match the extension case-insensitively', () => {
+      expect(isPDF('files/brochure.pdf')).toBe(true);
+      expect(isPDF('Brochure.PDF')).toBe(true);
+      expect(isPDF('brochure.pdf.zip')).toBe(false);
+      expect(isPDF('pdf')).toBe(false);
+    });
+  });
+
   describe('hasPDFThumbnail', () => {
     afterEach(() => {
       vi.unstubAllEnvs();
@@ -92,6 +105,12 @@ describe('assets/kinds', () => {
     it('should generate a thumbnail for a PDF document', () => {
       expect(hasPDFThumbnail('files/brochure.pdf')).toBe(true);
       expect(hasPDFThumbnail('files/brochure.docx')).toBe(false);
+    });
+
+    it('should match the extension case-insensitively', () => {
+      expect(hasPDFThumbnail('files/Brochure.PDF')).toBe(true);
+      expect(hasPDFThumbnail('files/Brochure.Pdf')).toBe(true);
+      expect(hasPDFThumbnail('files/brochure.pdf.zip')).toBe(false);
     });
 
     it('should not in the npm build, which doesn’t include PDF.js', () => {
@@ -112,6 +131,46 @@ describe('assets/kinds', () => {
       expect(isMediaKind('document')).toBe(false);
       expect(isMediaKind('other')).toBe(false);
       expect(isMediaKind('unknown')).toBe(false);
+    });
+  });
+
+  describe('canPreviewFile', () => {
+    beforeEach(async () => {
+      const { isTextFileType } = await import('@sveltia/utils/file');
+
+      vi.mocked(isTextFileType).mockImplementation((type) => type.startsWith('text/'));
+    });
+
+    it('should preview a media file whatever its name', () => {
+      expect(canPreviewFile('image', 'photo')).toBe(true);
+      expect(canPreviewFile('video', 'clip.mp4')).toBe(true);
+      expect(canPreviewFile('audio', 'song.mp3')).toBe(true);
+    });
+
+    it('should preview a PDF document', () => {
+      vi.mocked(mime.getType).mockReturnValue('application/pdf');
+
+      expect(canPreviewFile('document', 'files/report.pdf')).toBe(true);
+      expect(mime.getType).toHaveBeenCalledWith('files/report.pdf');
+    });
+
+    it('should preview a plaintext file', () => {
+      vi.mocked(mime.getType).mockReturnValue('text/plain');
+
+      expect(canPreviewFile('document', 'notes.txt')).toBe(true);
+    });
+
+    it('should not preview another document', () => {
+      vi.mocked(mime.getType).mockReturnValue('application/zip');
+
+      expect(canPreviewFile('other', 'archive.zip')).toBe(false);
+    });
+
+    it('should not preview a file of an unknown type', async () => {
+      const { isTextFileType } = await import('@sveltia/utils/file');
+
+      expect(canPreviewFile('other', 'unknown')).toBe(false);
+      expect(isTextFileType).not.toHaveBeenCalled();
     });
   });
 
@@ -139,13 +198,11 @@ describe('assets/kinds', () => {
       name: path.split('/').pop() || '',
       sha: 'abc123',
       size: 1024,
-      folder: {
+      folder: createMockAssetFolder({
+        collectionName: 'test',
         internalPath: 'test',
         publicPath: 'test',
-        collectionName: 'test',
-        entryRelative: false,
-        hasTemplateTags: false,
-      },
+      }),
     });
 
     it('should return true for media assets', () => {
@@ -326,6 +383,12 @@ describe('assets/kinds', () => {
       expect(getMediaKindFromType('image/x-custom')).toBe(undefined);
       expect(getMediaKindFromType('')).toBe(undefined);
     });
+
+    it('should not throw on a malformed MIME type without a subtype', () => {
+      expect(getMediaKindFromType('image')).toBe(undefined);
+      expect(getMediaKindFromType('image/')).toBe(undefined);
+      expect(getMediaKindFromPath('data:image;base64,iVBORw0KGgo=')).toBe(undefined);
+    });
   });
 
   describe('getMediaKindFromPath', () => {
@@ -403,13 +466,11 @@ describe('assets/kinds', () => {
       name: path.split('/').pop() || '',
       sha: 'abc123',
       size: 1024,
-      folder: {
+      folder: createMockAssetFolder({
+        collectionName: 'test',
         internalPath: 'test',
         publicPath: 'test',
-        collectionName: 'test',
-        entryRelative: false,
-        hasTemplateTags: false,
-      },
+      }),
     });
 
     it('should return true for text files', () => {

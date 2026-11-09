@@ -3,13 +3,16 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vit
 import { page } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
-import { focusedAsset, selectedAssets } from '$lib/services/assets';
 import { deleteAssets } from '$lib/services/assets/data/delete';
 import { globalAssetFolder, selectedAssetFolder } from '$lib/services/assets/folders';
+import { focusedAsset, selectedAssets } from '$lib/services/assets/state';
 import { selectedSubfolderPath } from '$lib/services/assets/subfolders';
+import { lockedBranch } from '$lib/services/backends/branch-access';
 import { env } from '$lib/services/user/env.svelte';
 import { forkedRepository } from '$lib/services/workflow/open-authoring';
 import { createMockAsset, createMockImageFile, initTestConfig, setAssets } from '$lib/test/config';
+import { createMockAssetFolder } from '$lib/test/factories';
+import { waitForToastsToHide } from '$lib/test/toast';
 
 import PrimaryToolbar from './primary-toolbar.svelte';
 
@@ -34,8 +37,23 @@ describe('PrimaryToolbar', () => {
     selectedAssetFolder.current = undefined;
     selectedSubfolderPath.current = '';
     forkedRepository.current = undefined;
+    lockedBranch.current = undefined;
     focusedAsset.current = undefined;
     selectedAssets.current = [];
+  });
+
+  test('opens the focused asset’s details within the selected folder, e.g. All Assets', async () => {
+    window.location.hash = '#/assets/-/all';
+
+    const allAssetsFolder = { internalPath: undefined, publicPath: undefined };
+
+    selectedAssetFolder.current = /** @type {any} */ (allAssetsFolder);
+
+    await render(PrimaryToolbar);
+    focusedAsset.current = firstAsset;
+    await page.getByRole('button', { name: 'Show Preview' }).click();
+    await expect.poll(() => window.location.hash).toBe('#/assets/static/uploads/a.png');
+    expect(window.history.state.folder).toEqual(allAssetsFolder);
   });
 
   test('disables the asset actions until an asset is focused', async () => {
@@ -80,13 +98,7 @@ describe('PrimaryToolbar', () => {
   });
 
   test('shows the folder name and deletes the selected assets', async () => {
-    selectedAssetFolder.current = /** @type {any} */ ({
-      collectionName: undefined,
-      internalPath: 'static/uploads',
-      publicPath: '/uploads',
-      entryRelative: false,
-      hasTemplateTags: false,
-    });
+    selectedAssetFolder.current = /** @type {any} */ (createMockAssetFolder());
 
     const { container } = await render(PrimaryToolbar);
 
@@ -110,6 +122,61 @@ describe('PrimaryToolbar', () => {
     await vi.waitFor(() => expect(deleteAssets).toHaveBeenCalledWith(assets));
   });
 
+  test('reports a failure to delete the selected assets', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    vi.mocked(deleteAssets).mockRejectedValueOnce(new Error('offline'));
+
+    try {
+      await render(PrimaryToolbar);
+
+      // The selection is reset whenever the listed assets change, so select the assets afterwards
+      await tick();
+      selectedAssets.current = [...assets];
+
+      await page.getByRole('button', { name: 'Delete Selected Assets' }).click();
+      await page.getByRole('alertdialog').getByRole('button', { name: 'Delete' }).click();
+      await vi.waitFor(() => expect(deleteAssets).toHaveBeenCalledWith(assets));
+      await expect
+        .poll(() =>
+          document
+            .querySelector('.sui.toast:not([aria-hidden="true"]) .sui.alert.error')
+            ?.textContent?.replace(/\s+/g, ' ')
+            .trim(),
+        )
+        .toBe('error Error Delete failed.');
+      expect(error).toHaveBeenCalledWith(new Error('offline'));
+      await waitForToastsToHide();
+    } finally {
+      error.mockRestore();
+    }
+  }, 15000);
+
+  test('says nothing when the commit is cancelled', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    vi.mocked(deleteAssets).mockRejectedValueOnce(new Error('commit_cancelled'));
+
+    try {
+      await render(PrimaryToolbar);
+
+      // The selection is reset whenever the listed assets change, so select the assets afterwards
+      await tick();
+      selectedAssets.current = [...assets];
+
+      await page.getByRole('button', { name: 'Delete Selected Assets' }).click();
+      await page.getByRole('alertdialog').getByRole('button', { name: 'Delete' }).click();
+      await vi.waitFor(() => expect(deleteAssets).toHaveBeenCalledWith(assets));
+      await expect.element(page.getByRole('alertdialog')).not.toBeInTheDocument();
+      expect(
+        document.querySelector('.sui.toast:not([aria-hidden="true"]) .sui.alert.error'),
+      ).toBeNull();
+      expect(error).not.toHaveBeenCalled();
+    } finally {
+      error.mockRestore();
+    }
+  }, 15000);
+
   test('disables uploading and deleting while contributing via a fork', async () => {
     forkedRepository.current = /** @type {any} */ ({ owner: 'me', repo: 'site' });
     focusedAsset.current = firstAsset;
@@ -121,6 +188,58 @@ describe('PrimaryToolbar', () => {
       .element(page.getByRole('button', { name: 'Delete Selected Asset' }))
       .toBeDisabled();
     await expect.element(page.getByRole('button', { name: 'Copy' })).toBeEnabled();
+  });
+
+  test('explains a read-only folder, and disables uploading and deleting', async () => {
+    selectedAssetFolder.current = /** @type {any} */ ({
+      collectionName: undefined,
+      internalPath: 'static/uploads',
+      publicPath: '/uploads',
+      entryRelative: false,
+      hasTemplateTags: false,
+      readonly: true,
+    });
+    // The asset is in the folder it was listed with
+    firstAsset.folder.readonly = true;
+
+    try {
+      await render(PrimaryToolbar);
+      focusedAsset.current = firstAsset;
+
+      await expect
+        .element(page.getByRole('status'))
+        .toHaveTextContent(
+          'info Information This folder is read-only. You can view its assets but cannot make ' +
+            'any changes.',
+        );
+      await expect.element(page.getByRole('button', { name: 'Upload New Assets' })).toBeDisabled();
+      await expect.element(page.getByRole('button', { name: 'Copy' })).toBeEnabled();
+      await expect
+        .element(page.getByRole('button', { name: 'Delete Selected Asset' }))
+        .toBeDisabled();
+    } finally {
+      delete firstAsset.folder.readonly;
+    }
+  });
+
+  test('explains a branch the user can’t push to, and disables uploading and deleting', async () => {
+    selectedAssetFolder.current = globalAssetFolder.current;
+    lockedBranch.current = 'main';
+
+    await render(PrimaryToolbar);
+    focusedAsset.current = firstAsset;
+
+    await expect
+      .element(page.getByRole('status'))
+      .toHaveTextContent(
+        'info Information You don’t have permission to push to the “\u2068main\u2069” branch. ' +
+          'You can view this content but cannot make any changes.',
+      );
+    await expect.element(page.getByRole('button', { name: 'Upload New Assets' })).toBeDisabled();
+    await expect.element(page.getByRole('button', { name: 'Copy' })).toBeEnabled();
+    await expect
+      .element(page.getByRole('button', { name: 'Delete Selected Asset' }))
+      .toBeDisabled();
   });
 
   test('hides the upload button on a small screen while contributing via a fork', async () => {

@@ -29,9 +29,11 @@ describe('integrations/media-libraries/cloud/s3/aws-s3', () => {
   it('should validate secret access key format', () => {
     const { apiKeyPattern } = awsS3;
 
-    // Valid secret access keys (40 base64-like chars)
+    // Valid secret access keys (40 base64-like chars on Amazon S3)
     expect(apiKeyPattern.test('wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY')).toBe(true);
     expect(apiKeyPattern.test('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKL==')).toBe(true);
+    // Longer secret keys of other S3-compatible services, e.g. 64 hex digits on Garage
+    expect(apiKeyPattern.test('0123456789abcdef'.repeat(4))).toBe(true);
 
     // Invalid secret access keys
     expect(apiKeyPattern.test('AKIAIOSFODNN7EXAMPLE')).toBe(false); // Too short
@@ -42,5 +44,11 @@ describe('integrations/media-libraries/cloud/s3/aws-s3', () => {
 
   it('should use the library options as the S3 config', () => {
     expect(awsS3.resolveConfig(libOptions)).toEqual(libOptions);
+  });
+
+  it('should not send an ACL, even if one is set in the library options', () => {
+    const options = /** @type {any} */ ({ ...libOptions, acl: 'public-read' });
+
+    expect(awsS3.resolveConfig(options).acl).toBeUndefined();
   });
 });

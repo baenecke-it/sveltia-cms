@@ -1,23 +1,26 @@
 import { locale as appLocale } from '@sveltia/i18n';
 import { getDateTimeParts } from '@sveltia/utils/datetime';
-import { stripSlashes } from '@sveltia/utils/string';
 import { sanitize } from 'isomorphic-dompurify';
 import { parseInline } from 'marked';
 import { parseEntities } from 'parse-entities';
 
-import { replaceTemplateTags } from '$lib/services/common/template';
 import { processNestedTemplates } from '$lib/services/common/template/nested';
+import { replaceTemplateTags } from '$lib/services/common/template/tags';
+import {
+  getFileNameLocaleSuffixes,
+  getFileNameParts,
+  stripFieldTagPrefix,
+} from '$lib/services/common/template/utils';
 import { applyTransformations, parseTransformations } from '$lib/services/common/transformations';
 import { allEntries } from '$lib/services/contents';
 import {
   getIndexFile,
   isCollectionIndexFile,
 } from '$lib/services/contents/collection/entries/index-file';
-import { getField, getFieldDisplayValue } from '$lib/services/contents/entry/fields';
-import {
-  hasLocalePlaceholder,
-  stripLocaleFolderPath,
-} from '$lib/services/contents/i18n/placeholder';
+import { getField } from '$lib/services/contents/entry/fields';
+import { getEntryDirName } from '$lib/services/contents/entry/paths';
+import { getFieldDisplayValue } from '$lib/services/contents/entry/values';
+import { getOrCreate } from '$lib/services/utils/cache';
 
 /**
  * @import {
@@ -35,7 +38,11 @@ import {
  * @property {string} slug Entry slug.
  * @property {string} entryPath Entry path.
  * @property {string | undefined} basePath Base path for the entry.
+ * @property {RegExp} [fullPathRegEx] Entry collection’s entry path matcher, which tells the
+ * `{{dirname}}` tag where the locale folder is.
  * @property {string[]} locales Enabled locales for the entry.
+ * @property {string[]} [localeSuffixes] Locale codes that can follow the entry file name, with the
+ * `multiple_files` i18n structure.
  * @property {Date | undefined} commitDate Commit date.
  * @property {CommitAuthor | undefined} commitAuthor Commit author.
  */
@@ -56,11 +63,58 @@ import {
  * contains a Relation field label and has to be regenerated once other entries change.
  */
 
-const BODY_HEADER_REGEX = /^#+\s+(?<header>.+?)(?:\s+\{#.+?\})?\s*$/m;
+/**
+ * Regular expression to match an ATX heading line in Markdown, capturing its text. The body is
+ * untrusted, so it’s written to match in linear time: the heading text runs to the end of the line
+ * in one go, and the trailing spaces and a custom anchor are removed with string operations in
+ * {@link getBodyHeader}, as a lazy capture followed by optional suffixes reads the rest of the line
+ * again at every character.
+ */
+const BODY_HEADER_REGEX = /^#+[^\S\n\r\u2028\u2029]+(.*)$/gm;
+
+/**
+ * Remove a custom anchor like `{#my-anchor}` at the end of the given heading text.
+ * @param {string} text Heading text without leading and trailing whitespace.
+ * @returns {string} Heading text without the anchor.
+ * @see https://vitepress.dev/guide/markdown#custom-anchors
+ */
+const removeHeadingAnchor = (text) => {
+  if (!text.endsWith('}')) {
+    return text;
+  }
+
+  // The anchor starts at the first `{#` that follows whitespace and has a name before the last `}`
+  for (let index = text.indexOf('{#', 1); index > 0; index = text.indexOf('{#', index + 1)) {
+    if (index + 2 >= text.length - 1) {
+      break;
+    }
+
+    if (/\s/.test(text[index - 1])) {
+      return text.slice(0, index).trimEnd();
+    }
+  }
+
+  return text;
+};
+
+/**
+ * Find the first ATX heading with text in the given Markdown.
+ * @param {string} markdown Markdown string.
+ * @returns {string} Heading text without a custom anchor, or an empty string if there is no
+ * heading.
+ */
+const getBodyHeader = (markdown) =>
+  markdown
+    .matchAll(BODY_HEADER_REGEX)
+    .map(([, text]) => removeHeadingAnchor(text.trim()))
+    .find((header) => !!header) ?? '';
 
 /**
  * Parse the given entry summary as Markdown and sanitize HTML with a few exceptions if the Markdown
  * option is enabled. Also, parse HTML character references (entities).
+ * Without the Markdown option, the references are decoded after sanitizing, so the result can
+ * contain markup, e.g. `&lt;img&gt;` becomes `<img>`: it’s only safe as text, never with Svelte’s
+ * `@html` tag or `innerHTML`.
  * @param {string} str Original string.
  * @param {object} [options] Options.
  * @param {boolean} [options.allowMarkdown] Whether to allow Markdown and return HTML string.
@@ -73,7 +127,12 @@ export const sanitizeEntrySummary = (str, { allowMarkdown = false } = {}) => {
     str = parseEntities(str);
   }
 
-  str = sanitize(str, { ALLOWED_TAGS: allowMarkdown ? ['strong', 'em', 'code'] : [] });
+  // Attributes are dropped, so an entry value cannot restyle the app with `style`, e.g. a title
+  // wrapped in `<strong style="position: fixed; inset: 0">` covering the whole page
+  str = sanitize(str, {
+    ALLOWED_TAGS: allowMarkdown ? ['strong', 'em', 'code'] : [],
+    ALLOWED_ATTR: [],
+  });
 
   if (!allowMarkdown) {
     str = parseEntities(str);
@@ -108,7 +167,7 @@ export const getEntrySummaryFromContent = (
   // Find a header in Markdown, excluding an anchor suffix
   // https://vitepress.dev/guide/markdown#custom-anchors
   if (useBody && typeof content.body === 'string') {
-    return content.body.match(BODY_HEADER_REGEX)?.groups?.header ?? '';
+    return getBodyHeader(content.body);
   }
 
   return '';
@@ -121,7 +180,16 @@ export const getEntrySummaryFromContent = (
  * @returns {string | Date | undefined} Replaced value or `undefined` if the tag is not recognized.
  */
 export const replaceSub = (tag, context) => {
-  const { slug, entryPath, basePath, locales, commitDate, commitAuthor } = context;
+  const {
+    slug,
+    entryPath,
+    basePath,
+    fullPathRegEx,
+    locales,
+    localeSuffixes,
+    commitDate,
+    commitAuthor,
+  } = context;
 
   if (tag === 'slug') {
     return slug;
@@ -132,31 +200,11 @@ export const replaceSub = (tag, context) => {
   }
 
   if (tag === 'dirname') {
-    let dirPath = entryPath.replace(/[^/]+$/, '');
-
-    if (basePath && hasLocalePlaceholder(basePath)) {
-      // The base path stands for a folder per locale
-      dirPath = stripLocaleFolderPath(dirPath, basePath);
-    } else if (basePath) {
-      // Remove basePath prefix with boundary awareness
-      const prefix = basePath.endsWith('/') ? basePath : `${basePath}/`;
-
-      if (dirPath.startsWith(prefix)) {
-        dirPath = dirPath.slice(prefix.length);
-      } else if (dirPath.startsWith(basePath)) {
-        dirPath = dirPath.slice(basePath.length);
-      }
-    }
-
-    return stripSlashes(dirPath);
+    return getEntryDirName(entryPath, { basePath, fullPathRegEx });
   }
 
-  if (tag === 'filename') {
-    return /** @type {string} */ (entryPath.split('/').pop()).split('.').shift();
-  }
-
-  if (tag === 'extension') {
-    return /** @type {string} */ (entryPath.split('/').pop()).split('.').pop();
+  if (tag === 'filename' || tag === 'extension') {
+    return getFileNameParts(entryPath, localeSuffixes)[tag];
   }
 
   if (tag === 'commit_date') {
@@ -193,7 +241,7 @@ export const replace = (placeholder, context) => {
   } = context;
 
   const { value: tag, transformations: parsedTransformations } = parseTransformations(placeholder);
-  const keyPath = tag.replace(/^fields\./, '');
+  const keyPath = stripFieldTagPrefix(tag);
   const getFieldArgs = { collectionName, valueMap, keyPath };
   let value = replaceSub(tag, replaceSubContext);
 
@@ -208,7 +256,7 @@ export const replace = (placeholder, context) => {
     // avoid applying the transformation to the display value, which leads to unexpected results.
     // Also use raw value for ternary transformations to preserve boolean truthiness.
     if (transformations.some(({ method }) => method === 'date' || method === 'ternary')) {
-      value = valueMap[keyPath];
+      value = Object.hasOwn(valueMap, keyPath) ? valueMap[keyPath] : undefined;
     } else {
       // A Relation field is displayed with a label taken from the referenced entry
       if (getField(getFieldArgs)?.widget === 'relation') {
@@ -296,14 +344,16 @@ const getEntriesGeneration = () => {
  * @param {boolean} [options.allowMarkdown] Whether to allow Markdown and return HTML string.
  * @param {string} [options.template] Summary template that overrides the collection’s `summary`
  * option.
+ * @param {boolean} [options.useIndexFileLabel] Whether to use the label of the collection’s index
+ * file as its summary. Default: `true`.
  * @returns {string} Formatted entry summary.
  */
 const formatEntrySummary = (
   collection,
   entry,
-  { locale, useTemplate = false, allowMarkdown = false, template } = {},
+  { locale, useTemplate = false, allowMarkdown = false, template, useIndexFileLabel = true } = {},
 ) => {
-  if (isCollectionIndexFile(collection, entry)) {
+  if (useIndexFileLabel && isCollectionIndexFile(collection, entry)) {
     return /** @type {string} */ (getIndexFile(collection)?.label);
   }
 
@@ -314,7 +364,7 @@ const formatEntrySummary = (
   } = collection;
 
   const {
-    _file: { basePath } = {},
+    _file: { basePath, fullPathRegEx } = {},
     identifier_field: identifierField = 'title',
     summary: collectionSummaryTemplate,
   } = _type === 'entry' ? collection : {};
@@ -340,7 +390,9 @@ const formatEntrySummary = (
       slug,
       entryPath,
       basePath,
+      fullPathRegEx,
       locales: Object.keys(locales),
+      localeSuffixes: getFileNameLocaleSuffixes(collection),
       commitDate,
       commitAuthor,
     },
@@ -373,26 +425,28 @@ const formatEntrySummary = (
  * @param {boolean} [options.allowMarkdown] Whether to allow Markdown and return HTML string.
  * @param {string} [options.template] Summary template that overrides the collection’s `summary`
  * option. Used for the folder labels in a nested collection’s tree, which have their own
- * `nested.summary` option.
+ * `nested.summary` option, and the template columns of the entry list’s table view.
+ * @param {boolean} [options.useIndexFileLabel] Whether to use the label of the collection’s index
+ * file as its summary, instead of formatting it. Default: `true`. A table view column showing a
+ * template, such as `{{filename}}`, formats it for the index file too.
  * @returns {string} Formatted entry summary.
  * @see https://decapcms.org/docs/configuration-options/#summary
  * @see https://sveltiacms.app/en/docs/collections/entries/listings#summaries
  */
 export const getEntrySummary = (collection, entry, options = {}) => {
-  const { locale, useTemplate = false, allowMarkdown = false, template } = options;
-  let collectionCache = summaryCacheMap.get(entry);
+  const {
+    locale,
+    useTemplate = false,
+    allowMarkdown = false,
+    template,
+    useIndexFileLabel = true,
+  } = options;
 
-  if (!collectionCache) {
-    collectionCache = new WeakMap();
-    summaryCacheMap.set(entry, collectionCache);
-  }
-
-  let optionCache = collectionCache.get(collection);
-
-  if (!optionCache) {
-    optionCache = new Map();
-    collectionCache.set(collection, optionCache);
-  }
+  const optionCache = getOrCreate(
+    getOrCreate(summaryCacheMap, entry, () => new WeakMap()),
+    collection,
+    () => new Map(),
+  );
 
   // The app locale is part of the key because a summary can contain a localized index file label
   // or Relation field label
@@ -401,6 +455,7 @@ export const getEntrySummary = (collection, entry, options = {}) => {
     useTemplate ? '1' : '0',
     allowMarkdown ? '1' : '0',
     template ?? '',
+    useIndexFileLabel ? '1' : '0',
     // `Array.join()` turns an unset locale into an empty string
     appLocale.current,
   ].join('\n');

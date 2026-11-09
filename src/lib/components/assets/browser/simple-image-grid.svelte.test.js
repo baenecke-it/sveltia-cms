@@ -1,4 +1,3 @@
-import { sleep } from '@sveltia/utils/misc';
 import { createRawSnippet } from 'svelte';
 import { describe, expect, test, vi } from 'vitest';
 import { page } from 'vitest/browser';
@@ -26,6 +25,12 @@ describe('SimpleImageGrid', () => {
     expect(listbox.getByRole('option').elements()).toHaveLength(2);
   });
 
+  test('takes another accessible name', async () => {
+    await render(SimpleImageGrid, { ariaLabel: 'Available Files', children });
+
+    await expect.element(page.getByRole('listbox', { name: 'Available Files' })).toBeVisible();
+  });
+
   test('applies the view type and allows multiple selection', async () => {
     const { container } = await render(SimpleImageGrid, {
       viewType: 'list',
@@ -43,8 +48,6 @@ describe('SimpleImageGrid', () => {
     const onChange = vi.fn();
 
     await render(SimpleImageGrid, { children, onChange });
-    // A Sveltia UI list box starts handling clicks 100 ms after it’s mounted
-    await sleep(150);
     await page.getByRole('option', { name: 'Two' }).click();
 
     await vi.waitFor(() => expect(onChange).toHaveBeenCalled());

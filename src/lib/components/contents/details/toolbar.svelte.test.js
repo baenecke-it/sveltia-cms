@@ -1,9 +1,9 @@
-import { sleep } from '@sveltia/utils/misc';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { page, userEvent } from 'vitest/browser';
 
 import { allAssetFolders } from '$lib/services/assets/folders';
 import { backendName } from '$lib/services/backends';
+import { createLocalizedError } from '$lib/services/backends/git/shared/errors';
 import { getCollection } from '$lib/services/contents/collection';
 import {
   contentUpdatesToast,
@@ -14,6 +14,7 @@ import { nestedFilterPath } from '$lib/services/contents/collection/nested';
 import { duplicateDraft } from '$lib/services/contents/draft/create/duplicate';
 import { saveEntry } from '$lib/services/contents/draft/save';
 import { copyFromLocaleToast } from '$lib/services/contents/editor';
+import { trackPendingFieldUpdate } from '$lib/services/contents/editor/pending';
 import { entryEditorSettings } from '$lib/services/contents/editor/settings';
 import { sidebarSheetPanel } from '$lib/services/contents/editor/sidebar';
 import { deployPollTimedOut } from '$lib/services/deployments';
@@ -23,8 +24,10 @@ import { prefs } from '$lib/services/user/prefs.svelte';
 import { formatDate } from '$lib/services/utils/date';
 import { unpublishedEntries } from '$lib/services/workflow';
 import {
-  deleteWorkflowEntry,
+  deleteWorkflowEntries,
+  discardWorkflowEntries,
   discardWorkflowEntry,
+  publishWorkflowEntry,
   updateWorkflowStatus,
 } from '$lib/services/workflow/save';
 import {
@@ -64,6 +67,26 @@ vi.mock('$lib/services/workflow/save', () => ({
 const fields = [{ name: 'title', widget: 'string' }];
 const postsCollection = { name: 'posts', label: 'Posts', folder: 'content/posts', fields };
 const helloEntry = createMockEntry({ slug: 'hello', content: { _default: { title: 'Hello' } } });
+const worldEntry = createMockEntry({ slug: 'world', content: { _default: { title: 'World' } } });
+
+/**
+ * Open another entry in the editor, as the user can do with the Back button while a save is in
+ * flight.
+ * @param {any} entryDraft Entry draft state.
+ * @returns {any} Draft of the other entry, with a change of its own.
+ */
+const openOtherEntry = (entryDraft) => {
+  const draft = createMockDraft({
+    fields,
+    values: { _default: { title: 'World edited' } },
+    draft: { collection: getCollection('posts'), isNew: false, originalEntry: worldEntry },
+  });
+
+  entryDraft.current = draft;
+  window.location.hash = '#/collections/posts/entries/world';
+
+  return draft;
+};
 
 /**
  * Render the toolbar.
@@ -107,8 +130,6 @@ const getShownToastText = () =>
  */
 const openMenu = async () => {
   await page.getByRole('button', { name: 'Show Editor Options' }).click();
-  // A Sveltia UI menu starts handling clicks 100 ms after it’s opened
-  await sleep(150);
 
   return page.getByRole('menu', { name: 'Editor Options' });
 };
@@ -147,7 +168,12 @@ describe('Toolbar', () => {
     await save.click();
 
     await vi.waitFor(() =>
-      expect(saveEntry).toHaveBeenCalledWith({ draft, skipCI: undefined, overwrite: false }),
+      expect(saveEntry).toHaveBeenCalledWith({
+        draft,
+        skipCI: undefined,
+        overwrite: false,
+        publish: false,
+      }),
     );
     await expect.poll(() => window.location.hash).toBe('#/collections/posts');
     expect(entryDraft.current).toBeNull();
@@ -177,6 +203,43 @@ describe('Toolbar', () => {
     await expect.element(save).toBeDisabled();
     draft.currentValues._default.title = 'Hi';
     await expect.element(save).toBeEnabled();
+  });
+
+  test('can be saved while a change is on its way to the draft', async () => {
+    const { draft } = await renderExisting();
+    const save = page.getByRole('button', { name: 'Save' });
+    const { promise, resolve } = Promise.withResolvers();
+
+    await expect.element(save).toBeDisabled();
+    // A rich text editor writes a change to the draft a moment after it’s made
+    trackPendingFieldUpdate(promise);
+    await expect.element(save).toBeEnabled();
+    await save.click();
+    draft.currentValues._default.title = 'Hi';
+    resolve(undefined);
+
+    await vi.waitFor(() =>
+      expect(saveEntry).toHaveBeenCalledWith({
+        draft,
+        skipCI: undefined,
+        overwrite: false,
+        publish: false,
+      }),
+    );
+  });
+
+  test('doesn’t save once a pending change turns out to change nothing', async () => {
+    await renderExisting();
+
+    const save = page.getByRole('button', { name: 'Save' });
+    const { promise, resolve } = Promise.withResolvers();
+
+    trackPendingFieldUpdate(promise);
+    await save.click();
+    resolve(undefined);
+
+    await expect.element(save).toBeDisabled();
+    expect(saveEntry).not.toHaveBeenCalled();
   });
 
   test('reports the fields that failed validation', async () => {
@@ -270,6 +333,7 @@ describe('Toolbar', () => {
           cause: {
             type: 'modified',
             entry: { ...helloEntry, commitAuthor: { name: 'Alex' }, commitDate },
+            canOverwrite: true,
           },
         }),
       )
@@ -293,7 +357,12 @@ describe('Toolbar', () => {
     await dialog.getByRole('button', { name: 'Save Anyway' }).click();
 
     await vi.waitFor(() =>
-      expect(saveEntry).toHaveBeenLastCalledWith({ draft, skipCI: undefined, overwrite: true }),
+      expect(saveEntry).toHaveBeenLastCalledWith({
+        draft,
+        skipCI: undefined,
+        overwrite: true,
+        publish: false,
+      }),
     );
     // Saved and closed
     await expect.poll(() => entryDraft.current).toBe(null);
@@ -301,7 +370,7 @@ describe('Toolbar', () => {
 
   test('says when the entry was deleted by someone else, and leaves it when cancelled', async () => {
     vi.mocked(saveEntry).mockRejectedValue(
-      new Error('save_conflict', { cause: { type: 'deleted' } }),
+      new Error('save_conflict', { cause: { type: 'deleted', canOverwrite: true } }),
     );
 
     const { draft, entryDraft } = await renderExisting();
@@ -320,6 +389,40 @@ describe('Toolbar', () => {
     );
 
     await dialog.getByRole('button', { name: 'Cancel' }).click();
+
+    await expect.element(dialog).not.toBeInTheDocument();
+    expect(saveEntry).toHaveBeenCalledOnce();
+    // Still editing
+    expect(entryDraft.current).toBe(draft);
+  });
+
+  test('only tells what happened when the entry can’t be saved over the change', async () => {
+    // An entry stored in a file with the other entries is told by its position
+    vi.mocked(saveEntry).mockRejectedValue(
+      new Error('save_conflict', {
+        cause: { type: 'modified', entry: helloEntry, canOverwrite: false },
+      }),
+    );
+
+    const { draft, entryDraft } = await renderExisting();
+    const save = page.getByRole('button', { name: 'Save' });
+
+    draft.currentValues._default.title = 'Hi';
+    await expect.element(save).toBeEnabled();
+    await save.click();
+
+    const dialog = page.getByRole('alertdialog', { name: 'Entry Changed by Someone Else' });
+
+    await expect.element(dialog).toBeInTheDocument();
+    expect(dialog.element().textContent?.replace(/\s+/g, ' ')).toContain(
+      'This entry has been changed in the repository after you opened it. As the entry is ' +
+        'stored in the same file as other entries, it can’t be saved over the change.',
+    );
+    await expect
+      .element(dialog.getByRole('button', { name: 'Save Anyway' }))
+      .not.toBeInTheDocument();
+
+    await dialog.getByRole('button', { name: 'OK' }).click();
 
     await expect.element(dialog).not.toBeInTheDocument();
     expect(saveEntry).toHaveBeenCalledOnce();
@@ -391,7 +494,14 @@ describe('Toolbar', () => {
         .getByRole('menuitem')
         .elements()
         .map((el) => el.textContent?.trim()),
-    ).toEqual(['Duplicate', 'Delete', 'Edit Slug', 'Revert All Changes']);
+    ).toEqual([
+      'Duplicate',
+      'Delete',
+      'Edit Slug',
+      'Revert All Changes',
+      'Restore Default',
+      'Clear All',
+    ]);
     await expect.element(menu.getByRole('menuitem', { name: 'Edit Slug' })).toBeEnabled();
     await expect.element(menu.getByRole('menuitem', { name: 'Revert All Changes' })).toBeDisabled();
     // A checked item has a check icon
@@ -514,6 +624,24 @@ describe('Toolbar', () => {
     });
   });
 
+  test('offers nothing that would change a read-only entry', async () => {
+    await renderExisting({ collection: { ...getCollection('posts'), readonly: true } });
+
+    const toolbar = page.getByRole('toolbar', { name: 'Primary' });
+
+    expect(toolbar.getByRole('button', { name: 'Save' }).elements()).toHaveLength(0);
+
+    const menu = await openMenu();
+
+    expect(menu.getByRole('menuitem', { name: 'Duplicate' }).elements()).toHaveLength(0);
+    expect(menu.getByRole('menuitem', { name: 'Delete' }).elements()).toHaveLength(0);
+    await expect.element(menu.getByRole('menuitem', { name: 'Edit Slug' })).toBeDisabled();
+    // The view options are still there
+    await expect
+      .element(menu.getByRole('menuitemcheckbox', { name: 'Show Preview' }))
+      .toBeInTheDocument();
+  });
+
   test('opens the Slug panel', async () => {
     await renderExisting({ currentSlugs: { _default: 'hello' } });
     await (await openMenu()).getByRole('menuitem', { name: 'Edit Slug' }).click();
@@ -529,7 +657,29 @@ describe('Toolbar', () => {
     const menu = await openMenu();
 
     await menu.getByRole('menuitem', { name: 'Revert All Changes' }).click();
+
+    // The changes are only reverted once confirmed
+    const dialog = page.getByRole('alertdialog');
+
+    await expect.element(dialog).toMatchTextContent('revert all the changes made to this entry?');
+    expect(draft.currentValues._default.title).toBe('Hi');
+    await dialog.getByRole('button', { name: 'Revert All Changes' }).click();
     await expect.poll(() => draft.currentValues._default.title).toBe('Hello');
+  });
+
+  test('restores the default values and clears the fields once confirmed', async () => {
+    const { draft } = await renderExisting();
+
+    await (await openMenu()).getByRole('menuitem', { name: 'Clear All' }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Clear All' }).click();
+    await expect.poll(() => draft.currentValues._default.title).toBe('');
+
+    // Cancelling leaves the fields alone
+    await expect.poll(() => document.querySelector('dialog.popup')).toBeNull();
+    draft.currentValues._default.title = 'Hi';
+    await (await openMenu()).getByRole('menuitem', { name: 'Restore Default' }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Cancel' }).click();
+    expect(draft.currentValues._default.title).toBe('Hi');
   });
 
   test('toggles the panes', async () => {
@@ -561,7 +711,7 @@ describe('Toolbar', () => {
         .getByRole('menuitem')
         .elements()
         .map((el) => el.textContent?.trim()),
-    ).toEqual(['Edit Slug', 'Revert All Changes']);
+    ).toEqual(['Edit Slug', 'Revert All Changes', 'Restore Default', 'Clear All']);
     await expect.element(menu.getByRole('menuitem', { name: 'Edit Slug' })).toBeDisabled();
   });
 
@@ -576,20 +726,25 @@ describe('Toolbar', () => {
 
     await page.getByRole('button', { name: 'Publish' }).click();
     await vi.waitFor(() =>
-      expect(saveEntry).toHaveBeenCalledWith({ draft, skipCI: undefined, overwrite: false }),
+      expect(saveEntry).toHaveBeenCalledWith({
+        draft,
+        skipCI: undefined,
+        overwrite: false,
+        publish: false,
+      }),
     );
 
     // The split button offers the opposite
     const { draft: anotherDraft } = await renderToolbar();
 
     await page.getByRole('button', { name: 'More Options' }).last().click();
-    await sleep(150);
     await page.getByRole('menuitem', { name: 'Save without Publishing' }).click();
     await vi.waitFor(() =>
       expect(saveEntry).toHaveBeenCalledWith({
         draft: anotherDraft,
         skipCI: true,
         overwrite: false,
+        publish: false,
       }),
     );
   });
@@ -620,6 +775,28 @@ describe('Toolbar', () => {
     await expect
       .element(page.getByRole('alert'))
       .toHaveTextContent('error Error Couldn’t delete the entry. Please try again.');
+    await waitForToastsToHide();
+  });
+
+  test('says what stands in the way of the deletion', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(deleteEntries).mockRejectedValue(
+      createLocalizedError(
+        'Cannot delete a published entry as an Open Authoring contributor',
+        'open_authoring.direct_commit_unsupported',
+      ),
+    );
+
+    await renderExisting();
+    await (await openMenu()).getByRole('menuitem', { name: 'Delete Entry' }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Delete' }).click();
+
+    await expect
+      .element(page.getByRole('alert'))
+      .toHaveTextContent(
+        'error Error This change can’t be made directly. Only edits to entries can be suggested for review.',
+      );
+    await waitForToastsToHide();
   });
 
   test('reports a failure to save without a cause', async () => {
@@ -631,7 +808,10 @@ describe('Toolbar', () => {
     const dialog = page.getByRole('alertdialog', { name: 'Error' });
 
     await expect.element(dialog).toBeVisible();
-    expect(dialog.element().textContent).toContain('saving_failed');
+    // Only the generic description, not the error key
+    expect(dialog.element().textContent).toContain('There was an error while saving the entry.');
+    expect(dialog.element().textContent).not.toContain('saving_failed');
+    expect(dialog.element().querySelector('.error')).toBeNull();
   });
 
   test('renders a bare toolbar for a missing entry', async () => {
@@ -647,6 +827,94 @@ describe('Toolbar', () => {
     // The pane settings fall back to their defaults
     await (await openMenu()).getByRole('menuitemcheckbox', { name: 'Show Second Pane' }).click();
     expect(/** @type {any} */ (entryEditorSettings.current)?.showSecondPane).toBe(false);
+  });
+
+  describe('a save that lands after another entry has been opened', () => {
+    test('leaves the other entry open when the editor would be closed', async () => {
+      const { promise, resolve } = Promise.withResolvers();
+
+      vi.mocked(saveEntry).mockReturnValueOnce(/** @type {any} */ (promise));
+
+      const { entryDraft } = await renderToolbar();
+
+      await page.getByRole('button', { name: 'Save' }).click();
+      await vi.waitFor(() => expect(saveEntry).toHaveBeenCalledOnce());
+      openOtherEntry(entryDraft);
+      resolve(helloEntry);
+
+      // The save is over once the button is no longer labelled as saving
+      await expect
+        .element(page.getByRole('button', { name: 'Save', exact: true }))
+        .toBeInTheDocument();
+      expect(window.location.hash).toBe('#/collections/posts/entries/world');
+      expect(entryDraft.current?.originalEntry).toEqual(worldEntry);
+      expect(entryDraft.current?.currentValues._default.title).toBe('World edited');
+    });
+
+    test('leaves the other entry’s draft alone when the editor would stay open', async () => {
+      prefs.closeOnSave = false;
+
+      const { promise, resolve } = Promise.withResolvers();
+
+      vi.mocked(saveEntry).mockReturnValueOnce(/** @type {any} */ (promise));
+
+      const { draft, entryDraft } = await renderExisting();
+
+      draft.currentValues._default.title = 'Hi';
+      await page.getByRole('button', { name: 'Save' }).click();
+      await vi.waitFor(() => expect(saveEntry).toHaveBeenCalledOnce());
+      openOtherEntry(entryDraft);
+      resolve(helloEntry);
+
+      await expect
+        .element(page.getByRole('button', { name: 'Save', exact: true }))
+        .toBeInTheDocument();
+      expect(window.location.hash).toBe('#/collections/posts/entries/world');
+      expect(entryDraft.current?.originalEntry).toEqual(worldEntry);
+      expect(entryDraft.current?.currentValues._default.title).toBe('World edited');
+    });
+
+    test('doesn’t offer to save over someone else’s change to the other entry', async () => {
+      const { promise, reject } = Promise.withResolvers();
+
+      vi.mocked(saveEntry).mockReturnValueOnce(/** @type {any} */ (promise));
+
+      const { draft, entryDraft } = await renderExisting();
+
+      draft.currentValues._default.title = 'Hi';
+      await page.getByRole('button', { name: 'Save' }).click();
+      await vi.waitFor(() => expect(saveEntry).toHaveBeenCalledOnce());
+      openOtherEntry(entryDraft);
+      reject(
+        new Error('save_conflict', {
+          cause: { type: 'modified', entry: helloEntry, canOverwrite: true },
+        }),
+      );
+
+      // Saving anyway would save the other entry, so the save is only reported as failed
+      await expect.element(page.getByRole('alertdialog', { name: 'Error' })).toBeInTheDocument();
+      expect(
+        page.getByRole('alertdialog', { name: 'Entry Changed by Someone Else' }).query(),
+      ).toBeNull();
+    });
+
+    test('isn’t saved once another entry is opened while a change is on its way', async () => {
+      const { draft, entryDraft } = await renderExisting();
+      const { promise, resolve } = Promise.withResolvers();
+
+      draft.currentValues._default.title = 'Hi';
+      trackPendingFieldUpdate(promise);
+      await page.getByRole('button', { name: 'Save' }).click();
+      openOtherEntry(entryDraft);
+      // The other entry has changes of its own, which the save must not pick up
+      entryDraft.current.currentValues._default.title = 'World changed';
+      resolve(undefined);
+
+      await expect
+        .element(page.getByRole('button', { name: 'Save', exact: true }))
+        .toBeInTheDocument();
+      expect(saveEntry).not.toHaveBeenCalled();
+    });
   });
 
   test('closes the editor after saving by default', async () => {
@@ -696,11 +964,47 @@ describe('Toolbar', () => {
     vi.mocked(saveEntry).mockReturnValue(/** @type {any} */ (new Promise(() => {})));
     await renderToolbar();
     await page.getByRole('button', { name: 'More Options' }).last().click();
-    await sleep(150);
     await expect.element(page.getByRole('menuitem', { name: 'Save and Publish' })).toBeVisible();
     await userEvent.keyboard('{Escape}');
     await page.getByRole('button', { name: 'Save' }).last().click();
     await expect.element(page.getByRole('button', { name: 'Saving…' })).toBeInTheDocument();
+  });
+
+  test('doesn’t close the editor with the Escape key pressed during an IME composition', async () => {
+    prefs.closeWithEscape = true;
+    await renderToolbar();
+
+    const backButton = page.getByRole('button', { name: 'Cancel Editing' });
+
+    await expect.element(backButton).toHaveAttribute('aria-keyshortcuts', 'Escape');
+
+    /**
+     * Press the Escape key.
+     * @param {KeyboardEventInit & { keyCode?: number }} [init] Event details.
+     */
+    const pressEscape = (init = {}) => {
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          code: 'Escape',
+          bubbles: true,
+          cancelable: true,
+          ...init,
+        }),
+      );
+    };
+
+    // Cancelling a conversion: Chrome and Firefox flag the event, Safari sends it right after the
+    // composition has ended with the `keyCode` of `229`
+    pressEscape({ key: 'Process', isComposing: true });
+    pressEscape({ keyCode: 229 });
+    await new Promise((resolve) => {
+      setTimeout(resolve, 100);
+    });
+    expect(window.location.hash).toBe('#/collections/posts/new');
+
+    pressEscape();
+    await expect.poll(() => window.location.hash).toBe('#/collections/posts');
   });
 
   test('titles a collection file, which can only be discarded', async () => {
@@ -840,6 +1144,8 @@ describe('Toolbar', () => {
     await expect
       .poll(getShownToastText)
       .toBe('check_circle Success Field copied from \u2068xx\u2069.');
+    await waitForToastsToHide();
+    expect(copyFromLocaleToast.current.show).toBe(false);
   });
 
   test('reports an unexpected error', async () => {
@@ -921,6 +1227,18 @@ describe('Toolbar', () => {
       .toBeDisabled();
   });
 
+  test('has nothing to sync once the preview of a single locale is hidden', async () => {
+    await renderExisting();
+
+    const syncScrolling = (await openMenu()).getByRole('menuitemcheckbox', {
+      name: 'Sync Scrolling',
+    });
+
+    await expect.element(syncScrolling).toBeEnabled();
+    entryEditorSettings.current = { ...entryEditorSettings.current, showPreview: false };
+    await expect.element(syncScrolling).toBeDisabled();
+  });
+
   test('reports the result of copying from another locale', async () => {
     await renderExisting();
 
@@ -977,6 +1295,91 @@ describe('Toolbar', () => {
       expect(draft).toBeDefined();
     });
 
+    test('offers to mark a saved draft ready when the review stage is left out', async () => {
+      await initTestConfig({
+        backend: { name: 'github', repo: 'me/site' },
+        publish_mode: { type: 'editorial_workflow', stages: ['draft', 'pending_publish'] },
+        collections: [postsCollection],
+      });
+
+      await renderToolbar();
+      await page.getByRole('button', { name: 'Save' }).click();
+
+      const dialog = page.getByRole('alertdialog', { name: 'Mark as Ready' });
+
+      await expect
+        .element(dialog)
+        .toMatchTextContent(/Mark the entry as ready so it can be published\?/);
+      await dialog.getByRole('button', { name: 'Mark as Ready' }).click();
+
+      await vi.waitFor(() =>
+        expect(updateWorkflowStatus).toHaveBeenCalledWith(unpublishedEntry, 'pending_publish'),
+      );
+    });
+
+    test('saves and publishes in one go when direct publishing is enabled', async () => {
+      await initTestConfig({
+        backend: { name: 'github', repo: 'me/site' },
+        publish_mode: { type: 'editorial_workflow', direct_publish: true },
+        collections: [postsCollection],
+      });
+
+      await renderToolbar();
+      await page.getByRole('button', { name: 'More Options' }).first().click();
+      await page.getByRole('menuitem', { name: 'Save and Publish' }).click();
+
+      await vi.waitFor(() =>
+        expect(saveEntry).toHaveBeenCalledWith(
+          expect.objectContaining({ publish: true, skipCI: false }),
+        ),
+      );
+      await vi.waitFor(() => expect(publishWorkflowEntry).toHaveBeenCalledWith(unpublishedEntry));
+      // Nothing is left to hand over for review
+      expect(page.getByRole('alertdialog').elements()).toHaveLength(0);
+      await expect.poll(() => window.location.hash).toBe('#/collections/posts');
+    });
+
+    test('saves a draft as usual when direct publishing is enabled', async () => {
+      await initTestConfig({
+        backend: { name: 'github', repo: 'me/site' },
+        publish_mode: { type: 'preview', direct_publish: true },
+        collections: [postsCollection],
+      });
+
+      await renderToolbar();
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+
+      await vi.waitFor(() =>
+        expect(saveEntry).toHaveBeenCalledWith(expect.objectContaining({ publish: false })),
+      );
+      expect(publishWorkflowEntry).not.toHaveBeenCalled();
+      // Preview Workflow has no stage to hand the draft over to
+      expect(page.getByRole('alertdialog').elements()).toHaveLength(0);
+    });
+
+    test('leaves another entry opened while sending for review alone', async () => {
+      const { promise, resolve } = Promise.withResolvers();
+
+      vi.mocked(updateWorkflowStatus).mockReturnValueOnce(/** @type {any} */ (promise));
+
+      const { entryDraft } = await renderToolbar();
+
+      await page.getByRole('button', { name: 'Save' }).click();
+      await page
+        .getByRole('alertdialog', { name: 'Send for Review' })
+        .getByRole('button', { name: 'Send for Review' })
+        .click();
+      await vi.waitFor(() => expect(updateWorkflowStatus).toHaveBeenCalledOnce());
+      openOtherEntry(entryDraft);
+      resolve(unpublishedEntry);
+
+      await expect
+        .element(page.getByRole('button', { name: 'Save', exact: true }))
+        .toBeInTheDocument();
+      expect(window.location.hash).toBe('#/collections/posts/entries/world');
+      expect(entryDraft.current?.originalEntry).toEqual(worldEntry);
+    });
+
     test('can leave the draft as is', async () => {
       await renderToolbar();
       await page.getByRole('button', { name: 'Save' }).click();
@@ -1004,7 +1407,15 @@ describe('Toolbar', () => {
           .getByRole('menuitem')
           .elements()
           .map((el) => el.textContent?.trim()),
-      ).toEqual(['Duplicate', 'Discard', 'Delete', 'Edit Slug', 'Revert All Changes']);
+      ).toEqual([
+        'Duplicate',
+        'Discard',
+        'Delete',
+        'Edit Slug',
+        'Revert All Changes',
+        'Restore Default',
+        'Clear All',
+      ]);
     });
 
     test('offers to publish an entry that is ready', async () => {
@@ -1049,7 +1460,8 @@ describe('Toolbar', () => {
       vi.spyOn(console, 'error').mockImplementation(() => {});
       vi.mocked(updateWorkflowStatus).mockRejectedValue(new Error('Boom'));
 
-      await renderToolbar();
+      const { entryDraft } = await renderToolbar();
+
       await page.getByRole('button', { name: 'Save' }).click();
       await page.getByRole('alertdialog').getByRole('button', { name: 'Send for Review' }).click();
 
@@ -1058,14 +1470,39 @@ describe('Toolbar', () => {
         .toHaveTextContent(
           'Error There was an error while saving the entry. Please try again later. Couldn’t change the status. Please try again. OK',
         );
-      // The editor stays open
+      // The editor stays open, so the status change can be retried from the status menu
       expect(window.location.hash).not.toBe('#/collections/posts');
+      // The draft is pointed at the entry as saved, all the same. Left on the pre-save one, the
+      // next save would compare it with the branch and report the save that just landed as
+      // someone else’s change
+      await expect.poll(() => entryDraft.current?.isNew).toBe(false);
+      await expect.poll(() => entryDraft.current?.originalEntry).toBe(unpublishedEntry);
+    });
+
+    test('says what stands in the way of sending for review', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      vi.mocked(updateWorkflowStatus).mockRejectedValue(
+        createLocalizedError('The workflow branch is in use.', 'workflow.branch_in_use', {
+          number: '!3',
+        }),
+      );
+
+      await renderToolbar();
+
+      await page.getByRole('button', { name: 'Save' }).click();
+      await page.getByRole('alertdialog').getByRole('button', { name: 'Send for Review' }).click();
+
+      await expect
+        .element(page.getByRole('alertdialog', { name: 'Error' }))
+        .toHaveTextContent(
+          'Error There was an error while saving the entry. Please try again later. Another request (\u2068!3\u2069) is already open for this entry outside the CMS. Ask a developer to close it first. OK',
+        );
     });
 
     test('deletes an unpublished entry by discarding its pull request', async () => {
       // Nothing has been published yet
       setEntries([]);
-      vi.mocked(discardWorkflowEntry).mockResolvedValue(undefined);
+      vi.mocked(discardWorkflowEntries).mockResolvedValue(undefined);
 
       await renderExisting();
       await (await openMenu()).getByRole('menuitem', { name: 'Delete Entry' }).click();
@@ -1079,14 +1516,16 @@ describe('Toolbar', () => {
         );
       await dialog.getByRole('button', { name: 'Delete' }).click();
 
-      await vi.waitFor(() => expect(discardWorkflowEntry).toHaveBeenCalledWith(unpublishedEntry));
+      await vi.waitFor(() =>
+        expect(discardWorkflowEntries).toHaveBeenCalledWith([unpublishedEntry]),
+      );
       await expect.poll(() => contentUpdatesToast.current.deleted).toBe(true);
       await expect.poll(() => window.location.hash).toBe('#/collections/posts');
     });
 
     test('proposes the deletion of a published entry', async () => {
       setEntries([helloEntry]);
-      vi.mocked(deleteWorkflowEntry).mockResolvedValue(/** @type {any} */ (undefined));
+      vi.mocked(deleteWorkflowEntries).mockResolvedValue(undefined);
 
       await renderExisting();
       await (await openMenu()).getByRole('menuitem', { name: 'Delete' }).click();
@@ -1099,7 +1538,7 @@ describe('Toolbar', () => {
       );
       await dialog.getByRole('button', { name: 'Delete' }).click();
 
-      await vi.waitFor(() => expect(deleteWorkflowEntry).toHaveBeenCalled());
+      await vi.waitFor(() => expect(deleteWorkflowEntries).toHaveBeenCalled());
       await expect.poll(() => contentUpdatesToast.current.deletionPending).toBe(true);
     });
 
@@ -1157,7 +1596,7 @@ describe('Toolbar', () => {
         createMockEntry({ slug: 'a', content: { _default: { title: 'A', tag: 'travel' } } }),
       ]);
       unpublishedEntries.current = [renamedTag];
-      vi.mocked(deleteWorkflowEntry).mockResolvedValue(/** @type {any} */ (undefined));
+      vi.mocked(deleteWorkflowEntries).mockResolvedValue(undefined);
       window.location.hash = '#/collections/tags/entries/trips';
 
       await renderToolbar({
@@ -1224,6 +1663,28 @@ describe('Toolbar', () => {
       await expect.poll(() => contentUpdatesToast.current.deletionCancelled).toBe(true);
     });
 
+    test('offers no workflow action for a read-only entry', async () => {
+      setEntries([helloEntry]);
+      unpublishedEntries.current = [
+        {
+          ...unpublishedEntry,
+          workflow: { ...unpublishedEntry.workflow, status: 'pending_publish' },
+        },
+      ];
+
+      await renderExisting({ collection: { ...getCollection('posts'), readonly: true } });
+
+      const toolbar = page.getByRole('toolbar', { name: 'Primary' });
+
+      expect(toolbar.getByRole('button', { name: 'Save' }).elements()).toHaveLength(0);
+      expect(toolbar.getByRole('button', { name: /Status/ }).elements()).toHaveLength(0);
+      expect(toolbar.getByRole('button', { name: 'Publish Entry' }).elements()).toHaveLength(0);
+
+      const menu = await openMenu();
+
+      expect(menu.getByRole('menuitem', { name: /Discard|Delete/ }).elements()).toHaveLength(0);
+    });
+
     test('moves the actions into the menu on a small screen', async () => {
       env.isSmallScreen = true;
       env.isLargeScreen = false;
@@ -1253,6 +1714,8 @@ describe('Toolbar', () => {
         'Delete',
         // The Slug panel above takes the place of the Edit Slug shortcut
         'Revert All Changes',
+        'Restore Default',
+        'Clear All',
       ]);
       // The pane options are for large screens
       expect(menu.getByRole('menuitemcheckbox').elements()).toHaveLength(0);
@@ -1273,7 +1736,12 @@ describe('Toolbar', () => {
 
       // A plain save: no review prompt, and the editor closes
       await vi.waitFor(() =>
-        expect(saveEntry).toHaveBeenCalledWith({ draft, skipCI: undefined, overwrite: false }),
+        expect(saveEntry).toHaveBeenCalledWith({
+          draft,
+          skipCI: undefined,
+          overwrite: false,
+          publish: false,
+        }),
       );
       await expect.poll(() => window.location.hash).toBe('#/collections/posts');
       expect(page.getByRole('alertdialog').elements()).toHaveLength(0);
@@ -1300,7 +1768,7 @@ describe('Toolbar', () => {
         .toBeInTheDocument();
       // A plain Save button, not the Publish split button the simple mode would offer
       await expect.element(toolbar.getByRole('button', { name: 'Save' })).toBeInTheDocument();
-      expect(toolbar.getByRole('button', { name: 'Publish' }).elements()).toHaveLength(0);
+      expect(toolbar.getByRole('button', { name: 'Publish Entry' }).elements()).toHaveLength(0);
 
       await (await openMenu()).getByRole('menuitem', { name: 'Discard Changes' }).click();
       await page.getByRole('alertdialog').getByRole('button', { name: 'Discard' }).click();

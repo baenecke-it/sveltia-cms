@@ -24,12 +24,13 @@ import {
   requestForkPermission,
 } from '$lib/services/workflow/open-authoring';
 
-vi.mock('$lib/services/backends/git/github/repository', () => ({
+vi.mock('$lib/services/backends/git/github/repository', async (importOriginal) => ({
+  isRateLimited: /** @type {any} */ (await importOriginal()).isRateLimited,
   repository: { owner: 'owner', repo: 'repo', branch: 'main' },
   fetchDefaultBranchName: vi.fn(),
 }));
 vi.mock('$lib/services/backends/git/shared/api');
-vi.mock('@sveltia/i18n', () => ({ _: vi.fn((key) => key) }));
+vi.mock('@sveltia/i18n', async () => (await import('$lib/test/i18n')).createI18nMock());
 vi.mock('@sveltia/utils/misc', () => ({ sleep: vi.fn() }));
 vi.mock('$lib/services/workflow/open-authoring', async (importOriginal) => ({
   .../** @type {object} */ (await importOriginal()),
@@ -294,11 +295,26 @@ describe('GitHub fork service', () => {
   });
 
   describe('fetchForkByName', () => {
+    test('ignores a fork that has been transferred to someone else', async () => {
+      // GitHub redirects the old location of a transferred repository to the new one
+      vi.mocked(fetchAPI).mockResolvedValue(
+        createResponse(true, {
+          fork: true,
+          full_name: 'some-org/repo',
+          owner: { login: 'some-org' },
+          parent: { full_name: 'Owner/Repo' },
+        }),
+      );
+
+      await expect(fetchForkByName()).resolves.toBeUndefined();
+    });
+
     test('finds the fork on the user’s account', async () => {
       vi.mocked(fetchAPI).mockResolvedValue(
         createResponse(true, {
           fork: true,
           full_name: 'contributor/repo',
+          owner: { login: 'contributor' },
           parent: { full_name: 'Owner/Repo' },
         }),
       );
@@ -323,6 +339,7 @@ describe('GitHub fork service', () => {
         createResponse(true, {
           fork: true,
           full_name: 'contributor/repo',
+          owner: { login: 'contributor' },
           parent: { full_name: 'someone/else' },
         }),
       );
@@ -392,6 +409,7 @@ describe('GitHub fork service', () => {
         createResponse(true, {
           fork: true,
           full_name: 'contributor/repo',
+          owner: { login: 'contributor' },
           parent: { full_name: 'owner/repo' },
         }),
       );
@@ -517,6 +535,7 @@ describe('GitHub fork service', () => {
           createResponse(true, {
             fork: true,
             full_name: 'contributor/repo',
+            owner: { login: 'contributor' },
             parent: { full_name: 'owner/repo' },
           }),
         )
@@ -552,6 +571,7 @@ describe('GitHub fork service', () => {
           createResponse(true, {
             fork: true,
             full_name: 'contributor/repo',
+            owner: { login: 'contributor' },
             parent: { full_name: 'owner/repo' },
           }),
         )

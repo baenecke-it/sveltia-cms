@@ -1,8 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-/**
- * @import { ConfigParserCollectors } from '$lib/types/private';
- */
+import { createCollectors } from '$lib/test/config-parser';
 
 // Mock @sveltia/i18n
 /** @type {Record<string, string>} */
@@ -15,6 +13,8 @@ const mockI18nStrings = {
   'config.error.unsupported_backend_suggestion': 'Please check the supported backends.',
   'config.error.missing_repository': 'Missing repository',
   'config.error.invalid_repository': 'Invalid repository format',
+  'config.error.invalid_root_dir': 'Invalid root directory',
+  'config.error.invalid_root_dir_branch': 'Root directory not usable in branch names',
   'config.error.oauth_implicit_flow': 'OAuth implicit flow is not supported',
   'config.error.github_pkce_unsupported': 'GitHub does not support PKCE authentication',
   'config.error.oauth_no_app_id': 'OAuth app ID is required',
@@ -22,34 +22,12 @@ const mockI18nStrings = {
     'OAuth application ID is not defined. Users are required to provide an access token to sign in.',
   'config.error.open_authoring_no_workflow':
     'The `open_authoring` option requires the `editorial_workflow` publish mode.',
-  'config.warning.open_authoring_unsupported_backend':
-    'Open Authoring is currently supported only with the GitHub backend.',
 };
 
-/**
- * Mock translation function.
- * @param {string} key Message key.
- * @param {object & { values?: Record<string, string> }} [options] Options.
- * @returns {string} Translated string.
- */
-function mockTranslate(key, options) {
-  let message = mockI18nStrings[key] || key;
+vi.mock('@sveltia/i18n', async () =>
+  (await import('$lib/test/i18n')).createI18nMock({ strings: mockI18nStrings, locale: 'en-US' }),
+);
 
-  if (options?.values) {
-    Object.entries(options.values).forEach(([k, v]) => {
-      message = message.replace(`{${k}}`, v);
-    });
-  }
-
-  return message;
-}
-
-vi.mock('@sveltia/i18n', () => ({
-  _: mockTranslate,
-  locale: { current: 'en-US', set: vi.fn() },
-}));
-
-const mockGetStore = vi.fn();
 const mockIsObject = vi.fn();
 
 vi.mock('@sveltia/utils/object', () => ({
@@ -63,12 +41,7 @@ vi.mock('$lib/services/config/deprecations', () => ({
 }));
 
 vi.mock('$lib/services/backends', () => ({
-  gitBackendServices: {
-    github: { name: 'github' },
-    gitlab: { name: 'gitlab' },
-    gitea: { name: 'gitea' },
-  },
-  validBackendNames: ['github', 'gitlab', 'gitea', 'local'],
+  validBackendNames: ['github', 'gitlab', 'gitea', 'local', 'test-repo'],
   unsupportedBackends: {
     azure: { label: 'Azure DevOps' },
     bitbucket: { label: 'Bitbucket' },
@@ -76,30 +49,25 @@ vi.mock('$lib/services/backends', () => ({
   },
 }));
 
-const mockCheckUnsupportedOptions = vi.fn();
-
-vi.mock('$lib/services/config/parser/utils/validator', () => ({
-  checkUnsupportedOptions: mockCheckUnsupportedOptions,
+vi.mock('$lib/services/backends/git/services', () => ({
+  gitBackendServices: {
+    github: { name: 'github' },
+    gitlab: { name: 'gitlab' },
+    gitea: { name: 'gitea' },
+  },
 }));
 
-/**
- * Create a fresh collectors object for testing.
- * @returns {ConfigParserCollectors} Collectors instance.
- */
-function createCollectors() {
-  return {
-    errors: new Set(),
-    warnings: new Set(),
-    mediaFields: new Set(),
-    relationFields: new Set(),
-  };
-}
+const mockCheckUnsupportedOptions = vi.fn();
+const mockAddMessage = vi.fn();
+
+vi.mock('$lib/services/config/parser/utils/validator', () => ({
+  addMessage: mockAddMessage,
+  checkUnsupportedOptions: mockCheckUnsupportedOptions,
+}));
 
 describe('parseBackendConfig', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-
-    mockGetStore.mockImplementation((store) => store);
 
     mockIsObject.mockImplementation(
       /**
@@ -453,6 +421,190 @@ describe('parseBackendConfig', () => {
       const [error] = [...collectors.errors];
 
       expect(error).toBe('Invalid repository format');
+    });
+  });
+
+  describe('URL options', () => {
+    it('should accept absolute URLs', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        backend: {
+          name: 'github',
+          repo: 'owner/repo',
+          api_root: 'https://github.example.com/api/v3',
+          graphql_api_root: 'https://github.example.com/api/graphql',
+          base_url: 'https://auth.example.com',
+        },
+      };
+
+      parseBackendConfig(config, collectors);
+
+      expect(mockAddMessage).not.toHaveBeenCalled();
+    });
+
+    it('should report URLs without a scheme and empty ones', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        backend: {
+          name: 'github',
+          repo: 'owner/repo',
+          api_root: 'github.example.com/api/v3',
+          graphql_api_root: 'localhost:8080/api/graphql',
+          base_url: ' ',
+        },
+      };
+
+      parseBackendConfig(config, collectors);
+
+      expect(mockAddMessage.mock.calls.map(([{ strKey, values }]) => [strKey, values])).toEqual([
+        ['invalid_url_option', { option: 'api_root', url: 'github.example.com/api/v3' }],
+        ['invalid_url_option', { option: 'graphql_api_root', url: 'localhost:8080/api/graphql' }],
+        ['invalid_url_option', { option: 'base_url', url: ' ' }],
+      ]);
+    });
+
+    it('should leave values of another type to the JSON schema', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+      /** @type {any} */
+      const config = { backend: { name: 'gitlab', repo: 'owner/repo', api_root: 42 } };
+
+      parseBackendConfig(config, collectors);
+
+      expect(mockAddMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('root directory', () => {
+    it.each(['apps/site', '/apps/site/', './apps/site', '.', ''])(
+      'should accept `%s`',
+      async (rootDir) => {
+        const { parseBackendConfig } = await import('./backend.js');
+        const collectors = createCollectors();
+
+        parseBackendConfig(
+          { backend: { name: 'github', repo: 'owner/repo', root_dir: rootDir } },
+          collectors,
+        );
+
+        expect(collectors.errors.size).toBe(0);
+      },
+    );
+
+    it.each(['..', '../site', 'apps/../../site'])('should reject `%s`', async (rootDir) => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      parseBackendConfig(
+        { backend: { name: 'github', repo: 'owner/repo', root_dir: rootDir } },
+        collectors,
+      );
+
+      expect([...collectors.errors]).toEqual(['Invalid root directory']);
+    });
+
+    it.each([
+      '.site',
+      'apps/.site',
+      'site.lock',
+      'My Site',
+      'a:b',
+      'a~1',
+      'a^b',
+      'a?',
+      'a*',
+      'a[1]',
+      'a\\b',
+      'a@{b',
+      'a\tb',
+    ])('should reject `%s`, which can’t be in a workflow branch name', async (rootDir) => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      parseBackendConfig(
+        {
+          backend: { name: 'github', repo: 'owner/repo', root_dir: rootDir },
+          publish_mode: 'editorial_workflow',
+        },
+        collectors,
+      );
+
+      expect([...collectors.errors]).toEqual(['Root directory not usable in branch names']);
+    });
+
+    it('should check the branch name when a collection uses Editorial Workflow', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      parseBackendConfig(
+        {
+          backend: { name: 'github', repo: 'owner/repo', root_dir: 'My Site' },
+          collections: [
+            { name: 'posts', folder: 'posts', fields: [], publish_mode: 'editorial_workflow' },
+          ],
+        },
+        collectors,
+      );
+
+      expect([...collectors.errors]).toEqual(['Root directory not usable in branch names']);
+    });
+
+    it.each(['apps/my-site', 'apps/site.v2', 'apps/a@b', '/apps/site/', './apps/site'])(
+      'should accept `%s` with Editorial Workflow',
+      async (rootDir) => {
+        const { parseBackendConfig } = await import('./backend.js');
+        const collectors = createCollectors();
+
+        parseBackendConfig(
+          {
+            backend: { name: 'github', repo: 'owner/repo', root_dir: rootDir },
+            publish_mode: 'editorial_workflow',
+          },
+          collectors,
+        );
+
+        expect(collectors.errors.size).toBe(0);
+      },
+    );
+
+    it('should accept a directory name with a space without Editorial Workflow', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      parseBackendConfig(
+        { backend: { name: 'github', repo: 'owner/repo', root_dir: 'My Site' } },
+        collectors,
+      );
+
+      expect(collectors.errors.size).toBe(0);
+    });
+
+    it('should check the option of the test backend as well', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      parseBackendConfig({ backend: { name: 'test-repo', root_dir: '../site' } }, collectors);
+
+      expect([...collectors.errors]).toEqual(['Invalid root directory']);
+    });
+
+    it('should leave a value that isn’t a string to the schema', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      parseBackendConfig(
+        // @ts-ignore Invalid value
+        { backend: { name: 'github', repo: 'owner/repo', root_dir: 42 } },
+        collectors,
+      );
+
+      expect(collectors.errors.size).toBe(0);
     });
   });
 
@@ -842,26 +994,39 @@ describe('parseBackendConfig', () => {
       ]);
     });
 
-    it('should warn when the backend is not GitHub', async () => {
+    it('should accept the option with the GitLab backend', async () => {
       const { parseBackendConfig } = await import('./backend.js');
       const collectors = createCollectors();
 
       /** @type {any} */
       const config = {
         publish_mode: 'editorial_workflow',
-        backend: {
-          name: 'gitlab',
-          repo: 'owner/repo',
-          open_authoring: true,
-          auth_scope: 'public_repo',
-        },
+        backend: { name: 'gitlab', repo: 'group/project', open_authoring: true },
       };
 
       parseBackendConfig(config, collectors);
 
-      expect([...collectors.warnings]).toEqual([
-        'Open Authoring is currently supported only with the GitHub backend.',
-      ]);
+      expect(collectors.errors.size).toBe(0);
+      // GitLab has no `auth_scope` option, so the scope warning doesn’t apply to it
+      expect(collectors.warnings.size).toBe(0);
+    });
+
+    it('should accept the option with the Gitea backend without asking for a scope', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        publish_mode: 'editorial_workflow',
+        backend: { name: 'gitea', repo: 'owner/repo', app_id: 'app', open_authoring: true },
+      };
+
+      parseBackendConfig(config, collectors);
+
+      // The `auth_scope` warning is about GitHub’s broad default scope; Gitea/Forgejo scopes are
+      // already limited to what the CMS uses
+      expect([...collectors.warnings]).toEqual([]);
+      expect([...collectors.errors]).toEqual([]);
     });
 
     it('should stay quiet when the option is off', async () => {

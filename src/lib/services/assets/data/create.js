@@ -1,17 +1,14 @@
-import {
-  focusedAsset,
-  getAssetByInternalPath,
-  getAssetsByDirName,
-  overlaidAsset,
-} from '$lib/services/assets';
-import { assetUpdatesToast } from '$lib/services/assets/data';
+import { getAssetsByDirName } from '$lib/services/assets';
+import { assetUpdatesToast, refreshFocusedAssets } from '$lib/services/assets/data';
+import { formatFileName } from '$lib/services/assets/file-name';
 import { getAssetKind } from '$lib/services/assets/kinds';
+import { assertOutsideCmsFolders } from '$lib/services/assets/reserved';
 import { getUploadDirPath } from '$lib/services/assets/subfolders';
 import { skipCIConfigured, skipCIEnabled } from '$lib/services/backends/git/shared/integration';
 import { saveChanges } from '$lib/services/backends/save';
 import { UPDATE_TOAST_DEFAULT_STATE } from '$lib/services/contents/collection/data';
 import { getDefaultMediaLibraryOptions } from '$lib/services/integrations/media-libraries/default';
-import { formatFileName } from '$lib/services/utils/file';
+import { createPath } from '$lib/services/utils/file';
 
 /**
  * @import { Asset, CommitAction, CommitOptions, UploadingAssets } from '$lib/types/private';
@@ -32,17 +29,26 @@ export const createFileList = (uploadingAssets) => {
   const dirPath = getUploadDirPath(uploadingAssets);
   const assetsInSameFolder = dirPath !== undefined ? getAssetsByDirName(dirPath) : [];
   const assetNamesInSameFolder = assetsInSameFolder.map((a) => a.name.normalize());
+  /** @type {string[]} */
+  const namesInBatch = [];
 
   return files.map((file, index) => {
     // The user picked this asset to be replaced, so the file takes over its name and path even
     // when it’s called something else. Failing that, an ordinary upload overwrites an existing
-    // file of the same name when the user chose to replace it.
+    // file of the same name when the user chose to replace it — but only the first of the files
+    // with that name in the batch, e.g. two `photo.png` files from different subfolders of a
+    // dropped folder; another one gets a name of its own, or it would overwrite the first one.
     const replacedAsset =
       originalAssets?.[index] ??
       (replaceDuplicates
-        ? assetsInSameFolder.find(
-            (a) => a.name.normalize().toLowerCase() === file.name.normalize().toLowerCase(),
-          )
+        ? assetsInSameFolder.find((a) => {
+            const name = a.name.normalize().toLowerCase();
+
+            return (
+              name === file.name.normalize().toLowerCase() &&
+              !namesInBatch.some((n) => n.toLowerCase() === name)
+            );
+          })
         : undefined);
 
     const fileName =
@@ -53,10 +59,12 @@ export const createFileList = (uploadingAssets) => {
       assetNamesInSameFolder.push(fileName);
     }
 
+    namesInBatch.push(fileName.normalize());
+
     return {
       action: /** @type {CommitAction} */ (replacedAsset ? 'update' : 'create'),
       name: fileName,
-      path: replacedAsset?.path ?? [dirPath, fileName].join('/'),
+      path: replacedAsset?.path ?? createPath([dirPath, fileName]),
       file,
     };
   });
@@ -68,19 +76,8 @@ export const createFileList = (uploadingAssets) => {
  * @param {object} args Arguments.
  * @param {number} args.count The number of files that were updated.
  */
-export const updatedStores = ({ count }) => {
-  const _focusedAsset = focusedAsset.current;
-  const _overlaidAsset = overlaidAsset.current;
-
-  // Replace the existing asset
-  if (_focusedAsset) {
-    focusedAsset.current = getAssetByInternalPath(_focusedAsset.path);
-  }
-
-  // Replace the existing asset
-  if (_overlaidAsset) {
-    overlaidAsset.current = getAssetByInternalPath(_overlaidAsset.path);
-  }
+export const updateStores = ({ count }) => {
+  refreshFocusedAssets((asset) => asset.path);
 
   assetUpdatesToast.current = {
     ...UPDATE_TOAST_DEFAULT_STATE,
@@ -99,6 +96,8 @@ export const saveAssets = async (uploadingAssets, options) => {
   const { files, folder } = uploadingAssets;
   const savingFileList = createFileList(uploadingAssets);
 
+  assertOutsideCmsFolders(savingFileList.map(({ path }) => path));
+
   const savingAssets = savingFileList.map(
     ({ name, path, file }) =>
       /** @type {Asset} */ ({
@@ -116,5 +115,5 @@ export const saveAssets = async (uploadingAssets, options) => {
     options,
   });
 
-  updatedStores({ count: files.length });
+  updateStores({ count: files.length });
 };

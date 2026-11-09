@@ -1,6 +1,38 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { escapeAttr, isNonEmptyString, makeLink } from './string.js';
+import {
+  escapeAttr,
+  escapeHTML,
+  isHttpURL,
+  isNonEmptyString,
+  makeLink,
+  sanitizeInlineMarkdown,
+} from '$lib/services/utils/string';
+
+// Mimic a localization string that wraps the interpolated values in bidi isolates
+vi.mock('@sveltia/i18n', () => ({
+  _: vi.fn(
+    (key, { values }) =>
+      `${key}: \u2068${values.service}\u2069 <a \u2068${values.homeHref}\u2069>site</a> ` +
+      `<a \u2068${values.apiKeyHref}\u2069 onclick="x()">key</a><img src="x">`,
+  ),
+}));
+
+describe('isHttpURL', () => {
+  it('accepts an absolute HTTP(S) URL', () => {
+    expect(isHttpURL('https://example.com/api')).toBe(true);
+    expect(isHttpURL(' HTTP://localhost:8080 ')).toBe(true);
+  });
+
+  it('rejects anything else', () => {
+    expect(isHttpURL('example.com')).toBe(false);
+    expect(isHttpURL('localhost:8080/api')).toBe(false);
+    expect(isHttpURL('mailto:user@example.com')).toBe(false);
+    expect(isHttpURL('https://exa mple.com')).toBe(false);
+    expect(isHttpURL('')).toBe(false);
+    expect(isHttpURL(42)).toBe(false);
+  });
+});
 
 describe('isNonEmptyString', () => {
   it('returns true for non-empty strings', () => {
@@ -178,5 +210,46 @@ describe('makeLink', () => {
     const result = makeLink('Link <a>text</a>', 'https://example.com');
 
     expect(typeof result).toBe('string');
+  });
+});
+
+describe('sanitizeInlineMarkdown', () => {
+  it('should parse inline Markdown with the default allow-list', () => {
+    expect(
+      sanitizeInlineMarkdown('**a** _b_ ~~c~~ `d` [e](https://example.com) <br> <i>f</i>'),
+    ).toBe(
+      '<strong>a</strong> <em>b</em> <del>c</del> <code>d</code> ' +
+        '<a href="https://example.com">e</a>  f',
+    );
+  });
+
+  it('should strip disallowed attributes', () => {
+    expect(sanitizeInlineMarkdown('<a href="/x" title="t" target="_blank">x</a>')).toBe(
+      '<a href="/x">x</a>',
+    );
+  });
+
+  it('should respect a custom allow-list', () => {
+    expect(
+      sanitizeInlineMarkdown('**a** `b` [c](/c)<br>', {
+        allowedTags: ['a', 'code', 'br'],
+      }),
+    ).toBe('a <code>b</code> <a href="/c">c</a><br>');
+    expect(
+      sanitizeInlineMarkdown('<a href="/c" title="t">c</a>', {
+        allowedTags: ['a'],
+        allowedAttr: ['href', 'title'],
+      }),
+    ).toBe('<a href="/c" title="t">c</a>');
+  });
+
+  it('should remove scripts', () => {
+    expect(sanitizeInlineMarkdown('<script>alert(1)</script>ok')).toBe('ok');
+  });
+});
+
+describe('escapeHTML()', () => {
+  it('should escape the characters read as markup, but not quotes', () => {
+    expect(escapeHTML('Q&A <b> &amp; "x"')).toBe('Q&amp;A &lt;b&gt; &amp;amp; "x"');
   });
 });

@@ -1,7 +1,7 @@
 import { cmsConfig } from '$lib/services/config';
 
 /**
- * @import { DeployState, DeployStatus } from '$lib/types/private';
+ * @import { DeployState, DeployStatus, DeployTarget } from '$lib/types/private';
  * @import { GitBackend } from '$lib/types/public';
  */
 
@@ -56,7 +56,6 @@ const SOURCE_RANK = { deployment: 2, status: 1, check: 0 };
 export const getPreviewContext = () => {
   const { backend } = cmsConfig.current ?? {};
 
-  // @ts-ignore The option is GitHub/GitLab only
   return /** @type {GitBackend} */ (backend ?? {}).preview_context ?? '';
 };
 
@@ -134,19 +133,32 @@ const isGitServiceURL = (url, selfURL) => {
 };
 
 /**
- * Whether a candidate is claiming to describe a deployment at all. A check run that doesn’t name
- * itself a preview is some other job on the same push — a test suite, a linter — which says nothing
- * about whether the site is live and whose URL is a build log. It isn’t thrown away, because a
- * provider this list has never heard of would otherwise report nothing and let a failed build pass
- * unnoticed; it’s just outranked by anything that does claim to be a deployment, and it never
- * supplies a URL. A configured `preview_context` has already narrowed the field by name, so
- * whatever survived that is taken at its word.
+ * Whether a candidate is named like a deployment. A deployment always is one, while a commit status
+ * or a check run that doesn’t name itself a preview is likely some other job on the same push — a
+ * test suite, a linter — which says nothing about whether the site is live. GitLab posts a commit
+ * status for every CI job, and a GitHub Actions or CircleCI job posts one too. Such a candidate
+ * isn’t thrown away, because a provider this list has never heard of would otherwise report nothing
+ * and let a failed build pass unnoticed; it’s just outranked by anything that does claim to be a
+ * deployment, so a finished test suite can’t stand in for a deploy preview that’s still building. A
+ * configured `preview_context` has already narrowed the field by name, so whatever survived that is
+ * taken at its word.
  * @param {DeployCandidate} candidate Candidate to judge.
  * @param {string} previewContext Configured context, empty when unset.
  * @returns {boolean} Result.
  */
 const claimsDeployment = ({ name, source }, previewContext) =>
-  !!previewContext || source !== 'check' || PREVIEW_NAME_REGEX.test(name);
+  !!previewContext || source === 'deployment' || PREVIEW_NAME_REGEX.test(name);
+
+/**
+ * Whether a candidate’s URL can lead to the site. A commit status target URL usually does, even
+ * for a provider missing from the name list, whereas a check run’s details URL is normally a build
+ * log unless the run claims to be a deployment.
+ * @param {DeployCandidate} candidate Candidate to judge.
+ * @param {string} previewContext Configured context, empty when unset.
+ * @returns {boolean} Result.
+ */
+const canSupplyURL = (candidate, previewContext) =>
+  candidate.source !== 'check' || claimsDeployment(candidate, previewContext);
 
 /**
  * Rank a candidate so the best one can be picked with a single sort. A higher number wins.
@@ -218,7 +230,7 @@ export const pickDeployment = (candidates, { kind, selfURL }) => {
     ...candidate,
     url:
       candidate.state === 'ready' &&
-      claimsDeployment(candidate, previewContext) &&
+      canSupplyURL(candidate, previewContext) &&
       !isGitServiceURL(candidate.url, selfURL)
         ? normalizeURL(candidate.url)
         : undefined,
@@ -246,4 +258,53 @@ export const pickDeployment = (candidates, { kind, selfURL }) => {
     context: best.name,
     checkedTime: Date.now(),
   };
+};
+
+/**
+ * Run a collector, reporting a failure without failing the batch, so one source or commit whose
+ * info can’t be read — a commit whose statuses are gone after a force push, say — doesn’t take the
+ * others down with it.
+ * @param {() => Promise<void>} task Task to run.
+ */
+export const collectSafely = async (task) => {
+  try {
+    await task();
+  } catch (ex) {
+    // eslint-disable-next-line no-console
+    console.warn('Failed to fetch the deployment info.', ex);
+  }
+};
+
+/**
+ * Fetch the deployment status and URL for the given commits with a backend’s own collector, then
+ * pick the best candidate for each commit.
+ * @param {DeployTarget[]} targets Commits to look up.
+ * @param {object} args Arguments.
+ * @param {(shas: string[], candidateMap: Record<string, DeployCandidate[]>) => Promise<void>
+ * } args.collect Function that adds the candidates found for the given commits to the map, which
+ * has an empty list for each commit.
+ * @param {string} [args.selfURL] The repository’s own web URL. See {@link pickDeployment}.
+ * @returns {Promise<Record<string, DeployStatus>>} Deployments keyed by commit SHA.
+ */
+export const resolveDeployments = async (targets, { collect, selfURL }) => {
+  // A pull request created in an older session may have no head commit recorded yet
+  const validTargets = targets.filter(({ sha }) => !!sha);
+  // Two pull requests can share a head commit, so look each one up only once
+  const shas = [...new Set(validTargets.map(({ sha }) => sha))];
+
+  if (!shas.length) {
+    return {};
+  }
+
+  /** @type {Record<string, DeployCandidate[]>} */
+  const candidateMap = Object.fromEntries(shas.map((sha) => [sha, []]));
+
+  await collect(shas, candidateMap);
+
+  return Object.fromEntries(
+    validTargets.map(({ sha, kind }) => [
+      sha,
+      pickDeployment(candidateMap[sha], { kind, selfURL }),
+    ]),
+  );
 };

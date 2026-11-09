@@ -5,6 +5,7 @@ import {
   externalAssetCounts,
   externalAssets,
   externalAssetsError,
+  externalAssetsTruncated,
   externalFolders,
   focusedExternalAsset,
   focusedExternalSubfolder,
@@ -24,6 +25,7 @@ import {
   getExternalSubfolderAssets,
   getSharedMediaLibraryOptions,
   loadExternalAssets,
+  prepareExternalUploads,
   renameExternalAsset,
   renameExternalFolder,
   uploadExternalAssets,
@@ -34,18 +36,27 @@ vi.mock('$lib/services/assets/data', () => ({
   assetUpdatesToast: { current: {} },
 }));
 
-vi.mock('$lib/services/assets/external', () => ({
-  externalAssetCounts: { current: {} },
-  externalAssets: { current: undefined },
-  externalAssetsError: { current: undefined },
-  externalFolders: { current: [] },
-  focusedExternalAsset: { current: undefined },
-  focusedExternalSubfolder: { current: undefined },
-  selectedCloudService: { current: undefined },
-  selectedExternalAssets: { current: [] },
-  selectedExternalDirPath: { current: '' },
-  getFetchOptions: vi.fn(() => ({ apiKey: 'secret' })),
-}));
+vi.mock('$lib/services/assets/external', async (importOriginal) => {
+  /** @type {any} */
+  const original = await importOriginal();
+
+  return {
+    // The selection helper works on the real state, so the selection and the focus are real too
+    mergeUploadedExternalAssets: original.mergeUploadedExternalAssets,
+    pruneExternalAssetSelection: original.pruneExternalAssetSelection,
+    focusedExternalAsset: original.focusedExternalAsset,
+    selectedExternalAssets: original.selectedExternalAssets,
+    externalAssetCounts: { current: {} },
+    externalAssets: { current: undefined },
+    externalAssetsError: { current: undefined },
+    externalAssetsTruncated: { current: false },
+    externalFolders: { current: [] },
+    focusedExternalSubfolder: { current: undefined },
+    selectedCloudService: { current: undefined },
+    selectedExternalDirPath: { current: '' },
+    getFetchOptions: vi.fn(() => ({ apiKey: 'secret' })),
+  };
+});
 
 vi.mock('$lib/services/assets/process', async (importOriginal) => ({
   ...(await importOriginal()),
@@ -95,6 +106,7 @@ describe('assets/external/data', () => {
     externalAssets.current = [a, b];
     externalAssetCounts.current = {};
     externalAssetsError.current = undefined;
+    externalAssetsTruncated.current = false;
     externalFolders.current = [];
     selectedExternalDirPath.current = '';
     selectedExternalAssets.current = [a];
@@ -114,6 +126,18 @@ describe('assets/external/data', () => {
       });
 
       expect(getSharedMediaLibraryOptions()).toEqual({ max_file_size: 1024 });
+    });
+
+    it('should merge the field-level `all` options into the global ones', () => {
+      cmsConfig.current = /** @type {any} */ ({
+        media_libraries: { all: { max_file_size: 1024, transformations: { raster_image: {} } } },
+      });
+
+      expect(
+        getSharedMediaLibraryOptions(
+          /** @type {any} */ ({ media_libraries: { all: { max_file_size: 2048 } } }),
+        ),
+      ).toEqual({ max_file_size: 2048, transformations: { raster_image: {} } });
     });
   });
 
@@ -255,6 +279,60 @@ describe('assets/external/data', () => {
     });
   });
 
+  describe('prepareExternalUploads', () => {
+    it('should process the files with the given options and sort out the rejected ones', async () => {
+      const valid = new File(['x'], 'ok.png', { type: 'image/png' });
+      const oversized = new File(['x'], 'big.png', { type: 'image/png' });
+      const invalid = new File(['x'], 'bad.png', { type: 'image/png' });
+      const options = { max_file_size: 1 };
+
+      vi.mocked(processFile).mockImplementation(async (f) => ({
+        file: f,
+        originalFile: undefined,
+        oversized: f === oversized,
+        invalid: f === invalid,
+      }));
+
+      const result = await prepareExternalUploads([valid, oversized, invalid], options);
+
+      expect(processFile).toHaveBeenCalledWith(valid, options, { nameTemplate: undefined });
+      expect(result).toEqual({
+        validFiles: [valid],
+        oversizedFileNames: ['big.png'],
+        invalidFileNames: ['bad.png'],
+      });
+    });
+
+    it('should rename the files with the normalized file name template', async () => {
+      const file = new File(['x'], 'ok.png', { type: 'image/png' });
+      const options = { filename_template: ' {{filename}}-{{uuid_short}} ' };
+
+      await prepareExternalUploads([file], options);
+
+      expect(processFile).toHaveBeenCalledWith(file, options, {
+        nameTemplate: '{{filename}}-{{uuid_short}}',
+      });
+    });
+
+    it('should not rename a file replacing an existing asset', async () => {
+      const file = new File(['x'], 'ok.png', { type: 'image/png' });
+      const options = { filename_template: '{{filename}}-{{uuid_short}}' };
+
+      await prepareExternalUploads([file], options, { replacing: true });
+
+      expect(processFile).toHaveBeenCalledWith(file, options, { nameTemplate: undefined });
+    });
+
+    it('should ignore a blank file name template', async () => {
+      const file = new File(['x'], 'ok.png', { type: 'image/png' });
+      const options = { filename_template: '  ' };
+
+      await prepareExternalUploads([file], options);
+
+      expect(processFile).toHaveBeenCalledWith(file, options, { nameTemplate: undefined });
+    });
+  });
+
   describe('uploadExternalAssets', () => {
     const file = new File(['x'], 'c.png', { type: 'image/png' });
 
@@ -265,7 +343,7 @@ describe('assets/external/data', () => {
 
       const result = await uploadExternalAssets([file]);
 
-      expect(processFile).toHaveBeenCalledWith(file, {});
+      expect(processFile).toHaveBeenCalledWith(file, {}, { nameTemplate: undefined });
       expect(service.upload).toHaveBeenCalledWith([file], { ...fetchOptions, dirPath: '' });
       // An asset uploaded under an existing name replaces the old one
       expect(externalAssets.current).toEqual([c, replaced, a]);
@@ -301,17 +379,20 @@ describe('assets/external/data', () => {
       expect(result).toEqual({ oversizedFileNames: ['big.png'], invalidFileNames: ['bad.png'] });
     });
 
-    it('should report an upload failure', async () => {
+    it('should report an upload failure and reload the list, as some files may be uploaded', async () => {
+      // The first file made it before the second one failed
       service.upload.mockRejectedValue(new Error('fail'));
+      service.list.mockResolvedValue([c, a, b]);
 
-      await uploadExternalAssets([file]);
+      await uploadExternalAssets([file, new File(['y'], 'd.png', { type: 'image/png' })]);
 
       expect(externalAssetsToast.current).toEqual({
         show: true,
         status: 'error',
         message: 'uploading_files_failed',
       });
-      expect(externalAssets.current).toEqual([a, b]);
+      expect(service.list).toHaveBeenCalledWith(fetchOptions);
+      expect(externalAssets.current).toEqual([c, a, b]);
     });
 
     it('should replace an existing asset', async () => {
@@ -321,6 +402,7 @@ describe('assets/external/data', () => {
 
       await uploadExternalAssets([file], { originalAsset: a });
 
+      expect(processFile).toHaveBeenCalledWith(file, {}, { nameTemplate: undefined });
       expect(service.replace).toHaveBeenCalledWith(a, file, { ...fetchOptions, dirPath: '' });
       expect(service.upload).not.toHaveBeenCalled();
       expect(externalAssets.current).toEqual([replaced, b]);
@@ -399,6 +481,25 @@ describe('assets/external/data', () => {
       expect(externalFolders.current).toEqual([]);
     });
 
+    it('should tell whether the listing was cut short', async () => {
+      vi.mocked(service.browse).mockResolvedValueOnce({
+        assets: [a],
+        folders: [],
+        truncated: true,
+      });
+      await loadExternalAssets(service);
+      expect(externalAssetsTruncated.current).toBe(true);
+
+      // A complete listing, or a failed one, clears the flag
+      await loadExternalAssets(service);
+      expect(externalAssetsTruncated.current).toBe(false);
+
+      externalAssetsTruncated.current = true;
+      vi.mocked(service.browse).mockRejectedValueOnce(new Error('offline'));
+      await loadExternalAssets(service);
+      expect(externalAssetsTruncated.current).toBe(false);
+    });
+
     it('should upload files to the folder being browsed', async () => {
       const file = new File(['x'], 'x.png');
 
@@ -449,6 +550,16 @@ describe('assets/external/data', () => {
 
     it('should rename a folder by moving its assets and placeholders, then reload', async () => {
       focusedExternalSubfolder.current = { name: '2024', path: '2024' };
+      // The service lists the files at their new paths once they’ve been moved, so nothing is left
+      // under the old folder when the list is reloaded
+      vi.mocked(service.browse).mockResolvedValueOnce({
+        assets: [
+          a,
+          { ...spring, id: '2025/spring.png', description: '2025/spring.png' },
+          { ...nested, id: '2025/summer/beach.png', description: '2025/summer/beach.png' },
+        ],
+        folders: ['2025/empty'],
+      });
 
       expect(await renameExternalFolder({ name: '2024', path: '2024' }, '2025')).toBe(true);
 
@@ -517,6 +628,50 @@ describe('assets/external/data', () => {
       expect(service.delete).toHaveBeenCalledWith([], fetchOptions);
       expect(service.deleteFolder).toHaveBeenCalledExactlyOnceWith('other', fetchOptions);
       expect(focusedExternalSubfolder.current).toBeUndefined();
+    });
+
+    describe('on a service that lists a folder in full', () => {
+      // A file the asset list left out, as the service holds more files than it lists at once
+      const unlisted = { ...createAsset('2024/unlisted.png'), fileName: 'unlisted.png' };
+
+      beforeEach(() => {
+        service.listFolder = vi.fn(async () => ({
+          assets: [spring, nested, unlisted],
+          folders: ['2024/empty', '2024/unlisted-empty'],
+        }));
+      });
+
+      it('should rename every file below the folder, listed or not', async () => {
+        expect(await renameExternalFolder({ name: '2024', path: '2024' }, '2025')).toBe(true);
+
+        expect(service.listFolder).toHaveBeenCalledWith('2024', fetchOptions);
+        expect(service.move).toHaveBeenCalledTimes(3);
+        expect(service.move).toHaveBeenCalledWith(unlisted, '2025/unlisted.png', fetchOptions);
+        expect(service.createFolder).toHaveBeenCalledWith('2025/unlisted-empty', fetchOptions);
+        expect(service.deleteFolder).toHaveBeenCalledWith('2024/unlisted-empty', fetchOptions);
+      });
+
+      it('should delete every file below the folder, listed or not', async () => {
+        expect(await deleteExternalFolder({ name: '2024', path: '2024' })).toBe(true);
+
+        expect(service.listFolder).toHaveBeenCalledWith('2024', fetchOptions);
+        expect(service.delete).toHaveBeenCalledWith([spring, nested, unlisted], fetchOptions);
+        expect(service.deleteFolder).toHaveBeenCalledWith('2024/unlisted-empty', fetchOptions);
+        expect(externalAssets.current).toEqual([a]);
+        expect(externalFolders.current).toEqual(['other']);
+      });
+
+      it('should report a failure to list the folder without touching any file', async () => {
+        vi.mocked(service.listFolder).mockRejectedValue(new Error('denied'));
+
+        expect(await deleteExternalFolder({ name: '2024', path: '2024' })).toBe(false);
+        expect(service.delete).not.toHaveBeenCalled();
+        expect(externalAssetsToast.current.message).toBe('deleting_folder_failed');
+
+        expect(await renameExternalFolder({ name: '2024', path: '2024' }, '2025')).toBe(false);
+        expect(service.move).not.toHaveBeenCalled();
+        expect(externalAssetsToast.current.message).toBe('renaming_folder_failed');
+      });
     });
 
     it('should report a failure to delete a folder and reload the list', async () => {

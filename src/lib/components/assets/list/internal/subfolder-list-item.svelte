@@ -6,15 +6,16 @@
 <script>
   import SubfolderListItem from '$lib/components/assets/list/subfolder-list-item.svelte';
   import { goto } from '$lib/services/app/navigation';
-  import { focusedAsset } from '$lib/services/assets';
-  import { selectedAssetFolder } from '$lib/services/assets/folders';
+  import { assetsLocked, selectedAssetFolder } from '$lib/services/assets/folders';
+  import { isCmsFolderPath } from '$lib/services/assets/reserved';
+  import { focusedAsset } from '$lib/services/assets/state';
   import {
     deletingSubfolder,
     focusedSubfolder,
     renamingSubfolder,
   } from '$lib/services/assets/subfolders';
   import { env } from '$lib/services/user/env.svelte';
-  import { openAuthoring } from '$lib/services/workflow/open-authoring';
+  import { encodePathSegments } from '$lib/services/utils/url';
 
   /**
    * @import { AssetSubfolder, ViewType } from '$lib/types/private';
@@ -41,7 +42,7 @@
    * from the sidebar, so the page can tell it from another folder sharing its path.
    */
   const open = () => {
-    goto(`/assets/${subfolder.path}`, {
+    goto(encodePathSegments(`/assets/${subfolder.path}`), {
       transitionType: 'forwards',
       state: { folder: selectedAssetFolder.current },
     });
@@ -50,7 +51,8 @@
 
 <!--
   Renaming or deleting a folder commits straight to the configured branch rather than going through
-  review, so neither is available to an Open Authoring contributor
+  review, so neither is available to an Open Authoring contributor or a user who can’t push to the
+  branch, nor within a read-only folder
 -->
 <SubfolderListItem
   {subfolder}
@@ -69,5 +71,7 @@
   onDelete={() => {
     deletingSubfolder.current = subfolder;
   }}
-  actionsDisabled={openAuthoring.current}
+  actionsDisabled={assetsLocked.current ||
+    !!selectedAssetFolder.current?.readonly ||
+    isCmsFolderPath(subfolder.path)}
 />

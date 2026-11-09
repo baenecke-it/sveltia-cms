@@ -5,8 +5,9 @@
   import equal from 'fast-deep-equal';
 
   import QuickSearchBar from '$lib/components/global/toolbar/items/quick-search-bar.svelte';
+  import { appNumberFormatter } from '$lib/services/app/i18n';
   import { goto } from '$lib/services/app/navigation';
-  import { allAssets, getAssetsByFolder } from '$lib/services/assets';
+  import { getAssetsByFolder } from '$lib/services/assets';
   import {
     enabledCloudServices,
     externalAssetCounts,
@@ -14,7 +15,12 @@
     selectedCloudService,
   } from '$lib/services/assets/external';
   import { linkedAssets, linkedFilesService } from '$lib/services/assets/external/linked';
-  import { allAssetFolders, selectedAssetFolder } from '$lib/services/assets/folders';
+  import {
+    allAssetFolders,
+    canCreateAsset,
+    selectedAssetFolder,
+  } from '$lib/services/assets/folders';
+  import { allAssets } from '$lib/services/assets/state';
   import { selectedSubfolderPath } from '$lib/services/assets/subfolders';
   import { getFolderLabelByCollection } from '$lib/services/assets/view';
   import { getCollection, getCollectionIndex } from '$lib/services/contents/collection';
@@ -23,6 +29,7 @@
     getCollectionFileIndex,
   } from '$lib/services/contents/collection/files';
   import { env } from '$lib/services/user/env.svelte';
+  import { encodePathSegments } from '$lib/services/utils/url';
 
   /**
    * @import { AssetFolderInfo } from '$lib/types/private';
@@ -39,8 +46,6 @@
     isSearchPage = false,
     /* eslint-enable prefer-const */
   } = $props();
-
-  const numberFormatter = $derived(Intl.NumberFormat(appLocale.current));
 
   /* v8 ignore start -- the app locale is loaded before the sidebar is rendered */
   /**
@@ -99,19 +104,19 @@
       <OptionGroup label={_('asset_location.repository')}>
         {#each folders as folder, index ([folder.collectionName, folder.fileName, folder.internalPath].join(':'))}
           {#await sleep() then}
-            {@const { collectionName, fileName, internalPath, entryRelative, hasTemplateTags } =
-              folder}
+            {@const { collectionName, fileName, internalPath } = folder}
             {@const collection = collectionName ? getCollection(collectionName) : undefined}
             {@const collectionFile =
               collection && fileName ? getCollectionFile(collection, fileName) : undefined}
-            <!-- Can’t upload assets if collection assets are saved at entry-relative paths -->
-            {@const uploadDisabled = entryRelative || hasTemplateTags}
+            <!-- Can’t upload assets if collection assets are saved at entry-relative paths, or the
+            folder is read-only -->
+            {@const uploadDisabled = !canCreateAsset(folder)}
             {@const selected = equal(selectedAssetFolder.current, folder)}
             <Option
               selected={env.isSmallScreen || isSearchPage ? false : selected}
               label={getFolderLabel(folder)}
               onSelect={() => {
-                goto(`/assets/${internalPath ?? '-/all'}`, {
+                goto(encodePathSegments(`/assets/${internalPath ?? '-/all'}`), {
                   transitionType: 'forwards',
                   // An internal path can be shared by multiple collections, files and fields. Pass
                   // the folder info as history state so we can distinguish these different asset
@@ -123,7 +128,7 @@
                 // Selecting the folder already selected doesn’t fire `onSelect` again, but a click
                 // on it while one of its subfolders is browsed should still lead back to its root
                 if (selected && selectedSubfolderPath.current) {
-                  goto(`/assets/${internalPath}`, {
+                  goto(encodePathSegments(`/assets/${internalPath}`), {
                     transitionType: 'backwards',
                     state: { folder },
                   });
@@ -183,7 +188,7 @@
                       internalPath !== undefined ? getAssetsByFolder(folder) : allAssets.current
                     ).length}
                     <span class="count" aria-label="({_('x_assets', { values: { count } })})">
-                      {numberFormatter.format(count)}
+                      {appNumberFormatter.current.format(count)}
                     </span>
                   {/await}
                 {/key}
@@ -218,7 +223,7 @@
             {#snippet endIcon()}
               {#if count !== undefined}
                 <span class="count" aria-label="({_('x_assets', { values: { count } })})">
-                  {numberFormatter.format(count)}
+                  {appNumberFormatter.current.format(count)}
                 </span>
               {/if}
             {/snippet}
@@ -240,7 +245,7 @@
           {/snippet}
           {#snippet endIcon()}
             <span class="count" aria-label="({_('x_assets', { values: { count: linkedCount } })})">
-              {numberFormatter.format(linkedCount)}
+              {appNumberFormatter.current.format(linkedCount)}
             </span>
           {/snippet}
         </Option>

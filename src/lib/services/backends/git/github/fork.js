@@ -1,40 +1,32 @@
 import { _ } from '@sveltia/i18n';
-import { sleep } from '@sveltia/utils/misc';
 
-import { fetchDefaultBranchName, repository } from '$lib/services/backends/git/github/repository';
-import { fetchAPI, fetchGraphQL } from '$lib/services/backends/git/shared/api';
-import { cmsConfig } from '$lib/services/config';
-import { user } from '$lib/services/user/account.svelte';
 import {
-  forkedRepository,
-  openAuthoringInitialized,
-  requestForkPermission,
-} from '$lib/services/workflow/open-authoring';
+  fetchDefaultBranchName,
+  isRateLimited,
+  repository,
+} from '$lib/services/backends/git/github/repository';
+import { fetchAPI, fetchGraphQL } from '$lib/services/backends/git/shared/api';
+import { createLocalizedError } from '$lib/services/backends/git/shared/errors';
+import {
+  createForkError,
+  isOpenAuthoringConfiguredFor,
+  pollForFork,
+  resolveWorkflowRepository,
+  runOpenAuthoringSetUp,
+  setUpForkFor,
+} from '$lib/services/backends/git/shared/fork';
+import { user } from '$lib/services/user/account.svelte';
 
 /**
  * @import { RepositoryPath } from '$lib/types/private';
  */
 
 /**
- * How long to wait for a newly requested fork to become available. Forking is asynchronous, and a
- * large repository can take a while to copy, so the polling is generous before giving up.
- */
-const FORK_POLL = {
-  interval: 1000,
-  attempts: 30,
-};
-
-/**
- * Check whether Open Authoring is turned on in the site configuration. It doesn’t mean the
- * signed-in user is actually contributing through a fork: a user who can write to the configured
- * repository keeps working on it directly. Use the `openAuthoring` store for that.
+ * Check whether Open Authoring is turned on for this backend in the site configuration: see
+ * {@link isOpenAuthoringConfiguredFor}.
  * @returns {boolean} `true` if the `open_authoring` backend option is enabled.
  */
-export const isOpenAuthoringConfigured = () => {
-  const { backend } = cmsConfig.current ?? {};
-
-  return backend?.name === 'github' && backend.open_authoring === true;
-};
+export const isOpenAuthoringConfigured = () => isOpenAuthoringConfiguredFor('github');
 
 /**
  * Get the repository that receives the CMS’s commits: the signed-in user’s fork when the current
@@ -42,11 +34,7 @@ export const isOpenAuthoringConfigured = () => {
  * from the configured repository, so this is only for writes and for the branches behind them.
  * @returns {RepositoryPath} Repository owner and name.
  */
-export const getWorkflowRepository = () => {
-  const fork = forkedRepository.current;
-
-  return fork ?? { owner: repository.owner, repo: repository.repo };
-};
+export const getWorkflowRepository = () => resolveWorkflowRepository(repository);
 
 /**
  * HTTP statuses that mean the signed-in user can’t see the repository at all. A private repository
@@ -54,19 +42,6 @@ export const getWorkflowRepository = () => {
  * isn’t leaked.
  */
 const NO_ACCESS_STATUSES = [403, 404];
-
-/**
- * Check whether the given response was rejected because the API rate limit is exhausted. GitHub
- * answers a spent primary limit with a 403, the same status it uses to refuse access, so the
- * remaining-request count is what tells the two apart.
- * @param {Response} response Response to check.
- * @returns {boolean} `true` if the request was rate limited.
- * @see https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api
- */
-const isRateLimited = ({ status, headers }) =>
-  status === 429 ||
-  headers.get('retry-after') !== null ||
-  headers.get('x-ratelimit-remaining') === '0';
 
 /**
  * Check whether the signed-in user has an invitation to the configured repository that they haven’t
@@ -180,9 +155,11 @@ export const fetchRepositoryAccess = async () => {
   // A rate limit or an outage leaves the question unanswered. Reading that as “no write access”
   // would send a maintainer down the fork path over something passing, and offer to create a copy
   // of a repository they can already write to, so make the failure visible instead
-  throw new Error('Failed to check the repository permission.', {
-    cause: new Error(_('open_authoring.permission_check_failed', { values: { repo: repoPath } })),
-  });
+  throw createLocalizedError(
+    'Failed to check the repository permission.',
+    'open_authoring.permission_check_failed',
+    { repo: repoPath },
+  );
 };
 
 /**
@@ -211,7 +188,13 @@ export const fetchForkByName = async () => {
   const result = await response.json();
   const parent = result.parent?.full_name?.toLowerCase();
 
-  if (!result.fork || parent !== `${owner}/${repo}`.toLowerCase()) {
+  // GitHub redirects a repository that has been transferred, so check that the fork found is still
+  // the user’s own, the way {@link fetchForkFromNetwork} does
+  if (
+    !result.fork ||
+    parent !== `${owner}/${repo}`.toLowerCase() ||
+    result.owner?.login?.toLowerCase() !== userName.toLowerCase()
+  ) {
     return undefined;
   }
 
@@ -279,26 +262,27 @@ export const fetchFork = async () => (await fetchForkByName()) ?? fetchForkFromN
  * @param {number} [attemptsLeft] Number of attempts remaining, used for the recursive retry.
  * @throws {Error} When the fork hasn’t appeared within the allotted time.
  */
-export const waitForFork = async ({ owner, repo }, attemptsLeft = FORK_POLL.attempts) => {
-  const response = /** @type {Response} */ (
-    await fetchAPI(`/repos/${owner}/${repo}`, {
-      headers: { Accept: 'application/json' },
-      responseType: 'raw',
-    })
-  );
+export const waitForFork = async ({ owner, repo }, attemptsLeft) => {
+  await pollForFork({
+    repoPath: `${owner}/${repo}`,
+    attemptsLeft,
+    /**
+     * Ask GitHub whether the fork can be read back yet.
+     * @returns {Promise<'ready' | 'pending'>} Whether the copy is complete.
+     */
+    checkFork: async () => {
+      const response = /** @type {Response} */ (
+        await fetchAPI(`/repos/${owner}/${repo}`, {
+          headers: { Accept: 'application/json' },
+          responseType: 'raw',
+        })
+      );
 
-  if (response.ok) {
-    return;
-  }
-
-  if (attemptsLeft <= 1) {
-    throw new Error('Timed out waiting for the fork to be created.', {
-      cause: new Error(_('open_authoring.fork_failed', { values: { repo: `${owner}/${repo}` } })),
-    });
-  }
-
-  await sleep(FORK_POLL.interval);
-  await waitForFork({ owner, repo }, attemptsLeft - 1);
+      // GitHub reports no state of its own while the copy is in progress, so a repository that
+      // can’t be read yet is simply one to come back to
+      return response.ok ? 'ready' : 'pending';
+    },
+  });
 };
 
 /**
@@ -317,12 +301,7 @@ export const createFork = async () => {
       await fetchAPI(`/repos/${owner}/${repo}/forks`, { method: 'POST' })
     );
   } catch (/** @type {any} */ ex) {
-    // eslint-disable-next-line no-console
-    console.error('Failed to fork the repository.', ex);
-
-    throw new Error('Failed to fork the repository.', {
-      cause: new Error(_('open_authoring.fork_failed', { values: { repo: `${owner}/${repo}` } })),
-    });
+    throw createForkError(`${owner}/${repo}`, ex);
   }
 
   const [forkOwner, forkRepo] = result.full_name.split('/');
@@ -380,58 +359,37 @@ export const syncFork = async ({ owner, repo }) => {
  * @see https://sveltiacms.app/en/docs/workflows/open
  */
 const setUpOpenAuthoring = async () => {
-  const { canWrite, allowForking } = await fetchRepositoryAccess();
-
-  // A maintainer keeps working on the configured repository, as if Open Authoring was off
-  if (canWrite) {
-    return;
-  }
-
   const { owner, repo } = repository;
-  const repoPath = `${owner}/${repo}`;
 
-  // Syncing the fork needs the branch name, which is otherwise resolved later in the data load
-  if (!repository.branch) {
-    await fetchDefaultBranchName();
-  }
-
-  const existingFork = await fetchFork();
-
-  if (existingFork) {
-    await syncFork(existingFork);
-    forkedRepository.current = existingFork;
-
-    return;
-  }
-
-  // Forking is turned off by default on a private repository, and can be turned off on a public
-  // one. Say so rather than letting the fork request fail with nothing to act on
-  if (!allowForking) {
-    throw new Error('The repository does not allow forking', {
-      cause: new Error(_('open_authoring.forking_disabled', { values: { repo: repoPath } })),
-    });
-  }
-
-  if (!(await requestForkPermission(repoPath))) {
-    throw new Error('Permission to fork the repository was declined', {
-      cause: new Error(_('open_authoring.fork_declined')),
-    });
-  }
-
-  forkedRepository.current = await createFork();
+  await setUpForkFor({
+    repoPath: `${owner}/${repo}`,
+    fetchAccess: fetchRepositoryAccess,
+    /**
+     * Resolve the branch name, which syncing the fork needs. It’s otherwise resolved later in the
+     * data load.
+     */
+    prepare: async () => {
+      if (!repository.branch) {
+        await fetchDefaultBranchName();
+      }
+    },
+    fetchFork,
+    prepareFork: syncFork,
+    /**
+     * Tell whether the repository can be forked, which the access check has read already. Forking
+     * is turned off by default on a private repository, and can be turned off on a public one.
+     * @param {{ allowForking: boolean }} access Repository access.
+     * @returns {boolean} Result.
+     */
+    fetchForkingAllowed: ({ allowForking }) => allowForking,
+    createFork,
+  });
 };
 
 /**
- * Set up Open Authoring for the signed-in user: see {@link setUpOpenAuthoring}. Whether they end up
- * on a fork or, as a maintainer, on the configured repository, the outcome is flagged as known once
- * the set-up has completed, for what depends on it.
+ * Set up Open Authoring for the signed-in user: see {@link setUpOpenAuthoring}.
  * @throws {Error} When the fork could not be set up.
  */
 export const initOpenAuthoring = async () => {
-  forkedRepository.current = undefined;
-  openAuthoringInitialized.current = false;
-
-  await setUpOpenAuthoring();
-
-  openAuthoringInitialized.current = true;
+  await runOpenAuthoringSetUp(setUpOpenAuthoring);
 };

@@ -1,10 +1,10 @@
-import { _, locale as appLocale } from '@sveltia/i18n';
 import { getHash } from '@sveltia/utils/crypto';
 import { getPathInfo } from '@sveltia/utils/file';
 import { escapeRegExp } from '@sveltia/utils/string';
 import sanitize from 'sanitize-filename';
 
-import { slugify } from '$lib/services/common/slug';
+import { getOrCreateAsync } from '$lib/services/utils/cache';
+import { encodePathSegments, encodeRFC3986 } from '$lib/services/utils/url';
 
 /**
  * Create a regular expression that matches the given path.
@@ -16,13 +16,12 @@ export const createPathRegEx = (path, replacer) =>
   new RegExp(`^${path.split('/').map(replacer).join('\\/')}(?=\\/|$)`);
 
 /**
- * Encode the given (partial) file path or file name. Since {@link encodeURIComponent} encodes
- * slashes, we need to split and join. Also, encode some more characters, including `!`, `(` and
- * `)`, which affect the Markdown syntax like images and links. The `@` prefix is an exception; it
- * shouldn’t be encoded.
+ * Encode the given (partial) file path or file name segment by segment, keeping the slashes. Some
+ * more characters than `encodeURIComponent()` does are encoded, including `!`, `(` and `)`, which
+ * affect the Markdown syntax like images and links. The `@` prefix is an exception; it shouldn’t be
+ * encoded.
  * @param {string} path Original path.
  * @returns {string} Encoded path.
- * @see https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/encodeURIComponent#encoding_for_rfc3986
  */
 export const encodeFilePath = (path) => {
   const hasAtPrefix = path.startsWith('@');
@@ -31,15 +30,7 @@ export const encodeFilePath = (path) => {
     path = path.slice(1);
   }
 
-  path = path
-    .split('/')
-    .map((str) =>
-      encodeURIComponent(str).replace(
-        /[!'()*]/g,
-        (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
-      ),
-    )
-    .join('/');
+  path = encodePathSegments(path, encodeRFC3986);
 
   if (hasAtPrefix) {
     return `@${path}`;
@@ -49,89 +40,37 @@ export const encodeFilePath = (path) => {
 };
 
 /**
- * Encode the given (partial) file path or file name. We can use {@link decodeURIComponent} as is.
- * @param {string} path Original path.
- * @returns {string} Decoded path.
- */
-export const decodeFilePath = (path) => decodeURIComponent(path);
-
-/**
- * @type {Map<string, Intl.NumberFormat>}
- */
-const fileSizeFormatterCache = new Map();
-
-/**
- * Format the given file size in bytes, KB, MB, GB or TB.
- * @param {number} size File size.
- * @returns {string} Formatted size.
- */
-export const formatSize = (size) => {
-  const locale = appLocale.current;
-  let formatter = fileSizeFormatterCache.get(locale);
-
-  if (!formatter) {
-    formatter = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 });
-    fileSizeFormatterCache.set(locale, formatter);
-  }
-
-  const kb = 1000;
-  const mb = kb * 1000;
-  const gb = mb * 1000;
-  const tb = gb * 1000;
-
-  if (size < kb) {
-    return _('file_size_units.b', { values: { size: formatter.format(size) } });
-  }
-
-  if (size < mb) {
-    return _('file_size_units.kb', { values: { size: formatter.format(size / kb) } });
-  }
-
-  if (size < gb) {
-    return _('file_size_units.mb', { values: { size: formatter.format(size / mb) } });
-  }
-
-  if (size < tb) {
-    return _('file_size_units.gb', { values: { size: formatter.format(size / gb) } });
-  }
-
-  return _('file_size_units.tb', { values: { size: formatter.format(size / tb) } });
-};
-
-/**
- * Check if the given file name or slug has duplicate(s) or its variant in the other names. If
- * found, rename it by prepending a number like `summer-beach-2.jpg`.
+ * Check if the given file name or slug is already taken in the other names. If so, rename it by
+ * appending a number higher than any variant already used, like `summer-beach-2.jpg`. A name that
+ * is free is returned as is, even if numbered variants of it exist.
  * @param {string} name Original name.
  * @param {string[]} otherNames Other names (of files in the same folder).
  * @returns {string} Determined name.
  */
 export const renameIfNeeded = (name, otherNames) => {
-  if (!otherNames.length) {
+  const lowerCaseName = name.toLowerCase();
+
+  // Case-insensitive, since `Photo.jpg` and `photo.jpg` clash on a case-insensitive file system
+  // like macOS’s or Windows’s
+  if (!otherNames.some((otherName) => otherName.toLowerCase() === lowerCaseName)) {
     return name;
   }
 
   const { filename: slug, extension } = getPathInfo(name);
-
-  const regex = new RegExp(
-    `^${escapeRegExp(slug)}(?:-(?<num>\\d+?))?${extension ? `\\.${extension}` : ''}$`,
-  );
+  const suffix = extension ? `\\.${extension}` : '';
+  const regex = new RegExp(`^${escapeRegExp(slug)}-(?<num>\\d+)${suffix}$`, 'i');
+  let highest = 0;
 
   // Only the highest number already taken matters, so the names are scanned once rather than
   // sorted. The caller’s array is left alone: it’s typically every name in the folder, reused for
   // each of the files being added
-  let highest = -1;
-
   otherNames.forEach((otherName) => {
     const match = otherName.match(regex);
 
     if (match) {
-      highest = Math.max(highest, Number(match.groups?.num ?? 0));
+      highest = Math.max(highest, Number(/** @type {Record<string, string>} */ (match.groups).num));
     }
   });
-
-  if (highest === -1) {
-    return name;
-  }
 
   return `${slug}-${highest + 1}${extension ? `.${extension}` : ''}`;
 };
@@ -145,33 +84,6 @@ export const renameIfNeeded = (name, otherNames) => {
  */
 export const sanitizeFileName = (name) =>
   sanitize(name.normalize().replace(/[\s\u00A0\u202F]+/g, ' '));
-
-/**
- * Format the file name for uploading, ensuring it is sanitized and optionally slugified.
- * @param {string} originalName The original file name.
- * @param {object} [options] Options.
- * @param {boolean} [options.slugificationEnabled] Whether to slugify the file name.
- * @param {string[]} [options.assetNamesInSameFolder] List of asset names in the same folder to
- * avoid name conflicts.
- * @returns {string} The formatted file name, sanitized and possibly slugified.
- */
-export const formatFileName = (
-  originalName,
-  { slugificationEnabled = false, assetNamesInSameFolder = [] } = {},
-) => {
-  let fileName = sanitizeFileName(originalName);
-
-  if (slugificationEnabled) {
-    const { filename, extension } = getPathInfo(fileName);
-    const slug = slugify(filename);
-
-    // Lowercase the extension to match the slug’s lowercase behavior, ensuring consistent file
-    // references (e.g., `.JPG` → `.jpg`, `.MOV` → `.mov`)
-    fileName = `${slug}${extension ? `.${extension.toLowerCase()}` : ''}`;
-  }
-
-  return renameIfNeeded(fileName, assetNamesInSameFolder);
-};
 
 /**
  * Groups of file extensions that refer to the same file format, meaning that replacing one with
@@ -214,6 +126,25 @@ export const isEquivalentFileExtension = (a, b) => {
  * @returns {string} Path.
  */
 export const createPath = (segments) => segments.filter(Boolean).join('/');
+
+/**
+ * Get the directory part of a file path. Unlike `getPathInfo()`, which has no directory for a file
+ * at the root, this is always a string, so a root file’s directory compares equal to the root path.
+ * @param {string} path File path.
+ * @returns {string} Directory path, which is an empty string for a file at the root.
+ */
+export const getDirName = (path) => getPathInfo(path).dirname ?? '';
+
+/**
+ * Remove the given directory from the start of a path, if the path sits below it.
+ * @param {string} path Path, e.g. `images/photo.jpg`.
+ * @param {string | undefined} dir Directory path, e.g. `images`. An empty string or `undefined`
+ * leaves the path as is.
+ * @returns {string} Path relative to the directory, e.g. `photo.jpg`, or the original path if it
+ * doesn’t sit below the directory.
+ */
+export const stripPathPrefix = (path, dir) =>
+  dir && path.startsWith(`${dir}/`) ? path.slice(dir.length + 1) : path;
 
 /**
  * Sanitize a path by removing potentially dangerous path traversal segments (`.` and `..`). This
@@ -271,6 +202,16 @@ export const getBlob = (input) =>
   typeof input === 'string' ? new Blob([input], { type: 'text/plain' }) : input;
 
 /**
+ * Get the size of the given file or blob in bytes. A string is measured as UTF-8, the encoding a
+ * `Blob` created from it would use.
+ * @param {File | Blob | string} input File or Blob object, or a string representing the file
+ * content.
+ * @returns {number} Size in bytes.
+ */
+export const getByteSize = (input) =>
+  typeof input === 'string' ? new TextEncoder().encode(input).length : input.size;
+
+/**
  * Compute the Git object ID (SHA-1 hash) of the given blob.
  * @param {Blob} blob File or Blob object.
  * @returns {Promise<string>} Git object ID (SHA-1 hash) of the blob.
@@ -304,17 +245,6 @@ export const getGitHash = (input) => {
     return computeGitHash(getBlob(input));
   }
 
-  let promise = gitHashCache.get(input);
-
-  if (!promise) {
-    promise = computeGitHash(input).catch((error) => {
-      // Leave room for a retry, e.g. once the file is readable again
-      gitHashCache.delete(input);
-      throw error;
-    });
-
-    gitHashCache.set(input, promise);
-  }
-
-  return promise;
+  // A failure isn’t remembered, leaving room for a retry, e.g. once the file is readable again
+  return getOrCreateAsync(gitHashCache, input, () => computeGitHash(input));
 };

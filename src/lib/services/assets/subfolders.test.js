@@ -2,13 +2,18 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   browsedDirPath,
+  browsingCmsFolder,
   canBrowseSubfolders,
   formatSubfolderName,
-  getDirName,
+  getAssetsInDir,
+  getFolderBreadcrumbItems,
+  getFolderNamesInDir,
   getRelativePath,
   getSubfolderPath,
   getSubfolders,
+  getTakenNames,
   getUploadDirPath,
+  listSubfolders,
   resolveAssetFolderPath,
   selectedSubfolderPath,
   validateSubfolderName,
@@ -71,17 +76,6 @@ describe('assets/subfolders', () => {
     _gitConfigFiles.current = [];
     _config.slugify_filename = false;
     selectedSubfolderPath.current = '';
-  });
-
-  describe('getDirName', () => {
-    it('should return the directory of a file path', () => {
-      expect(getDirName('static/images/photo.jpg')).toBe('static/images');
-      expect(getDirName('static/photo.jpg')).toBe('static');
-    });
-
-    it('should return an empty string for a file at the root', () => {
-      expect(getDirName('photo.jpg')).toBe('');
-    });
   });
 
   describe('canBrowseSubfolders', () => {
@@ -168,6 +162,13 @@ describe('assets/subfolders', () => {
       });
     });
 
+    it('should keep the All Assets folder passed as history state for an asset folder path', () => {
+      expect(resolveAssetFolderPath('static/images/posts', allAssets)).toEqual({
+        folder: allAssets,
+        subfolderPath: '',
+      });
+    });
+
     it('should find the All Assets folder', () => {
       expect(resolveAssetFolderPath('-/all')).toEqual({ folder: allAssets, subfolderPath: '' });
     });
@@ -220,6 +221,21 @@ describe('assets/subfolders', () => {
     });
   });
 
+  describe('browsingCmsFolder', () => {
+    it('should tell whether the browsed folder is one the CMS is served from', () => {
+      expect(browsingCmsFolder.current).toBe(false);
+
+      _selectedAssetFolder.current = createFolder({ internalPath: 'static' });
+      expect(browsingCmsFolder.current).toBe(false);
+
+      selectedSubfolderPath.current = 'admin';
+      expect(browsingCmsFolder.current).toBe(true);
+
+      selectedSubfolderPath.current = 'admin/js';
+      expect(browsingCmsFolder.current).toBe(true);
+    });
+  });
+
   describe('browsedDirPath', () => {
     it('should be undefined when no folder is selected', () => {
       expect(browsedDirPath.current).toBeUndefined();
@@ -245,6 +261,22 @@ describe('assets/subfolders', () => {
 
       selectedSubfolderPath.current = 'uploads';
       expect(browsedDirPath.current).toBe('uploads');
+    });
+  });
+
+  describe('getAssetsInDir', () => {
+    it('should list the assets right in the directory, leaving out the ones in its subfolders', () => {
+      const assets = ['static/images/a.jpg', 'static/images/2024/b.jpg', 'static/c.jpg'].map(
+        createAsset,
+      );
+
+      expect(getAssetsInDir({ dirPath: 'static/images', assets })).toEqual([assets[0]]);
+    });
+
+    it('should list the assets at the root for an empty directory path', () => {
+      const assets = ['a.jpg', 'static/b.jpg'].map(createAsset);
+
+      expect(getAssetsInDir({ dirPath: '', assets })).toEqual([assets[0]]);
     });
   });
 
@@ -322,6 +354,157 @@ describe('assets/subfolders', () => {
     });
   });
 
+  describe('listSubfolders', () => {
+    it('should list the immediate subfolders of a directory, sorted by name', () => {
+      expect(
+        listSubfolders({
+          dirPath: 'static/images',
+          paths: [
+            'static/images/photo.jpg',
+            'static/images/zoo/lion.jpg',
+            'static/images/animals/cats/tabby.jpg',
+            'static/images/animals/dog.jpg',
+          ],
+        }),
+      ).toEqual([
+        { name: 'animals', path: 'static/images/animals' },
+        { name: 'zoo', path: 'static/images/zoo' },
+      ]);
+    });
+
+    it('should list the subfolders of the root', () => {
+      expect(
+        listSubfolders({ dirPath: '', paths: ['a.jpg', 'images/b.jpg', 'docs/c.pdf'] }),
+      ).toEqual([
+        { name: 'docs', path: 'docs' },
+        { name: 'images', path: 'images' },
+      ]);
+    });
+
+    it('should list an empty folder kept by a placeholder', () => {
+      expect(listSubfolders({ dirPath: 'uploads', paths: ['uploads/empty/'] })).toEqual([
+        { name: 'empty', path: 'uploads/empty' },
+      ]);
+    });
+
+    it('should leave out the paths outside the directory', () => {
+      expect(
+        listSubfolders({
+          dirPath: 'static/images',
+          paths: ['static/imagesets/a/b.jpg', 'static/other/c.jpg', 'static/images/'],
+        }),
+      ).toEqual([]);
+    });
+
+    it('should skip an empty path segment', () => {
+      expect(listSubfolders({ dirPath: 'uploads', paths: ['uploads//a.jpg'] })).toEqual([]);
+    });
+  });
+
+  describe('getTakenNames', () => {
+    const subfolders = [
+      { name: 'archive', path: 'images/archive' },
+      { name: '2024', path: 'images/2024' },
+    ];
+
+    const fileNames = ['hero.png', 'logo.svg'];
+
+    it('should list the subfolder and file names', () => {
+      expect(getTakenNames({ subfolders, fileNames })).toEqual([
+        'archive',
+        '2024',
+        'hero.png',
+        'logo.svg',
+      ]);
+    });
+
+    it('should leave out the subfolder being renamed', () => {
+      expect(getTakenNames({ subfolders, fileNames, exclude: '2024' })).toEqual([
+        'archive',
+        'hero.png',
+        'logo.svg',
+      ]);
+    });
+
+    it('should take the names leading to the asset folders nested in the directory', () => {
+      _allAssetFolders.current = [
+        createFolder({ internalPath: undefined }),
+        createFolder({ internalPath: '' }),
+        createFolder({ internalPath: 'images' }),
+        createFolder({ internalPath: 'images/projects', collectionName: 'projects' }),
+        createFolder({ internalPath: 'images/blog/covers', collectionName: 'blog' }),
+        createFolder({ internalPath: 'images/{{slug}}', hasTemplateTags: true }),
+        createFolder({ internalPath: 'static/images', collectionName: 'pages' }),
+      ];
+
+      expect(getTakenNames({ subfolders, fileNames, dirPath: 'images' })).toEqual([
+        'archive',
+        '2024',
+        'hero.png',
+        'logo.svg',
+        'blog',
+        'projects',
+      ]);
+      // Nothing is nested in a directory without a configured folder below it
+      expect(getTakenNames({ subfolders: [], fileNames: [], dirPath: 'images/2024' })).toEqual([]);
+
+      _allAssetFolders.current = [];
+    });
+  });
+
+  describe('getFolderNamesInDir', () => {
+    it('should list the folders holding assets or Git config files, and nested asset folders', async () => {
+      const { allAssets } = await import('$lib/services/assets/state');
+
+      allAssets.current = [
+        createAsset('images/a.png'),
+        createAsset('images/2024/b.png'),
+        createAsset('images/blog/2023/c.png'),
+        createAsset('other/d.png'),
+      ];
+      _gitConfigFiles.current = [{ path: 'images/empty/.gitkeep' }];
+      _allAssetFolders.current = [
+        createFolder({ internalPath: 'images' }),
+        createFolder({ internalPath: 'images/projects', collectionName: 'projects' }),
+      ];
+
+      expect(getFolderNamesInDir('images')).toEqual(['2024', 'blog', 'empty', 'projects']);
+      expect(getFolderNamesInDir('images/2024')).toEqual([]);
+
+      allAssets.current = [];
+      _gitConfigFiles.current = [];
+      _allAssetFolders.current = [];
+    });
+  });
+
+  describe('getFolderBreadcrumbItems', () => {
+    it('should return no item at the root', () => {
+      const onBrowse = vi.fn();
+
+      expect(
+        getFolderBreadcrumbItems({ rootLabel: 'Media', subfolderNames: [], onBrowse }),
+      ).toEqual([]);
+    });
+
+    it('should lead each ancestor back to itself, ending with the subfolder being browsed', () => {
+      const onBrowse = vi.fn();
+
+      const items = getFolderBreadcrumbItems({
+        rootLabel: 'Media',
+        subfolderNames: ['2024', 'summer', 'beach'],
+        onBrowse,
+      });
+
+      expect(items.map(({ label }) => label)).toEqual(['Media', '2024', 'summer', 'beach']);
+      expect(items.at(-1)).toEqual({ label: 'beach' });
+
+      items[0].onClick?.();
+      expect(onBrowse).toHaveBeenLastCalledWith({ depth: 0, path: '' });
+      items[2].onClick?.();
+      expect(onBrowse).toHaveBeenLastCalledWith({ depth: 2, path: '2024/summer' });
+    });
+  });
+
   describe('getUploadDirPath', () => {
     it('should join the folder path and the subfolder path', () => {
       expect(getUploadDirPath({ folder: createFolder(), files: [] })).toBe('static/images');
@@ -367,6 +550,12 @@ describe('assets/subfolders', () => {
     it('should accept a new name', () => {
       expect(validateSubfolderName({ name: 'summer', takenNames })).toBeUndefined();
       expect(validateSubfolderName({ name: ' summer 2024 ', takenNames })).toBeUndefined();
+    });
+
+    it('should reject the name of a folder the CMS is usually served from', () => {
+      expect(validateSubfolderName({ name: 'admin', takenNames })).toBe('reserved');
+      expect(validateSubfolderName({ name: ' CMS ', takenNames })).toBe('reserved');
+      expect(validateSubfolderName({ name: 'admins', takenNames })).toBeUndefined();
     });
 
     it('should reject an empty name', () => {

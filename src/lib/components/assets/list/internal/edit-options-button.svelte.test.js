@@ -1,9 +1,10 @@
 import { sleep } from '@sveltia/utils/misc';
 import { beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
-import { page } from 'vitest/browser';
+import { page, userEvent } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
-import { editingAsset, renamingAsset, uploadingAssets } from '$lib/services/assets';
+import { getAssetDetails } from '$lib/services/assets/details';
+import { editingAsset, renamingAsset, uploadingAssets } from '$lib/services/assets/state';
 import { showUploadAssetsDialog } from '$lib/services/assets/view';
 import { backendName } from '$lib/services/backends';
 import { repository } from '$lib/services/backends/git/github/repository';
@@ -16,6 +17,12 @@ import EditOptionsButton from './edit-options-button.svelte';
 
 vi.mock('$lib/services/utils/window', () => ({ openNewTab: vi.fn() }));
 
+vi.mock('$lib/services/assets/details', async (importOriginal) => {
+  const actual = /** @type {any} */ (await importOriginal());
+
+  return { ...actual, getAssetDetails: vi.fn(actual.getAssetDetails) };
+});
+
 const textAsset = createMockAsset({ name: 'notes.txt' });
 const imageAsset = createMockAsset({ name: 'photo.png' });
 
@@ -27,8 +34,6 @@ const openMenu = async () => {
   // Wait for the previous popup to be unmounted
   await expect.poll(() => document.querySelector('dialog.popup')).toBeNull();
   await page.getByRole('button', { name: 'Show Edit Options' }).click();
-  // A Sveltia UI menu starts handling clicks 100 ms after it’s opened
-  await sleep(150);
 };
 
 describe('EditOptionsButton', () => {
@@ -112,6 +117,18 @@ describe('EditOptionsButton', () => {
     await expect.element(page.getByRole('menuitem', { name: 'View on Live Site' })).toBeEnabled();
   });
 
+  test('disables the changes to an asset in a read-only folder', async () => {
+    await render(EditOptionsButton, {
+      asset: { ...textAsset, folder: { ...textAsset.folder, readonly: true } },
+    });
+    await openMenu();
+
+    await expect.element(page.getByRole('menuitem', { name: 'Edit Asset' })).toBeDisabled();
+    await expect.element(page.getByRole('menuitem', { name: 'Rename Asset' })).toBeDisabled();
+    await expect.element(page.getByRole('menuitem', { name: 'Replace Asset' })).toBeDisabled();
+    await expect.element(page.getByRole('menuitem', { name: 'View on Live Site' })).toBeEnabled();
+  });
+
   test('offers the repository link in developer mode', async () => {
     prefs.devModeEnabled = true;
 
@@ -154,6 +171,45 @@ describe('EditOptionsButton', () => {
         expect.objectContaining({ message: 'Failed to retrieve blob' }),
       ),
     );
+    await expect.element(page.getByRole('menuitem', { name: 'View on Live Site' })).toBeDisabled();
+  });
+
+  test('ignores the details of an asset focused earlier that arrive late', async () => {
+    const { promise, resolve } = Promise.withResolvers();
+
+    vi.mocked(getAssetDetails).mockReturnValueOnce(/** @type {any} */ (promise));
+
+    const { rerender } = await render(EditOptionsButton, { asset: textAsset });
+
+    await rerender({ asset: imageAsset });
+    resolve({ publicURL: 'https://example.com/uploads/notes.txt' });
+    await sleep(50);
+    await openMenu();
+    await page.getByRole('menuitem', { name: 'View on Live Site' }).click();
+    expect(openNewTab).toHaveBeenLastCalledWith('https://example.com/uploads/photo.png');
+  });
+
+  test('drops the public URL of the previous asset while the next one loads, or fails to', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { rerender } = await render(EditOptionsButton, { asset: textAsset });
+
+    await openMenu();
+    await expect.element(page.getByRole('menuitem', { name: 'View on Live Site' })).toBeEnabled();
+    await userEvent.keyboard('{Escape}');
+
+    const { promise, reject } = Promise.withResolvers();
+
+    vi.mocked(getAssetDetails).mockReturnValueOnce(/** @type {any} */ (promise));
+    await rerender({ asset: imageAsset });
+    await openMenu();
+    await expect.element(page.getByRole('menuitem', { name: 'View on Live Site' })).toBeDisabled();
+    await userEvent.keyboard('{Escape}');
+
+    reject(new Error('Failed'));
+    await vi.waitFor(() =>
+      expect(error).toHaveBeenCalledWith(expect.objectContaining({ message: 'Failed' })),
+    );
+    await openMenu();
     await expect.element(page.getByRole('menuitem', { name: 'View on Live Site' })).toBeDisabled();
   });
 });

@@ -1,4 +1,3 @@
-import { sleep } from '@sveltia/utils/misc';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { page } from 'vitest/browser';
 
@@ -93,7 +92,6 @@ describe('AssetPicker', () => {
     await expect
       .poll(() => document.querySelectorAll('#select-assets-grid [role="option"]').length)
       .toBe(1);
-    await sleep(150);
     await page
       .elementLocator(
         /** @type {HTMLElement} */ (document.querySelector('#select-assets-grid [role="option"]')),
@@ -113,7 +111,6 @@ describe('AssetPicker', () => {
     const promise = component.pick({ multiple: true });
     const dialog = page.getByRole('dialog', { name: 'Select File' });
 
-    await sleep(150);
     await dialog.getByRole('option', { name: 'Enter URL' }).click();
     await dialog.getByRole('textbox').fill('https://example.com/doc.pdf');
     await dialog.getByRole('button', { name: 'Insert' }).click();
@@ -181,6 +178,30 @@ describe('AssetPicker', () => {
     await expect.poll(() => document.querySelector('[role="alertdialog"]')).toBeNull();
   });
 
+  test('refuses a file of another type once it is processed', async () => {
+    const { component, draft } = await renderPicker();
+    const promise = component.pick({ accept: '.pdf' });
+    const dialog = page.getByRole('dialog', { name: 'Select File' });
+
+    await expect.element(dialog).toBeInTheDocument();
+    dropFiles([await createMockImageFile({ name: 'kite.png' })]);
+    await expect.element(dialog.getByRole('button', { name: 'Insert' })).toBeEnabled();
+    await dialog.getByRole('button', { name: 'Insert' }).click();
+
+    expect(await promise).toBeNull();
+    expect(draft.files).toEqual({});
+
+    const alert = page.getByRole('alertdialog', { name: 'Unsupported File Type' });
+
+    await expect
+      .element(alert)
+      .toMatchTextContent(
+        'This file cannot be uploaded because it’s not one of the following types: \u2068.pdf\u2069.',
+      );
+    await alert.getByRole('button', { name: 'OK' }).click();
+    await expect.poll(() => document.querySelector('[role="alertdialog"]')).toBeNull();
+  });
+
   test('fails when the picked asset can’t be read', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     // The file of the asset is not available, and the test backend can’t download it
@@ -195,7 +216,6 @@ describe('AssetPicker', () => {
     await expect
       .poll(() => document.querySelectorAll('#select-assets-grid [role="option"]').length)
       .toBe(1);
-    await sleep(150);
     await page
       .elementLocator(
         /** @type {HTMLElement} */ (document.querySelector('#select-assets-grid [role="option"]')),

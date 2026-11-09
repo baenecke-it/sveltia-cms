@@ -4,7 +4,9 @@
   the repository while the user has it open. The background checks bring such a change into the
   entry store; this compares the entry the draft was made from with the entry as it is now. The
   user can reload the entry to start from the new version, or carry on: their work is left alone
-  either way, and saving asks before overwriting the other change.
+  either way, and saving asks before overwriting the other change. An entry stored in a file with
+  the other entries can’t be reloaded or saved over the change; the user is asked to open it again
+  from the entry list.
 -->
 <script>
   import { _, locale as appLocale } from '@sveltia/i18n';
@@ -24,7 +26,8 @@
   const draft = $derived(entryDraft.current);
   /**
    * The entry the draft was made from, if it’s one that the background checks watch: an existing
-   * entry on the configured branch. A workflow draft is saved to its own branch.
+   * entry on the configured branch. A workflow draft lives on a branch of its own, which those
+   * checks don’t look at; it’s compared with its branch when the draft is saved instead.
    */
   const originalEntry = $derived(
     draft && !draft.isNew && !isWorkflowDraft(draft) ? draft.originalEntry : undefined,
@@ -65,7 +68,9 @@
   >
     {description}
     {warning}
-    {#if conflict.type === 'modified'}
+    <!-- An entry stored in a file with the other entries is told by its position, so reloading it
+    could load another entry that has moved there -->
+    {#if conflict.type === 'modified' && conflict.canOverwrite}
       <Button
         variant="link"
         label={_('remote_change.reload_entry')}

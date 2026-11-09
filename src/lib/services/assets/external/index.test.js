@@ -14,6 +14,7 @@ import {
   externalAssets,
   externalAssetSearchTerms,
   externalAssetsError,
+  externalAssetsTruncated,
   externalFolders,
   focusedExternalAsset,
   focusedExternalSubfolder,
@@ -23,13 +24,17 @@ import {
   getFetchOptions,
   hasAuthInfo,
   hasFolderSupport,
+  mergeUploadedExternalAssets,
   overlaidExternalAssetId,
+  pruneExternalAssetSelection,
   renamingExternalAsset,
   renamingExternalSubfolder,
   resetExternalAssets,
   selectedCloudService,
+  selectedExternalAssetIdSet,
   selectedExternalAssets,
   selectedExternalDirPath,
+  selectedOrFocusedExternalAssets,
 } from '.';
 
 vi.mock('$lib/services/config', () => ({
@@ -60,6 +65,63 @@ describe('assets/external', () => {
     cmsConfig.current = /** @type {any} */ ({});
     delete prefs.apiKeys;
     delete prefs.logins;
+  });
+
+  describe('selectedExternalAssetIdSet', () => {
+    it('should derive the IDs of the selected assets', () => {
+      selectedExternalAssets.current = [
+        /** @type {any} */ ({ id: 'a' }),
+        /** @type {any} */ ({ id: 'b' }),
+      ];
+      expect(selectedExternalAssetIdSet.current).toEqual(new Set(['a', 'b']));
+      selectedExternalAssets.current = [];
+      expect(selectedExternalAssetIdSet.current).toEqual(new Set());
+    });
+  });
+
+  describe('selectedOrFocusedExternalAssets', () => {
+    it('should derive the selected assets, or else the focused asset', () => {
+      const a = /** @type {any} */ ({ id: 'a' });
+      const b = /** @type {any} */ ({ id: 'b' });
+
+      selectedExternalAssets.current = [];
+      focusedExternalAsset.current = undefined;
+      expect(selectedOrFocusedExternalAssets.current).toEqual([]);
+      focusedExternalAsset.current = a;
+      expect(selectedOrFocusedExternalAssets.current).toEqual([a]);
+      selectedExternalAssets.current = [b];
+      expect(selectedOrFocusedExternalAssets.current).toEqual([b]);
+      expect(selectedOrFocusedExternalAssets.current).not.toBe(selectedExternalAssets.current);
+      selectedExternalAssets.current = [];
+      focusedExternalAsset.current = undefined;
+    });
+  });
+
+  describe('pruneExternalAssetSelection', () => {
+    const a = /** @type {any} */ ({ id: 'a' });
+    const b = /** @type {any} */ ({ id: 'b' });
+
+    it('should drop the selected and focused assets that fail the test', () => {
+      selectedExternalAssets.current = [a, b];
+      focusedExternalAsset.current = b;
+      pruneExternalAssetSelection((id) => id === 'a');
+      expect(selectedExternalAssets.current).toEqual([a]);
+      expect(focusedExternalAsset.current).toBeUndefined();
+    });
+
+    it('should leave the selection as is when every asset passes the test', () => {
+      const selected = [a, b];
+
+      selectedExternalAssets.current = selected;
+      focusedExternalAsset.current = a;
+      pruneExternalAssetSelection(() => true);
+      expect(selectedExternalAssets.current).toBe(selected);
+      expect(focusedExternalAsset.current).toBe(a);
+      focusedExternalAsset.current = undefined;
+      pruneExternalAssetSelection(() => false);
+      expect(selectedExternalAssets.current).toEqual([]);
+      expect(focusedExternalAsset.current).toBeUndefined();
+    });
   });
 
   describe('enabledCloudServices', () => {
@@ -129,6 +191,18 @@ describe('assets/external', () => {
     });
   });
 
+  describe('mergeUploadedExternalAssets', () => {
+    it('should list the uploaded assets first, replacing the ones with the same ID', () => {
+      const a = /** @type {any} */ ({ id: 'a', fileName: 'a.png' });
+      const b = /** @type {any} */ ({ id: 'b', fileName: 'b.png' });
+      const newB = /** @type {any} */ ({ id: 'b', fileName: 'b.png', size: 2 });
+      const c = /** @type {any} */ ({ id: 'c', fileName: 'c.png' });
+
+      expect(mergeUploadedExternalAssets([newB, c], [a, b])).toEqual([newB, c, a]);
+      expect(mergeUploadedExternalAssets([c], [])).toEqual([c]);
+    });
+  });
+
   describe('getFetchOptions', () => {
     it('should return empty credentials by default', () => {
       expect(getFetchOptions(allCloudStorageServices.uploadcare)).toEqual({
@@ -176,6 +250,7 @@ describe('assets/external', () => {
       externalAssets.current = [asset];
       externalAssetCounts.current = { uploadcare: 1 };
       externalAssetsError.current = 'search_fetch_failed';
+      externalAssetsTruncated.current = true;
       selectedExternalAssets.current = [asset];
       focusedExternalAsset.current = asset;
       overlaidExternalAssetId.current = 'a';
@@ -189,6 +264,7 @@ describe('assets/external', () => {
       expect(externalAssetCounts.current).toEqual({ uploadcare: 1 });
       expect(externalAssets.current).toBeUndefined();
       expect(externalAssetsError.current).toBeUndefined();
+      expect(externalAssetsTruncated.current).toBe(false);
       expect(selectedExternalAssets.current).toEqual([]);
       expect(focusedExternalAsset.current).toBeUndefined();
       expect(overlaidExternalAssetId.current).toBeUndefined();

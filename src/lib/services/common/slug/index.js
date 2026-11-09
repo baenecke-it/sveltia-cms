@@ -1,6 +1,6 @@
 import transliterate from '@sindresorhus/transliterate';
 import { generateUUID } from '@sveltia/utils/crypto';
-import { truncate } from '@sveltia/utils/string';
+import { escapeRegExp, truncate } from '@sveltia/utils/string';
 
 import {
   UNSAFE_ASCII_SLUG_CHARS_REGEX,
@@ -79,20 +79,25 @@ export const slugify = (
   // Replace all the spaces with replacers (hyphens by default)
   slug = slug.trim().replaceAll(/\s+/g, sanitizeReplacement);
 
+  /** @type {RegExp | undefined} */
+  let trimPattern;
+
   // Consolidate consecutive replacement characters into a single one and trim them from ends
   if (sanitizeReplacement) {
-    const escapedReplacement = sanitizeReplacement.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const escapedReplacement = escapeRegExp(sanitizeReplacement);
 
     const cachedSlugRegexes = getOrCreate(slugReplacementRegexCache, escapedReplacement, () => ({
-      consecutivePattern: new RegExp(`${escapedReplacement}+`, 'g'),
-      trimPattern: new RegExp(`^${escapedReplacement}+|${escapedReplacement}+$`, 'g'),
+      // Group the replacement so that a multi-character one is repeated as a whole
+      consecutivePattern: new RegExp(`(?:${escapedReplacement})+`, 'g'),
+      trimPattern: new RegExp(`^(?:${escapedReplacement})+|(?:${escapedReplacement})+$`, 'g'),
     }));
 
     slug = slug.replace(cachedSlugRegexes.consecutivePattern, sanitizeReplacement);
 
     // Trim replacement characters from the beginning and end
     if (trimReplacement) {
-      slug = slug.replace(cachedSlugRegexes.trimPattern, '');
+      ({ trimPattern } = cachedSlugRegexes);
+      slug = slug.replace(trimPattern, '');
     }
   }
 
@@ -102,6 +107,11 @@ export const slugify = (
 
   if (typeof maxLength === 'number' && slug.length > maxLength) {
     slug = truncate(slug, maxLength, { ellipsis: '' });
+
+    // Trim the replacement character the cut may leave at the end
+    if (trimPattern) {
+      slug = slug.replace(trimPattern, '');
+    }
   }
 
   if (lowercase) {

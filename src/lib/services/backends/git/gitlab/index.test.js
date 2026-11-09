@@ -8,7 +8,7 @@ import {
   fetchLastCommit,
 } from '$lib/services/backends/git/gitlab/commits';
 import { BACKEND_LABEL, BACKEND_NAME } from '$lib/services/backends/git/gitlab/constants';
-import { fetchBlob, fetchFiles } from '$lib/services/backends/git/gitlab/files';
+import { fetchBlob, fetchDirSHA, fetchFiles } from '$lib/services/backends/git/gitlab/files';
 import gitlabBackend, { init } from '$lib/services/backends/git/gitlab/index';
 import { getBaseURLs, repository } from '$lib/services/backends/git/gitlab/repository';
 import { checkStatus, STATUS_DASHBOARD_URL } from '$lib/services/backends/git/gitlab/status';
@@ -29,11 +29,17 @@ vi.mock('$lib/services/backends/git/gitlab/commits', () => ({
 }));
 vi.mock('$lib/services/backends/git/gitlab/files', () => ({
   fetchBlob: vi.fn(),
+  fetchDirSHA: vi.fn(),
   fetchFiles: vi.fn(),
 }));
 vi.mock('$lib/services/backends/git/gitlab/repository', () => ({
   repository: {},
   getBaseURLs: vi.fn(),
+  parseProjectPath: vi.fn((path) => {
+    const [repo, ...owner] = path.split('/').reverse();
+
+    return owner.length ? { owner: owner.reverse().join('/'), repo } : {};
+  }),
 }));
 vi.mock('$lib/services/backends/git/gitlab/status', () => ({
   checkStatus: vi.fn(),
@@ -113,8 +119,9 @@ describe('GitLab backend service', () => {
       expect(apiConfig).toEqual(
         expect.objectContaining({
           clientId: '',
-          authURL: 'https://gitlab.com/oauth/authorize',
-          tokenURL: 'https://gitlab.com/oauth/token',
+          // Signs in through Netlify by default, like Decap CMS
+          authURL: 'https://api.netlify.com/auth',
+          tokenURL: 'https://api.netlify.com/auth',
           authScheme: 'Bearer',
           restBaseURL: 'https://gitlab.com/api/v4',
           graphqlBaseURL: 'https://gitlab.com/api/graphql',
@@ -125,6 +132,28 @@ describe('GitLab backend service', () => {
         fullPath: 'owner/repo',
         branch: 'main',
       });
+    });
+
+    test('defaults the OAuth URLs to GitLab.com with PKCE authorization', () => {
+      cmsConfig.current = /** @type {any} */ ({
+        backend: {
+          name: 'gitlab',
+          repo: 'owner/repo',
+          branch: 'main',
+          auth_type: 'pkce',
+          app_id: 'client-id',
+        },
+      });
+
+      init();
+
+      expect(apiConfig).toEqual(
+        expect.objectContaining({
+          clientId: 'client-id',
+          authURL: 'https://gitlab.com/oauth/authorize',
+          tokenURL: 'https://gitlab.com/oauth/token',
+        }),
+      );
     });
 
     test('initializes GitLab backend with custom configuration', () => {
@@ -309,6 +338,7 @@ describe('GitLab backend service', () => {
         fetchFiles,
         fetchLastCommit,
         fetchBlob,
+        fetchDirSHA,
         commitChanges,
         fetchFileCommits,
         fetchBranchHeadSHA: expect.any(Function),

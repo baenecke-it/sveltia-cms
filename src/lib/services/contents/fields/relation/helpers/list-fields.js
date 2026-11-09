@@ -49,7 +49,6 @@ const LIST_KEY_PATH_MATCH_REGEX = /\.(\d+)$/;
  */
 export const analyzeListFields = (allFieldNames, getFieldArgs) => {
   const listFieldConfigs = new Map();
-  const baseFieldGroups = new Map();
 
   // Analyze all list fields and get their configurations
   allFieldNames
@@ -66,17 +65,7 @@ export const analyzeListFields = (allFieldNames, getFieldArgs) => {
     });
 
   // Group entries by base field name
-  [...listFieldConfigs.entries()].forEach(([fieldName, config]) => {
-    const { baseFieldName } = config;
-
-    if (!baseFieldGroups.has(baseFieldName)) {
-      baseFieldGroups.set(baseFieldName, []);
-    }
-
-    baseFieldGroups.get(baseFieldName).push([fieldName, config]);
-  });
-
-  return baseFieldGroups;
+  return Map.groupBy(listFieldConfigs.entries(), ([, { baseFieldName }]) => baseFieldName);
 };
 
 /**
@@ -106,7 +95,7 @@ const buildListItemOption = ({
    */
   const replaceWildcards = (template) =>
     replacements.reduce(
-      (result, [fieldName, itemValue]) => result.replaceAll(`{{${fieldName}}}`, itemValue),
+      (result, [fieldName, itemValue]) => result.replaceAll(`{{${fieldName}}}`, () => itemValue),
       template,
     );
 
@@ -121,10 +110,16 @@ const buildListItemOption = ({
     fallbackContext,
   );
 
+  // Like an empty field, an empty list item value can’t identify the item
+  const hasEmptyValueTag = replacements.some(
+    ([fieldName, itemValue]) =>
+      _valueField.includes(`{{${fieldName}}}`) && String(itemValue ?? '') === '',
+  );
+
   return {
-    label: label || '',
-    value: value || context.slug,
-    searchValue: searchValue || label || '',
+    label,
+    value: hasEmptyValueTag ? '' : value,
+    searchValue: searchValue || label,
   };
 };
 
@@ -177,7 +172,7 @@ export const processSingleSubfieldList = ({
   const regex = getOrCreate(
     singleSubfieldRegexCache,
     baseFieldName,
-    () => new RegExp(`^${escapeRegExp(baseFieldName)}.\\d+$`),
+    () => new RegExp(`^${escapeRegExp(baseFieldName)}\\.\\d+$`),
   );
 
   const items = collectIndexedValues(content, regex, LIST_KEY_PATH_MATCH_REGEX);
@@ -259,7 +254,7 @@ export const processComplexListField = ({
 
     // indexRegex subsumes the old filter-only `regex` (same semantics; `[0-9]+` ≡ `\d+` in JS
     // without the `u` flag), so one regex construction per call is saved.
-    return new RegExp(`^${escapedBase}.([0-9]+).${escapedSub}$`);
+    return new RegExp(`^${escapedBase}\\.([0-9]+)\\.${escapedSub}$`);
   });
 
   const listValues = collectIndexedValues(content, indexRegex);

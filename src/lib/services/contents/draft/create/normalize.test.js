@@ -26,6 +26,17 @@ describe('contents/draft/create/normalize', () => {
       });
     });
 
+    it('should fill in a missing field named after an `Object.prototype` member', () => {
+      const fields = [
+        { name: 'constructor', widget: 'string', default: 'Ada' },
+        { name: 'toString', widget: 'string' },
+        { name: 'valueOf', widget: 'object', fields: [{ name: 'a', widget: 'string' }] },
+      ];
+
+      // The inherited members were taken as the field values and stringified
+      expect(normalize(fields, {})).toEqual({ constructor: 'Ada', toString: '', 'valueOf.a': '' });
+    });
+
     it('should not overwrite an empty string with a default value', () => {
       const fields = [{ name: 'title', widget: 'string', default: 'Untitled' }];
 
@@ -339,6 +350,38 @@ describe('contents/draft/create/normalize', () => {
           intro: '3.14',
           outro: '',
           date: '2024',
+        });
+      });
+
+      it('should stringify the scalar items of a simple List field', () => {
+        const fields = [{ name: 'years', widget: 'list' }];
+        const content = { 'years.0': 2023, 'years.1': true, 'years.2': null, 'years.3': 'x' };
+
+        expect(normalize(fields, content)).toEqual({
+          'years.0': '2023',
+          'years.1': 'true',
+          'years.2': '',
+          'years.3': 'x',
+        });
+        // A single value turned into the sole item
+        expect(normalize(fields, { years: 2024 })).toEqual({ 'years.0': '2024' });
+      });
+
+      it('should stringify the scalar items of a multiple File or Image field', () => {
+        const fields = [
+          { name: 'images', widget: 'image', multiple: true },
+          { name: 'files', widget: 'file', multiple: true },
+          { name: 'tags', widget: 'select', multiple: true, options: [1, 2] },
+        ];
+
+        const content = { 'images.0': null, 'images.1': 'a.jpg', 'files.0': 123, 'tags.0': 1 };
+
+        // A Select field accepts numeric values, so its items are kept as they are
+        expect(normalize(fields, content)).toEqual({
+          'images.0': '',
+          'images.1': 'a.jpg',
+          'files.0': '123',
+          'tags.0': 1,
         });
       });
 
@@ -787,6 +830,130 @@ describe('contents/draft/create/normalize', () => {
       expect(normalizeContentMap({ fields, contentMap, defaultLocale: 'en' })).toEqual({
         en: { title: 'Hello', category: 'blog' },
         ja: { title: 'こんにちは', category: 'blog' },
+      });
+    });
+
+    it('should put the pairs of a duplicated KeyValue field in the default locale’s order', () => {
+      const fields = [
+        { name: 'metadata', widget: 'keyvalue', i18n: 'duplicate' },
+        { name: 'labels', widget: 'keyvalue', i18n: true },
+        {
+          name: 'sections',
+          widget: 'list',
+          i18n: 'duplicate',
+          fields: [
+            { name: 'attrs', widget: 'keyvalue' },
+            { name: 'notes', widget: 'keyvalue', i18n: true },
+          ],
+        },
+      ];
+
+      const en = {
+        'metadata.a': '1',
+        'metadata.b': '2',
+        'labels.a': 'A',
+        'labels.b': 'B',
+        'sections.0.attrs.a': '1',
+        'sections.0.attrs.b': '2',
+        'sections.0.notes.a': 'A',
+        'sections.0.notes.b': 'B',
+      };
+
+      const ja = {
+        'metadata.b': '2',
+        'metadata.a': '1',
+        'labels.b': 'ビー',
+        'labels.a': 'エー',
+        'sections.0.attrs.b': '2',
+        'sections.0.attrs.a': '1',
+        'sections.0.notes.b': 'ビー',
+        'sections.0.notes.a': 'エー',
+      };
+
+      const contentMap = normalizeContentMap({
+        fields,
+        contentMap: { en, ja },
+        defaultLocale: 'en',
+      });
+
+      // A field duplicated on its own or along with its List field follows the default locale; a
+      // translatable one keeps its own order, which its editor leaves alone
+      expect(Object.keys(contentMap.ja)).toEqual([
+        'labels.b',
+        'labels.a',
+        'sections.0.notes.b',
+        'sections.0.notes.a',
+        'metadata.a',
+        'metadata.b',
+        'sections.0.attrs.a',
+        'sections.0.attrs.b',
+      ]);
+      expect(Object.keys(contentMap.en)).toEqual(Object.keys(en));
+    });
+
+    it('should give a required single-item list saved without its item one', () => {
+      const fields = [
+        {
+          name: 'author',
+          widget: 'list',
+          max: 1,
+          fields: [{ name: 'name', default: 'Anonymous' }],
+        },
+        {
+          name: 'sponsor',
+          widget: 'list',
+          max: 1,
+          required: false,
+          fields: [{ name: 'name', default: 'Acme' }],
+        },
+      ];
+
+      expect(
+        normalizeContentMap({
+          fields,
+          contentMap: { en: { author: [], sponsor: [] } },
+          defaultLocale: 'en',
+        }),
+      ).toEqual({ en: { author: [], 'author.0.name': 'Anonymous', sponsor: [] } });
+
+      // An item that’s there is left alone
+      expect(
+        normalizeContentMap({
+          fields,
+          contentMap: { en: { 'author.0.name': 'Melvin' } },
+          defaultLocale: 'en',
+        }),
+      ).toEqual({ en: { 'author.0.name': 'Melvin', sponsor: [] } });
+    });
+
+    it('should give a required single-item list its item in another locale', () => {
+      const fields = [
+        {
+          name: 'author',
+          widget: 'list',
+          i18n: true,
+          max: 1,
+          fields: [{ name: 'name', i18n: true, default: 'Anonymous' }],
+        },
+        {
+          name: 'venue',
+          widget: 'list',
+          i18n: 'duplicate',
+          max: 1,
+          fields: [{ name: 'name', default: 'Hall' }],
+        },
+      ];
+
+      // A translated list gets its own item, while a duplicated one takes the default locale’s
+      expect(
+        normalizeContentMap({
+          fields,
+          contentMap: { en: { 'venue.0.name': 'Arena' }, fr: {} },
+          defaultLocale: 'en',
+        }),
+      ).toEqual({
+        en: { author: [], 'author.0.name': 'Anonymous', 'venue.0.name': 'Arena' },
+        fr: { author: [], 'author.0.name': 'Anonymous', 'venue.0.name': 'Arena' },
       });
     });
 

@@ -1,10 +1,11 @@
+import { flushSync } from 'svelte';
 import { beforeAll, describe, expect, test, vi } from 'vitest';
 import { page, userEvent } from 'vitest/browser';
 
 import { globalAssetFolder } from '$lib/services/assets/folders';
 import { activeInlineEditors } from '$lib/services/contents/editor';
 import { createMockAsset, createMockImageFile, initTestConfig, setAssets } from '$lib/test/config';
-import { waitForRenameDialog } from '$lib/test/dialog';
+import { expectFileNameSelected } from '$lib/test/dialog';
 import { createMockDraft, renderWithDraft } from '$lib/test/draft';
 
 import FileEditorItem from './file-editor-item.svelte';
@@ -57,9 +58,9 @@ describe('FileEditorItem', () => {
   test('shows a saved asset with its path and the actions', async () => {
     const onReplace = vi.fn();
     const onRemove = vi.fn();
-    const { container } = await renderItem('/uploads/photo.png', { onReplace, onRemove });
+    const { container } = await renderItem('/static/uploads/photo.png', { onReplace, onRemove });
 
-    await expect.element(page.getByRole('textbox')).toHaveTextContent('/uploads/photo.png');
+    await expect.element(page.getByRole('textbox')).toHaveTextContent('/static/uploads/photo.png');
     await expect.poll(() => container.querySelector('img')?.getAttribute('src')).toMatch(/^blob:/);
     // A saved asset can’t be renamed here
     expect(page.getByRole('button', { name: 'Rename' }).elements()).toHaveLength(0);
@@ -132,7 +133,7 @@ describe('FileEditorItem', () => {
 
     const input = page.getByRole('textbox');
 
-    await waitForRenameDialog(input, 'new photo.png');
+    await expectFileNameSelected(input, 'new photo.png');
     // The Escape key is for the editor
     expect(activeInlineEditors.current).toBe(1);
 
@@ -147,6 +148,88 @@ describe('FileEditorItem', () => {
     expect(activeInlineEditors.current).toBe(0);
   });
 
+  test('slugifies the new name with the `slugify_filename` option', async () => {
+    const config = { site_url: 'https://example.com' };
+
+    await initTestConfig({
+      ...config,
+      media_libraries: { default: { config: { slugify_filename: true } } },
+    });
+
+    try {
+      const file = await createMockImageFile({ name: 'new-photo.png' });
+      const blobURL = URL.createObjectURL(file);
+
+      const { draft } = await renderItem(
+        blobURL,
+        {},
+        { files: { [blobURL]: { file, folder: globalAssetFolder.current } } },
+      );
+
+      await page.getByRole('button', { name: 'Rename' }).click();
+
+      const input = page.getByRole('textbox');
+
+      await expectFileNameSelected(input, 'new-photo.png');
+      // The current name is already a slug, so there’s nothing to show
+      expect(page.getByRole('status').elements()).toHaveLength(0);
+
+      await input.fill('Blog Photo 1.png');
+      await expect
+        .element(page.getByRole('status'))
+        .toHaveTextContent('The file will be saved as “\u2068blog-photo-1.png\u2069”.');
+      await userEvent.keyboard('{Enter}');
+
+      await expect
+        .element(page.getByRole('textbox'))
+        .toHaveTextContent('/static/uploads/blog-photo-1.png');
+      expect(draft.files[blobURL].file.name).toBe('blog-photo-1.png');
+      expect(page.getByRole('status').elements()).toHaveLength(0);
+    } finally {
+      await initTestConfig(config);
+    }
+  });
+
+  test('shows the name filled with the file name template, until renamed by hand', async () => {
+    const file = await createMockImageFile({ name: 'new photo.png' });
+    const blobURL = URL.createObjectURL(file);
+
+    const nameTemplate = {
+      template: '{{filename}}-{{year}}',
+      randomValues: new Map(),
+      dateTimeParts: { year: '2026' },
+    };
+
+    const { draft } = await renderItem(
+      blobURL,
+      {},
+      { files: { [blobURL]: { file, folder: globalAssetFolder.current, nameTemplate } } },
+    );
+
+    await expect
+      .element(page.getByRole('textbox'))
+      .toHaveTextContent('/static/uploads/new-photo-2026.png');
+
+    await page.getByRole('button', { name: 'Rename' }).click();
+
+    const input = page.getByRole('textbox');
+
+    await expectFileNameSelected(input, 'new-photo-2026.png');
+
+    // Applying the name as is keeps the template
+    await userEvent.keyboard('{Enter}');
+    await expect.element(page.getByRole('button', { name: 'Rename' })).toBeVisible();
+    expect(draft.files[blobURL].nameTemplate).toBeDefined();
+
+    await page.getByRole('button', { name: 'Rename' }).click();
+    await input.fill('Manual.png');
+    await userEvent.keyboard('{Enter}');
+
+    await expect.element(page.getByRole('textbox')).toHaveTextContent('/static/uploads/Manual.png');
+    expect(draft.files[blobURL].file.name).toBe('Manual.png');
+    expect(draft.files[blobURL].nameTemplate).toBeUndefined();
+  });
+
   test('asks for confirmation when the extension changes, and can cancel', async () => {
     const file = await createMockImageFile({ name: 'photo.png' });
     const blobURL = URL.createObjectURL(file);
@@ -158,7 +241,7 @@ describe('FileEditorItem', () => {
     );
 
     await page.getByRole('button', { name: 'Rename' }).click();
-    await waitForRenameDialog(page.getByRole('textbox'), 'photo.png');
+    await expectFileNameSelected(page.getByRole('textbox'), 'photo.png');
     await page.getByRole('textbox').fill('photo.webp');
     await page.getByRole('button', { name: 'Done' }).click();
 
@@ -170,7 +253,7 @@ describe('FileEditorItem', () => {
 
     // Editing can be cancelled
     await page.getByRole('button', { name: 'Rename' }).click();
-    await waitForRenameDialog(page.getByRole('textbox'), 'photo.webp');
+    await expectFileNameSelected(page.getByRole('textbox'), 'photo.webp');
     await page.getByRole('textbox').fill('other.webp');
     await page.getByRole('button', { name: 'Cancel' }).click();
     await expect.element(page.getByRole('textbox')).toHaveTextContent('/static/uploads/photo.webp');
@@ -216,7 +299,7 @@ describe('FileEditorItem', () => {
     );
 
     await page.getByRole('button', { name: 'Rename' }).click();
-    await waitForRenameDialog(page.getByRole('textbox'), 'photo.png');
+    await expectFileNameSelected(page.getByRole('textbox'), 'photo.png');
     await page.getByRole('textbox').fill('photo.webp');
     await userEvent.keyboard('{Enter}');
 
@@ -230,7 +313,7 @@ describe('FileEditorItem', () => {
   });
 
   test('clears the preview when the value is removed', async () => {
-    const { container, props } = await renderItem('/uploads/photo.png');
+    const { container, props } = await renderItem('/static/uploads/photo.png');
 
     await expect.poll(() => container.querySelector('img')).not.toBeNull();
 
@@ -239,10 +322,80 @@ describe('FileEditorItem', () => {
     await expect.element(page.getByRole('textbox')).toHaveTextContent('');
   });
 
+  test('shows the saved path once an unsaved file is reverted', async () => {
+    const file = await createMockImageFile({ name: 'new photo.png' });
+    const blobURL = URL.createObjectURL(file);
+
+    const { props } = await renderItem(
+      blobURL,
+      {},
+      { files: { [blobURL]: { file, folder: globalAssetFolder.current } } },
+    );
+
+    await expect
+      .element(page.getByRole('textbox'))
+      .toHaveTextContent('/static/uploads/new photo.png');
+    await expect.element(page.getByRole('button', { name: 'Rename' })).toBeVisible();
+
+    props.value = '/static/uploads/photo.png';
+    await expect.element(page.getByRole('textbox')).toHaveTextContent('/static/uploads/photo.png');
+    expect(page.getByRole('button', { name: 'Rename' }).elements()).toHaveLength(0);
+  });
+
+  test('shows the preview of an unsaved file replacing a saved asset or another unsaved file', async () => {
+    const fileA = await createMockImageFile({ name: 'a.png' });
+    const fileB = await createMockImageFile({ name: 'b.png' });
+    const blobA = URL.createObjectURL(fileA);
+    const blobB = URL.createObjectURL(fileB);
+
+    const { container, props } = await renderItem(
+      '/static/uploads/photo.png',
+      {},
+      {
+        files: {
+          [blobA]: { file: fileA, folder: globalAssetFolder.current },
+          [blobB]: { file: fileB, folder: globalAssetFolder.current },
+        },
+      },
+    );
+
+    await expect.poll(() => container.querySelector('img')?.getAttribute('src')).toMatch(/^blob:/);
+
+    props.value = blobA;
+    await expect.poll(() => container.querySelector('img')?.getAttribute('src')).toBe(blobA);
+
+    props.value = blobB;
+    await expect.poll(() => container.querySelector('img')?.getAttribute('src')).toBe(blobB);
+  });
+
+  test('ignores the preview of an earlier value resolved after the current one', async () => {
+    const file = await createMockImageFile({ name: 'a.png' });
+    const blobURL = URL.createObjectURL(file);
+
+    const { container, props } = await renderItem(
+      '/static/uploads/photo.png',
+      {},
+      { files: { [blobURL]: { file, folder: globalAssetFolder.current } } },
+    );
+
+    await expect.poll(() => container.querySelector('img')).not.toBeNull();
+
+    // The kind of the unsaved file is still being read when the value is removed
+    props.value = blobURL;
+    flushSync();
+    props.value = '';
+    flushSync();
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 200);
+    });
+    expect(container.querySelector('img')).toBeNull();
+  });
+
   test('offers the reorder controls in a list', async () => {
     const onMove = vi.fn();
 
-    await renderItem('/uploads/photo.png', { index: 1, itemCount: 3, onMove });
+    await renderItem('/static/uploads/photo.png', { index: 1, itemCount: 3, onMove });
 
     await page.getByRole('button', { name: 'Reorder Item' }).element().focus();
     await userEvent.keyboard('{ArrowUp}');
@@ -253,7 +406,7 @@ describe('FileEditorItem', () => {
     const onDragStart = vi.fn();
     const onDragEnd = vi.fn();
 
-    const { container } = await renderItem('/uploads/photo.png', {
+    const { container } = await renderItem('/static/uploads/photo.png', {
       index: 1,
       itemCount: 3,
       onMove: vi.fn(),
@@ -271,7 +424,7 @@ describe('FileEditorItem', () => {
 
     item.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer }));
     expect(onDragStart).toHaveBeenCalledOnce();
-    expect(dataTransfer.getData('text/plain')).toBe('/uploads/photo.png');
+    expect(dataTransfer.getData('text/plain')).toBe('/static/uploads/photo.png');
 
     item.dispatchEvent(new DragEvent('dragend', { bubbles: true }));
     expect(onDragEnd).toHaveBeenCalledOnce();
@@ -292,7 +445,7 @@ describe('FileEditorItem', () => {
   });
 
   test('disables the actions while read-only', async () => {
-    await renderItem('/uploads/photo.png', {
+    await renderItem('/static/uploads/photo.png', {
       readonly: true,
       index: 0,
       itemCount: 2,

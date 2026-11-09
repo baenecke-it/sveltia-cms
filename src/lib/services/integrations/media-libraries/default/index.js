@@ -1,4 +1,6 @@
+import { isValidFileType } from '@sveltia/utils/file';
 import { isObject } from '@sveltia/utils/object';
+import mime from 'mime';
 
 import { getMediaLibraryOptions } from '$lib/services/integrations/media-libraries';
 import {
@@ -7,6 +9,7 @@ import {
   SUPPORTED_IMAGE_TYPES,
   SUPPORTED_IMAGE_TYPES_WITH_HEIC,
 } from '$lib/services/utils/media/image';
+import { isAnimatedImage } from '$lib/services/utils/media/image/animation';
 import { sniffRasterImageFormat } from '$lib/services/utils/media/image/sniff';
 import { optimizeSVG, transformImage } from '$lib/services/utils/media/image/transform';
 
@@ -19,6 +22,14 @@ import { optimizeSVG, transformImage } from '$lib/services/utils/media/image/tra
  * RasterImageTransformationOptions,
  * } from '$lib/types/public';
  */
+
+/**
+ * Normalize the `filename_template` media library option.
+ * @param {unknown} template Option value.
+ * @returns {string | undefined} Template, or `undefined` if it’s not a non-blank string.
+ */
+export const normalizeFileNameTemplate = (template) =>
+  typeof template === 'string' && template.trim() ? template.trim() : undefined;
 
 /**
  * Get normalized default media library options.
@@ -34,6 +45,7 @@ export const getDefaultMediaLibraryOptions = ({ fieldConfig } = {}) => {
     max_file_size: maxSize,
     multiple,
     slugify_filename: slugify,
+    filename_template: fileNameTemplate,
     transformations,
   } = typeof options === 'boolean' ? {} : (options?.config ?? {});
 
@@ -43,6 +55,7 @@ export const getDefaultMediaLibraryOptions = ({ fieldConfig } = {}) => {
       max_file_size: typeof maxSize === 'number' && Number.isInteger(maxSize) ? maxSize : Infinity,
       multiple: typeof multiple === 'boolean' ? multiple : false,
       slugify_filename: typeof slugify === 'boolean' ? slugify : false,
+      filename_template: normalizeFileNameTemplate(fileNameTemplate),
       transformations: isObject(transformations) ? transformations : undefined,
     },
   };
@@ -98,6 +111,39 @@ export const getAcceptedImageTypes = (transformations) =>
   canConvertHEIC(transformations) ? SUPPORTED_IMAGE_TYPES_WITH_HEIC : SUPPORTED_IMAGE_TYPES;
 
 /**
+ * Get the file types a File/Image field or an asset picker accepts, as the value of the `accept`
+ * attribute of a file input.
+ * @param {object} args Arguments.
+ * @param {string} [args.accept] File types configured with the `accept` option, which take
+ * precedence.
+ * @param {boolean} args.image Whether images are picked, in which case the image types are given,
+ * so the asset browser only offers images.
+ * @param {FileTransformations | undefined} args.transformations File transformation options. HEIC
+ * photos are accepted only if they’re converted on upload.
+ * @returns {string | undefined} Comma-separated file types, or `undefined` if any file is accepted.
+ */
+export const getAcceptedFileTypes = ({ accept, image, transformations }) =>
+  accept ?? (image ? getAcceptedImageTypes(transformations).join(',') : undefined);
+
+/**
+ * Check whether a file or an asset is one of the given file types, matched by extension or MIME
+ * type the same way the browser matches the `accept` attribute of a file input.
+ * @param {{ name: string, type?: string }} file File or asset. An asset has no type, and a file may
+ * come with an empty one, so the MIME type of the file extension is used then.
+ * @param {string | undefined} accept Comma-separated file types, as given by
+ * {@link getAcceptedFileTypes}. Any file is accepted if it’s `undefined` or blank.
+ * @returns {boolean} Result.
+ */
+export const isAcceptedFile = ({ name, type }, accept) =>
+  isValidFileType(
+    /** @type {File} */ ({ name, type: type || mime.getType(name) || '' }),
+    (accept ?? '')
+      .split(',')
+      .map((specifier) => specifier.trim())
+      .filter(Boolean),
+  );
+
+/**
  * Process the given file by applying a transformation if available.
  * @param {File} file Original file.
  * @param {FileTransformations} transformations File transformation options. The options are
@@ -137,7 +183,9 @@ export const transformFile = async (file, transformations) => {
     (declaredFormat ? formatTransformations[declaredFormat] : undefined) ??
     transformations.raster_image;
 
-  if (!transformation) {
+  // An animated GIF, WebP or PNG would be flattened to its first frame, as the browser decodes no
+  // more, so it’s uploaded as is
+  if (!transformation || (await isAnimatedImage(file, sourceFormat))) {
     return file;
   }
 

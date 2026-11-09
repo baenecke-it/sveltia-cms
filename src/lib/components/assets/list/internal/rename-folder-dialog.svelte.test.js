@@ -3,7 +3,11 @@ import { page } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
 import { renameSubfolder } from '$lib/services/assets/data/subfolder';
-import { globalAssetFolder, selectedAssetFolder } from '$lib/services/assets/folders';
+import {
+  allAssetFolders,
+  globalAssetFolder,
+  selectedAssetFolder,
+} from '$lib/services/assets/folders';
 import { renamingSubfolder, selectedSubfolderPath } from '$lib/services/assets/subfolders';
 import { createMockAsset, initTestConfig, setAssets } from '$lib/test/config';
 import { waitForToastsToHide } from '$lib/test/toast';
@@ -87,6 +91,36 @@ describe('RenameFolderDialog', () => {
     await expect.poll(() => renamingSubfolder.current).toBeUndefined();
   });
 
+  test('refuses the name of a folder leading to another asset folder nested in the directory', async () => {
+    const folders = allAssetFolders.current;
+
+    // A collection’s own folder nested in the global one, which is browsed as a folder of its own
+    allAssetFolders.current = [
+      ...folders,
+      /** @type {import('$lib/types/private').AssetFolderInfo} */ ({
+        ...globalAssetFolder.current,
+        collectionName: 'posts',
+        internalPath: 'static/uploads/projects',
+      }),
+    ];
+    renamingSubfolder.current = subfolder;
+
+    try {
+      await render(RenameFolderDialog);
+
+      const dialog = page.getByRole('dialog', { name: 'Rename \u20682024\u2069' });
+
+      // The folder would otherwise be merged into the collection’s
+      await dialog.getByRole('textbox', { name: 'Folder Name' }).fill('Projects');
+      await expect
+        .element(dialog.getByText('A folder or file with this name already exists here.'))
+        .toBeVisible();
+      await expect.element(dialog.getByRole('button', { name: 'Rename' })).toBeDisabled();
+    } finally {
+      allAssetFolders.current = folders;
+    }
+  });
+
   test('lets go of the folder when cancelled', async () => {
     renamingSubfolder.current = { name: '2023', path: 'static/uploads/2023' };
 
@@ -133,6 +167,33 @@ describe('RenameFolderDialog', () => {
         )
         .toBe('error Error Couldn’t rename the folder.');
       await waitForToastsToHide();
+    } finally {
+      error.mockRestore();
+    }
+  }, 15000);
+
+  test('says nothing when the commit is cancelled', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    vi.mocked(renameSubfolder).mockRejectedValue(new Error('commit_cancelled'));
+    renamingSubfolder.current = { name: 'empty', path: 'static/uploads/empty' };
+
+    try {
+      await render(RenameFolderDialog);
+
+      const dialog = page.getByRole('dialog');
+
+      await dialog.getByRole('textbox', { name: 'Folder Name' }).fill('void');
+      await dialog.getByRole('button', { name: 'Rename' }).click();
+
+      await vi.waitFor(() => expect(renameSubfolder).toHaveBeenCalledOnce());
+      await expect
+        .poll(() => document.querySelector('.sui.toast:not([aria-hidden="true"]) .sui.alert'))
+        .toBeNull();
+      expect(
+        document.querySelector('.sui.toast:not([aria-hidden="true"]) .sui.alert.error'),
+      ).toBeNull();
+      expect(error).not.toHaveBeenCalled();
     } finally {
       error.mockRestore();
     }

@@ -2,17 +2,22 @@ import { unique } from '@sveltia/utils/array';
 import { getPathInfo } from '@sveltia/utils/file';
 import { escapeRegExp } from '@sveltia/utils/string';
 
-import { allAssets, getAssetByPath, isRelativePath } from '$lib/services/assets';
+import { getAssetByPath, isRelativePath } from '$lib/services/assets';
 import { getAssetFolder, getAssetFoldersByPath } from '$lib/services/assets/folders';
-import { getMediaFieldSource, getMediaFieldURL } from '$lib/services/assets/info';
+import { revokeBlobURLIfNeeded } from '$lib/services/assets/info';
 import { canCreateThumbnail } from '$lib/services/assets/kinds';
+import { getMediaFieldSource, getMediaFieldURL } from '$lib/services/assets/media-field';
+import { allAssets } from '$lib/services/assets/state';
 import { getCollection } from '$lib/services/contents/collection';
 import { getEntriesByCollection } from '$lib/services/contents/collection/entries';
 import { isCollectionIndexFile } from '$lib/services/contents/collection/entries/index-file';
+import { isArrayFileCollection } from '$lib/services/contents/collection/predicates';
+import { getOwnedEntryFolderPath } from '$lib/services/contents/draft/save/assets';
 import { fillEntryPathTemplate } from '$lib/services/contents/entry';
 import { getField } from '$lib/services/contents/entry/fields';
 import { MEDIA_FIELD_TYPES } from '$lib/services/contents/fields';
-import { getOrCreate } from '$lib/services/utils/cache';
+import { getOrCreate, memoizeOnSource } from '$lib/services/utils/cache';
+import { getEntryAssetVersion } from '$lib/services/workflow/assets';
 
 /**
  * @import { Asset, Entry, InternalEntryCollection } from '$lib/types/private';
@@ -42,10 +47,20 @@ const thumbnailFieldRegexCache = new Map();
 export const isThumbnailPath = (name) => name.startsWith('/');
 
 /**
- * Get the given entry’s thumbnail URL.
+ * An entry’s thumbnail.
+ * @typedef {object} EntryThumbnail
+ * @property {string} src Image URL.
+ * @property {boolean} owned Whether `src` is an object URL created for this thumbnail alone, which
+ * the caller has to release once it’s no longer displayed. A URL found in a field value or the
+ * asset’s public URL is not.
+ */
+
+/**
+ * Get the given entry’s thumbnail.
  * @param {InternalEntryCollection} collection Entry’s collection.
  * @param {Entry} entry Entry.
- * @returns {Promise<string | undefined>} URL.
+ * @returns {Promise<EntryThumbnail | undefined>} Thumbnail. Use {@link loadEntryThumbnail} to
+ * display it, which releases the object URL for you.
  */
 export const getEntryThumbnail = async (collection, entry) => {
   const {
@@ -87,12 +102,12 @@ export const getEntryThumbnail = async (collection, entry) => {
       return /** @type {ThumbnailCandidate[]} */ ([{ value }]);
     }
 
-    // Support a wildcard in the key path, e.g. `images.*.src`
+    // Support wildcards in the key path, e.g. `images.*.src` or `sections.*.images.*`
     if (name.includes('*')) {
       const regex = getOrCreate(
         thumbnailFieldRegexCache,
         name,
-        () => new RegExp(`^${escapeRegExp(name).replace('\\*', '.+')}$`),
+        () => new RegExp(`^${escapeRegExp(name).replaceAll('\\*', '.+')}$`),
       );
 
       return /** @type {string[]} */ (contentKeys)
@@ -106,23 +121,81 @@ export const getEntryThumbnail = async (collection, entry) => {
   // Cannot use `Promise.all` or `Promise.any` here because we need the first available URL
   // eslint-disable-next-line no-restricted-syntax
   for (const { value, keyPath } of candidates) {
-    const args = { value, entry, collectionName, typedKeyPath: keyPath };
+    const args = { value, entry, collectionName, typedKeyPath: keyPath, locale };
     const { asset } = (value && getMediaFieldSource(args)) || {};
 
     // Skip a file without a thumbnail, like a document, rather than show it as a broken image, and
     // try the next candidate instead
-    const url =
+    const src =
       value && (!asset || canCreateThumbnail(asset))
         ? // eslint-disable-next-line no-await-in-loop
           await getMediaFieldURL({ ...args, thumbnail: true })
         : undefined;
 
-    if (url) {
-      return url;
+    if (src) {
+      // For an asset, `getMediaFieldURL()` returns either a thumbnail object URL of its own, or the
+      // asset’s public URL. For anything else, it returns the field value as is
+      return { src, owned: !!asset && src.startsWith('blob:') };
     }
   }
 
   return undefined;
+};
+
+/**
+ * Load the given entry’s thumbnail for display, and release it once it’s no longer needed. Every
+ * thumbnail comes with an object URL of its own, so an entry list that renders its rows again, or
+ * is left, would otherwise keep a thumbnail in memory for each time it was shown. Call it from an
+ * effect and return the result, so the thumbnail is released when the effect reruns or is
+ * destroyed:
+ * `$effect(() => loadEntryThumbnail(collection, entry, (src) => { thumbnail = src; }))`.
+ * @param {InternalEntryCollection} collection Entry’s collection.
+ * @param {Entry} entry Entry.
+ * @param {(src: string | undefined) => void} onLoad Function called with the thumbnail URL once
+ * it’s loaded, and with `undefined` when it’s released, so the image stops pointing at it. It’s not
+ * called for an entry without a thumbnail, or when the thumbnail can’t be loaded.
+ * @returns {() => void} Function to release the thumbnail.
+ */
+export const loadEntryThumbnail = (collection, entry, onLoad) => {
+  let released = false;
+  /** @type {EntryThumbnail | undefined} */
+  let thumbnail;
+
+  getEntryThumbnail(collection, entry).then(
+    (result) => {
+      if (released) {
+        // Nothing displays a thumbnail that arrives too late, so let it go right away
+        if (result?.owned) {
+          revokeBlobURLIfNeeded(result.src);
+        }
+
+        return;
+      }
+
+      thumbnail = result;
+
+      if (result) {
+        onLoad(result.src);
+      }
+    },
+    () => {
+      // A missing or undecodable image just leaves the entry without a thumbnail
+    },
+  );
+
+  return () => {
+    released = true;
+
+    if (thumbnail) {
+      onLoad(undefined);
+
+      // The revocation waits for the next frame and skips a URL an element still displays, so an
+      // image being removed along with the row doesn’t lose its source midway
+      if (thumbnail.owned) {
+        revokeBlobURLIfNeeded(thumbnail.src);
+      }
+    }
+  };
 };
 
 /**
@@ -139,9 +212,8 @@ const entryIdsByFolderCache = new WeakMap();
  */
 const getEntryIdsByFolder = (collectionName) => {
   const entries = getEntriesByCollection(collectionName);
-  let index = entryIdsByFolderCache.get(entries);
 
-  if (!index) {
+  return getOrCreate(entryIdsByFolderCache, entries, () => {
     /** @type {Map<string, Set<string>>} */
     const map = new Map();
 
@@ -155,11 +227,8 @@ const getEntryIdsByFolder = (collectionName) => {
       });
     });
 
-    index = map;
-    entryIdsByFolderCache.set(entries, index);
-  }
-
-  return index;
+    return map;
+  });
 };
 
 /**
@@ -173,23 +242,9 @@ const getEntryIdsByFolder = (collectionName) => {
  * Index of `allAssets` by folder, rebuilt when the store is replaced. See
  * {@link getAssetsBelowFolder}.
  */
-const assetsByFolderCache = {
-  source: /** @type {Asset[] | undefined} */ (undefined),
-  /** @type {Map<string, IndexedAsset[]>} */
-  map: new Map(),
-};
-
-/**
- * Get the assets stored in the given folder or any of its subfolders. Every asset is indexed under
- * its own folder and each folder above it, so this is a lookup rather than a scan of the whole
- * asset library — which would otherwise be repeated for every entry being deleted at once.
- * @param {string} folderPath Folder path.
- * @returns {IndexedAsset[]} Assets, in the order of `allAssets`.
- */
-const getAssetsBelowFolder = (folderPath) => {
-  const { current: _allAssets } = allAssets;
-
-  if (_allAssets !== assetsByFolderCache.source) {
+const getAssetsByFolder = memoizeOnSource(
+  () => allAssets.current,
+  (_allAssets) => {
     /** @type {Map<string, IndexedAsset[]>} */
     const map = new Map();
 
@@ -212,12 +267,18 @@ const getAssetsBelowFolder = (folderPath) => {
       }
     });
 
-    assetsByFolderCache.source = _allAssets;
-    assetsByFolderCache.map = map;
-  }
+    return map;
+  },
+);
 
-  return assetsByFolderCache.map.get(folderPath) ?? [];
-};
+/**
+ * Get the assets stored in the given folder or any of its subfolders. Every asset is indexed under
+ * its own folder and each folder above it, so this is a lookup rather than a scan of the whole
+ * asset library — which would otherwise be repeated for every entry being deleted at once.
+ * @param {string} folderPath Folder path.
+ * @returns {IndexedAsset[]} Assets, in the order of `allAssets`.
+ */
+const getAssetsBelowFolder = (folderPath) => getAssetsByFolder().get(folderPath) ?? [];
 
 /**
  * Get a list of assets associated with the given entry.
@@ -240,17 +301,18 @@ export const getAssociatedAssets = ({ entry, collectionName, fileName, relative 
 
   const assets = /** @type {Asset[]} */ (
     unique(
-      Object.values(locales)
-        .flatMap(({ content }) =>
+      Object.entries(locales)
+        .flatMap(([locale, { content }]) =>
           Object.entries(content ?? {}).map(([keyPath, value]) => {
             if (typeof value === 'string' && (relative ? isRelativePath(value) : true)) {
-              const widget = getField({ collectionName, keyPath, isIndexFile })?.widget ?? 'string';
+              const widget =
+                getField({ collectionName, fileName, keyPath, isIndexFile })?.widget ?? 'string';
 
               if (!MEDIA_FIELD_TYPES.includes(widget)) {
                 return undefined;
               }
 
-              const asset = getAssetByPath({ value, entry, collectionName, fileName });
+              const asset = getAssetByPath({ value, entry, collectionName, fileName, locale });
 
               if (
                 asset &&
@@ -275,11 +337,13 @@ export const getAssociatedAssets = ({ entry, collectionName, fileName, relative 
   // Add orphaned/unused entry-relative assets
   if (relative && getAssetFolder({ collectionName, fileName })?.entryRelative) {
     // With the `multiple_folders` and `multiple_root_folders` i18n structures, each locale has a
-    // folder of its own, so the entry’s assets are spread across all of them
+    // folder of its own, so the entry’s assets are spread across all of them. Only a folder the
+    // entry occupies by itself counts: when entries are files sharing a folder, the other files in
+    // it can belong to any of them, so none of those is this entry’s to move or delete
     const entryFolderPaths = new Set(
       /** @type {string[]} */ (
         Object.values(entry.locales)
-          .map(({ path }) => getPathInfo(path).dirname)
+          .map(({ path }) => getOwnedEntryFolderPath(collection, path))
           .filter((dirPath) => dirPath !== undefined)
       ),
     );
@@ -302,7 +366,8 @@ export const getAssociatedAssets = ({ entry, collectionName, fileName, relative 
         while (dirPath.length > entryFolderPath.length) {
           const entryIds = entryIdsByFolder.get(dirPath);
 
-          if (entryIds && [...entryIds].some((id) => id !== entry.id)) {
+          // A set in the index is never empty, so it holds another entry unless it holds just this
+          if (entryIds && (entryIds.size > 1 || !entryIds.has(entry.id))) {
             return true;
           }
 
@@ -324,3 +389,29 @@ export const getAssociatedAssets = ({ entry, collectionName, fileName, relative 
 
   return assets;
 };
+
+/**
+ * Get the assets stored alongside the given entry, which are moved or removed with it. Only a
+ * collection whose asset folder is entry-relative stores assets with its entries.
+ * @param {object} args Arguments.
+ * @param {Entry} args.entry Entry.
+ * @param {string} args.collectionName Name of a collection that the entry belongs to.
+ * @param {string} [args.fileName] Collection file name. File/singleton collection only.
+ * @returns {Asset[]} Assets, or an empty list unless the collection stores them with the entry.
+ * The entries of a collection storing all of them in one file share the folder of the file, and an
+ * asset there can be used by any of them, so none of the assets belongs to one entry alone. Only
+ * the versions the entry has are returned: a file another pull request put at the same path isn’t
+ * the entry’s to remove.
+ */
+export const getEntryRelativeAssets = ({ entry, collectionName, fileName }) =>
+  getAssetFolder({ collectionName, fileName })?.entryRelative &&
+  !isArrayFileCollection(getCollection(collectionName))
+    ? /** @type {Asset[]} */ ([
+        // Two versions of a file can map to the same asset, so the list is deduplicated again
+        ...new Set(
+          getAssociatedAssets({ entry, collectionName, fileName, relative: true })
+            .map((asset) => getEntryAssetVersion(asset, entry))
+            .filter(Boolean),
+        ),
+      ])
+    : [];

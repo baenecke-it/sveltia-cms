@@ -1,12 +1,18 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { cmsConfig } from '$lib/services/config';
 
 // Mock dependencies
 const mockLoadFiles = vi.fn();
 const mockReadFile = vi.fn();
+const mockGetScopedRootDirHandle = vi.fn(async (handle) => handle);
 const mockSaveChanges = vi.fn();
 const mockInit = vi.fn();
+const mockGetLocalGitStatus = vi.fn();
+const mockSaveAndCommitChanges = vi.fn();
+const mockClearLocalGitCache = vi.fn();
+/** @type {Record<string, any>} */
+const mockPrefs = {};
 // Shared mock functions for IndexedDB instances — controlled by individual tests
 const mockDBGet = vi.fn();
 const mockDBSet = vi.fn();
@@ -32,18 +38,39 @@ vi.mock('@sveltia/utils/storage', () => {
   };
 });
 
-vi.mock('$lib/services/backends/fs/shared/files', () => ({
-  loadFiles: mockLoadFiles,
-  readFile: mockReadFile,
+vi.mock('$lib/services/backends/fs/shared/save', () => ({
   saveChanges: mockSaveChanges,
+}));
+
+vi.mock('$lib/services/backends/fs/git', () => ({
+  clearLocalGitCache: mockClearLocalGitCache,
+  getLocalGitStatus: mockGetLocalGitStatus,
+  saveAndCommitChanges: mockSaveAndCommitChanges,
+}));
+
+vi.mock('$lib/services/user/prefs.svelte', () => ({
+  prefs: mockPrefs,
+}));
+
+vi.mock('$lib/services/backends/fs/shared/load', () => ({
+  loadFiles: mockLoadFiles,
+}));
+
+vi.mock('$lib/services/backends/fs/shared/handles', () => ({
+  readFile: mockReadFile,
+  getScopedRootDirHandle: mockGetScopedRootDirHandle,
 }));
 
 vi.mock('$lib/services/config', () => ({
   cmsConfig: { current: undefined },
 }));
 
-vi.mock('$lib/services/backends', () => ({
-  allBackendServices: {
+vi.mock('@sveltia/i18n', async () =>
+  (await import('$lib/test/i18n')).createI18nMock({ values: true }),
+);
+
+vi.mock('$lib/services/backends/git/services', () => ({
+  gitBackendServices: {
     github: { init: mockInit },
     gitlab: { init: mockInit },
   },
@@ -634,6 +661,52 @@ describe('Local Backend Service', () => {
       expect(result).toEqual({ backendName: 'local' });
     });
 
+    it('should read and write in the configured root directory', async () => {
+      const scopedDirHandle = { name: 'site' };
+
+      mockDirHandle.getDirectoryHandle.mockResolvedValue({});
+      mockGetScopedRootDirHandle.mockResolvedValueOnce(scopedDirHandle);
+      mockDBGet.mockResolvedValue(null);
+      /** @type {any} */ (global.window).showDirectoryPicker.mockResolvedValue(mockDirHandle);
+
+      const service = localBackend.default;
+
+      service.init();
+      await service.signIn({ auto: false });
+      await service.fetchFiles();
+
+      // The repository root picked by the user is the one scoped
+      expect(mockGetScopedRootDirHandle).toHaveBeenCalledWith(mockDirHandle);
+      expect(mockLoadFiles).toHaveBeenCalledWith(scopedDirHandle, expect.anything());
+    });
+
+    it('should throw a localized error when the root directory doesn’t exist', async () => {
+      const notFoundError = new Error('Directory not found');
+
+      notFoundError.name = 'NotFoundError';
+      cmsConfig.current = /** @type {any} */ ({ backend: { name: 'github', root_dir: 'apps/x' } });
+      mockInit.mockReturnValue({ service: 'github', owner: 'owner', repo: 'repo' });
+      mockDirHandle.getDirectoryHandle.mockResolvedValue({});
+      mockGetScopedRootDirHandle.mockRejectedValueOnce(notFoundError);
+      mockDBGet.mockResolvedValue(null);
+      /** @type {any} */ (global.window).showDirectoryPicker.mockResolvedValue(mockDirHandle);
+
+      const service = localBackend.default;
+
+      service.init();
+
+      // Not a `NotFoundError`, which would be reported as a directory that isn’t a project root
+      await expect(service.signIn({ auto: false })).rejects.toThrow(
+        expect.objectContaining({
+          name: 'Error',
+          message: 'Failed to open the root directory.',
+          cause: expect.objectContaining({
+            message: 'root_dir_not_found:{"repo":"owner/repo","dir":"apps/x"}',
+          }),
+        }),
+      );
+    });
+
     it('should throw error when handle cannot be acquired', async () => {
       mockDBGet.mockResolvedValue(null);
       /** @type {any} */ (global.window).showDirectoryPicker.mockResolvedValue(null);
@@ -658,6 +731,19 @@ describe('Local Backend Service', () => {
 
       // Test verifies the function doesn't throw
       expect(service).toBeDefined();
+      // The cached Git index is forgotten
+      expect(mockClearLocalGitCache).toHaveBeenCalled();
+    });
+
+    it('should forget the Git index even if the directory handle can’t be deleted', async () => {
+      const service = localBackend.default;
+
+      service.init();
+      mockDBDelete.mockRejectedValueOnce(new Error('IndexedDB error'));
+
+      await expect(service.signOut()).resolves.toBeUndefined();
+
+      expect(mockClearLocalGitCache).toHaveBeenCalled();
     });
 
     it('should handle signOut when no DB is initialized', async () => {
@@ -741,6 +827,8 @@ describe('Local Backend Service', () => {
 
       mockDBGet.mockResolvedValue(null);
       mockSaveChanges.mockResolvedValue(mockResults);
+      // Git commits are turned off
+      mockPrefs.localGitCommits = false;
 
       const service = localBackend.default;
 
@@ -750,8 +838,117 @@ describe('Local Backend Service', () => {
 
       const result = await service.commitChanges(changes);
 
+      delete mockPrefs.localGitCommits;
+      expect(mockSaveAndCommitChanges).not.toHaveBeenCalled();
+      // The cached Git index isn’t needed while commits are off
+      expect(mockClearLocalGitCache).toHaveBeenCalled();
+
       // Verify the result matches expected mock results
       expect(result).toEqual(mockResults);
+    });
+
+    describe('with Git commits enabled', () => {
+      /**
+       * Sign in with the mock directory handle.
+       * @returns {Promise<any>} Service.
+       */
+      const signIn = async () => {
+        mockDirHandle.requestPermission.mockResolvedValue('granted');
+        mockDirHandle.getDirectoryHandle.mockResolvedValue({});
+        // @ts-ignore - Mock setup
+        global.window = /** @type {any} */ ({
+          showDirectoryPicker: /** @type {any} */ (vi.fn().mockResolvedValue(mockDirHandle)),
+        });
+        mockDBGet.mockResolvedValue(null);
+
+        const service = localBackend.default;
+
+        service.init();
+        await service.signIn({ auto: false });
+
+        return service;
+      };
+
+      beforeEach(() => {
+        mockPrefs.localGitCommits = true;
+      });
+
+      afterEach(() => {
+        delete mockPrefs.localGitCommits;
+      });
+
+      it('saves and commits the changes to the picked repository', async () => {
+        const changes = [{ action: 'create', path: 'test.md', data: 'test content' }];
+        const options = { commitType: 'create' };
+        const saveResults = { sha: 'pseudo', files: {} };
+
+        mockSaveChanges.mockResolvedValue(saveResults);
+        mockSaveAndCommitChanges.mockImplementation(async ({ save }) => ({
+          ...(await save()),
+          sha: 'abc123',
+        }));
+
+        const service = await signIn();
+        const result = await service.commitChanges(changes, options);
+
+        expect(mockSaveAndCommitChanges).toHaveBeenCalledWith({
+          repoRootDirHandle: mockDirHandle,
+          changes,
+          options,
+          save: expect.any(Function),
+        });
+        expect(mockSaveChanges).toHaveBeenCalledWith(mockDirHandle, changes);
+        expect(result).toEqual({ sha: 'abc123', files: {} });
+      });
+
+      it('only saves the changes while the preference is unset, as it’s off by default', async () => {
+        delete mockPrefs.localGitCommits;
+        mockSaveChanges.mockResolvedValue({ sha: 'pseudo', files: {} });
+
+        const service = await signIn();
+
+        expect(await service.commitChanges([], { commitType: 'create' })).toEqual({
+          sha: 'pseudo',
+          files: {},
+        });
+        expect(mockSaveAndCommitChanges).not.toHaveBeenCalled();
+      });
+
+      it('only saves the changes before signing in', async () => {
+        const changes = [{ action: 'create', path: 'test.md', data: 'test content' }];
+
+        mockSaveChanges.mockResolvedValue({ sha: 'pseudo', files: {} });
+
+        await localBackend.default.commitChanges(changes, { commitType: 'create' });
+
+        expect(mockSaveAndCommitChanges).not.toHaveBeenCalled();
+        expect(mockSaveChanges).toHaveBeenCalledWith(undefined, changes);
+      });
+    });
+  });
+
+  describe('checkLocalGitStatus', () => {
+    it('returns `undefined` before signing in', async () => {
+      expect(await localBackend.checkLocalGitStatus()).toBeUndefined();
+      expect(mockGetLocalGitStatus).not.toHaveBeenCalled();
+    });
+
+    it('checks the picked repository', async () => {
+      const status = { ready: true, branch: 'refs/heads/main' };
+
+      mockGetLocalGitStatus.mockResolvedValue(status);
+      mockDirHandle.requestPermission.mockResolvedValue('granted');
+      mockDirHandle.getDirectoryHandle.mockResolvedValue({});
+      // @ts-ignore - Mock setup
+      global.window = /** @type {any} */ ({
+        showDirectoryPicker: /** @type {any} */ (vi.fn().mockResolvedValue(mockDirHandle)),
+      });
+      mockDBGet.mockResolvedValue(null);
+      localBackend.default.init();
+      await localBackend.default.signIn({ auto: false });
+
+      expect(await localBackend.checkLocalGitStatus()).toBe(status);
+      expect(mockGetLocalGitStatus).toHaveBeenCalledWith(mockDirHandle);
     });
   });
 

@@ -1,17 +1,22 @@
 // @ts-nocheck
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { TEMPLATE_TAG_REPLACE_REGEX } from '$lib/services/common/template/constants';
+import { getEntriesInCollectionFolder } from '$lib/services/contents/collection/entries';
+import { getUnpublishedEntriesByCollection } from '$lib/services/workflow';
 
 import {
   getCanonicalSlug,
   getFillSlugOptions,
   getLocalizedSlug,
   getLocalizedSlugs,
+  getNewEntryDirPath,
+  getNextSlugNumber,
   getRandomValues,
   getSlugs,
   getSlugTemplate,
   hasLocalizedSlugs,
+  isSlugAutoNumbered,
   resolveBlobURLs,
 } from './slugs';
 
@@ -27,6 +32,16 @@ vi.mock('$lib/services/common/template', () => ({
       (match, field) => options.content?.[field] || '',
     );
   }),
+}));
+
+vi.mock('$lib/services/contents/collection/entries', async (importOriginal) => ({
+  ...(await importOriginal()),
+  getEntriesInCollectionFolder: vi.fn(() => []),
+}));
+
+vi.mock('$lib/services/workflow', async (importOriginal) => ({
+  ...(await importOriginal()),
+  getUnpublishedEntriesByCollection: vi.fn(() => []),
 }));
 
 vi.mock('$lib/services/contents/collection/entries/index-file', () => ({
@@ -673,6 +688,63 @@ describe('draft/slugs', () => {
     });
   });
 
+  describe('getNewEntryDirPath', () => {
+    const collection = {
+      _type: 'entry',
+      folder: 'content/pages',
+      fields: [],
+      nested: { depth: 5 },
+      meta: { path: { widget: 'string' } },
+      _i18n: { defaultLocale: 'en', structureMap: {} },
+    };
+
+    it('should return the folder chosen for a new entry named after its slug', () => {
+      expect(getNewEntryDirPath({ collection, isNew: true, currentPath: '/docs/' })).toBe('docs');
+      // Clearing the folder of a duplicated entry moves it up to the collection folder
+      expect(
+        getNewEntryDirPath({ collection, isNew: true, originalPath: 'docs', currentPath: '' }),
+      ).toBe('');
+    });
+
+    it('should return `undefined` when the slug isn’t compared within a folder', () => {
+      expect(getNewEntryDirPath({ collection, isNew: false, currentPath: 'docs' })).toBeUndefined();
+      expect(getNewEntryDirPath({ collection, isNew: true, currentPath: '' })).toBeUndefined();
+      expect(getNewEntryDirPath({ collection, isNew: true })).toBeUndefined();
+      // Every entry shares one file name, so the entry gets a folder of its own
+      expect(
+        getNewEntryDirPath({
+          collection: { ...collection, meta: { path: { widget: 'string', index_file: 'index' } } },
+          isNew: true,
+          currentPath: 'docs',
+        }),
+      ).toBeUndefined();
+    });
+
+    it('should be passed to the template for a new entry’s slug', async () => {
+      const { fillTemplate } = await import('$lib/services/common/template');
+
+      vi.mocked(fillTemplate).mockReturnValue('intro');
+
+      getSlugs({
+        draft: {
+          isNew: true,
+          collection: { ...collection, slug: '{{title}}' },
+          currentPath: 'docs',
+          currentSlugs: {},
+          slugEditor: {},
+          currentValues: { en: { title: 'Intro' } },
+          currentLocales: { en: true },
+          files: {},
+        },
+      });
+
+      expect(fillTemplate).toHaveBeenCalledWith(
+        '{{title}}',
+        expect.objectContaining({ dirPath: 'docs' }),
+      );
+    });
+  });
+
   describe('getLocalizedSlug (internal)', () => {
     it('should return slug for new entry with localized content', async () => {
       const { fillTemplate } = vi.mocked(await import('$lib/services/common/template'));
@@ -711,6 +783,38 @@ describe('draft/slugs', () => {
           locale: 'fr',
         }),
       );
+    });
+
+    it('should keep the default locale value of a field missing from the locale', async () => {
+      const { fillTemplate } = vi.mocked(await import('$lib/services/common/template'));
+
+      const draft = {
+        isNew: true,
+        collection: {
+          _type: 'entry',
+          identifier_field: 'title',
+          slug: { template: '{{title}}-{{category}}', i18n: true },
+          _i18n: { defaultLocale: 'en' },
+        },
+        collectionFile: undefined,
+        currentSlugs: {},
+        slugEditor: {},
+        currentValues: {
+          en: { title: 'Hello', category: 'news' },
+          // `category` isn’t localized, so it only exists in the default locale
+          fr: { title: 'Bonjour' },
+        },
+        files: {},
+        isIndexFile: false,
+      };
+
+      getLocalizedSlug({ draft, locale: 'fr', localizingKeyPaths: ['title', 'category'] });
+
+      expect(fillTemplate.mock.lastCall?.[1].content).toEqual({
+        title: 'Bonjour',
+        category: 'news',
+        _slug: undefined,
+      });
     });
 
     it('should return existing slug for existing entry', () => {
@@ -948,6 +1052,52 @@ describe('draft/slugs', () => {
         en: 'my-article',
         fr: 'mon-article',
       });
+    });
+
+    it('should localize field tags with the localize flag among other transformations', async () => {
+      const { fillTemplate } = vi.mocked(await import('$lib/services/common/template'));
+
+      fillTemplate.mockImplementation((template, options) =>
+        options.locale === 'fr' ? 'mon-article' : 'my-article',
+      );
+
+      const template =
+        '{{title | upper | localize}}-{{fields.summary | localize | lower}}-{{author}}';
+
+      const draft = {
+        collection: {
+          _type: 'entry',
+          slug: template,
+          _i18n: {
+            defaultLocale: 'en',
+            i18nEnabled: true,
+            structureMap: { i18nSingleFile: false },
+          },
+        },
+        collectionFile: undefined,
+        currentLocales: { en: true, fr: true },
+        currentSlugs: {},
+        slugEditor: {},
+        currentValues: {
+          en: { title: 'My Article', summary: 'Summary', author: 'Me' },
+          fr: { title: 'Mon Article', summary: 'Résumé', author: 'Moi' },
+        },
+        files: {},
+        isIndexFile: false,
+        isNew: true,
+      };
+
+      expect(getLocalizedSlugs({ draft, defaultLocaleSlug: 'my-article' })).toEqual({
+        en: 'my-article',
+        fr: 'mon-article',
+      });
+      expect(fillTemplate).toHaveBeenLastCalledWith(
+        template,
+        expect.objectContaining({
+          locale: 'fr',
+          content: { title: 'Mon Article', summary: 'Résumé', author: 'Me', _slug: undefined },
+        }),
+      );
     });
 
     it('should localize every field tag with the i18n option of the slug', async () => {
@@ -1195,6 +1345,227 @@ describe('draft/slugs', () => {
           currentSlug: 'my-article',
         }),
       );
+    });
+  });
+
+  describe('auto-increment slugs', () => {
+    beforeEach(async () => {
+      const { fillTemplate } = vi.mocked(await import('$lib/services/common/template'));
+
+      // A typed-in slug fills the slug editor tag. Earlier tests leave a return value behind
+      fillTemplate.mockReset();
+      fillTemplate.mockImplementation((_template, { content }) => content._slug);
+    });
+
+    /**
+     * Create a draft of an entry in a collection whose slug is numbered.
+     * @param {object} [options] Draft properties to override.
+     * @returns {any} Draft.
+     */
+    const createDraft = (options = {}) => ({
+      isNew: true,
+      collectionName: 'posts',
+      collection: {
+        _type: 'entry',
+        name: 'posts',
+        slug: { auto_increment: true },
+        _i18n: {
+          defaultLocale: 'en',
+          i18nEnabled: false,
+          structureMap: {},
+          canonicalSlug: { key: 'translationKey', value: '{{slug}}' },
+        },
+      },
+      collectionFile: undefined,
+      fileName: undefined,
+      originalLocales: {},
+      currentLocales: { en: true },
+      currentSlugs: {},
+      currentValues: { en: { title: 'Hello' } },
+      slugEditor: { en: true },
+      files: {},
+      isIndexFile: false,
+      pendingEntries: [],
+      ...options,
+    });
+
+    describe('isSlugAutoNumbered', () => {
+      it('should be true unless a slug is typed in', () => {
+        expect(isSlugAutoNumbered({ draft: createDraft(), locale: 'en' })).toBe(true);
+        expect(
+          isSlugAutoNumbered({ draft: createDraft({ currentSlugs: { en: ' ' } }), locale: 'en' }),
+        ).toBe(true);
+        expect(
+          isSlugAutoNumbered({ draft: createDraft({ currentSlugs: { en: '9' } }), locale: 'en' }),
+        ).toBe(false);
+        expect(
+          isSlugAutoNumbered({ draft: createDraft({ currentSlugs: { _: '9' } }), locale: 'en' }),
+        ).toBe(false);
+      });
+
+      it('should ignore a typed-in slug with templateOnly or without the slug editor', () => {
+        expect(
+          isSlugAutoNumbered({
+            draft: createDraft({ currentSlugs: { en: '9' } }),
+            locale: 'en',
+            templateOnly: true,
+          }),
+        ).toBe(true);
+        expect(
+          isSlugAutoNumbered({
+            draft: createDraft({ currentSlugs: { en: '9' }, slugEditor: { en: false } }),
+            locale: 'en',
+          }),
+        ).toBe(true);
+      });
+
+      it('should be false without the option or outside an entry collection', () => {
+        const draft = createDraft();
+
+        expect(
+          isSlugAutoNumbered({
+            draft: { ...draft, collection: { ...draft.collection, slug: '{{title}}' } },
+            locale: 'en',
+          }),
+        ).toBe(false);
+        expect(
+          isSlugAutoNumbered({
+            draft: { ...draft, collection: { ...draft.collection, _type: 'file' } },
+            locale: 'en',
+          }),
+        ).toBe(false);
+      });
+    });
+
+    describe('getNextSlugNumber', () => {
+      it('should start from 1', () => {
+        expect(getNextSlugNumber({ draft: createDraft() })).toBe('1');
+        expect(getEntriesInCollectionFolder).toHaveBeenCalledWith('posts');
+        expect(getUnpublishedEntriesByCollection).toHaveBeenCalledWith('posts');
+      });
+
+      it('should come after the highest numeric slug, ignoring the others', () => {
+        vi.mocked(getEntriesInCollectionFolder).mockReturnValueOnce([
+          { slug: '3', locales: {} },
+          { slug: '12', locales: {} },
+          { slug: 'hello', locales: {} },
+          { slug: '20-draft', locales: {} },
+          { slug: 'docs/15', locales: {} },
+        ]);
+        vi.mocked(getUnpublishedEntriesByCollection).mockReturnValueOnce([
+          { slug: '9', locales: {} },
+        ]);
+
+        expect(getNextSlugNumber({ draft: createDraft() })).toBe('16');
+      });
+
+      it('should come after the numbers taken in another locale', () => {
+        vi.mocked(getEntriesInCollectionFolder).mockReturnValueOnce([
+          { slug: '2', locales: { en: { slug: '2' }, fr: { slug: '30' } } },
+        ]);
+
+        expect(getNextSlugNumber({ draft: createDraft() })).toBe('31');
+      });
+
+      it('should come after the pending entries of the same collection', () => {
+        vi.mocked(getEntriesInCollectionFolder).mockReturnValue([{ slug: '3', locales: {} }]);
+
+        const pendingEntries = [
+          { collectionName: 'posts', entry: { slug: '4', locales: {} } },
+          { collectionName: 'tags', entry: { slug: '50', locales: {} } },
+        ];
+
+        expect(getNextSlugNumber({ draft: createDraft({ pendingEntries }) })).toBe('5');
+        expect(getNextSlugNumber({ draft: createDraft(), pendingEntries })).toBe('5');
+        expect(
+          getNextSlugNumber({ draft: createDraft({ pendingEntries }), pendingEntries: [] }),
+        ).toBe('4');
+
+        vi.mocked(getEntriesInCollectionFolder).mockReturnValue([]);
+      });
+    });
+
+    describe('getSlugs', () => {
+      it('should number a new entry', () => {
+        vi.mocked(getEntriesInCollectionFolder).mockReturnValueOnce([{ slug: '7', locales: {} }]);
+
+        expect(getSlugs({ draft: createDraft() }).defaultLocaleSlug).toBe('8');
+      });
+
+      it('should number a new entry after the given pending entries', () => {
+        expect(
+          getSlugs({
+            draft: createDraft(),
+            pendingEntries: [{ collectionName: 'posts', entry: { slug: '1', locales: {} } }],
+          }).defaultLocaleSlug,
+        ).toBe('2');
+      });
+
+      it('should use a typed-in slug unless templateOnly is set', () => {
+        const draft = createDraft({ currentSlugs: { en: 'custom' } });
+
+        expect(getSlugs({ draft }).defaultLocaleSlug).toBe('custom');
+        expect(getSlugs({ draft, templateOnly: true }).defaultLocaleSlug).toBe('1');
+      });
+
+      it('should keep the slug of an existing entry', () => {
+        const draft = createDraft({ isNew: false, currentSlugs: { en: '4' } });
+
+        expect(getSlugs({ draft }).defaultLocaleSlug).toBe('4');
+        expect(getEntriesInCollectionFolder).not.toHaveBeenCalled();
+      });
+
+      it('should share the number with the other locales unless a slug is typed in', () => {
+        const draft = createDraft({
+          collection: {
+            _type: 'entry',
+            name: 'posts',
+            slug: { auto_increment: true, i18n: true },
+            _i18n: {
+              defaultLocale: 'en',
+              i18nEnabled: true,
+              structureMap: { i18nSingleFile: false, i18nSingleFileDefaultRoot: false },
+              canonicalSlug: { key: 'translationKey', value: '{{slug}}' },
+            },
+          },
+          currentLocales: { en: true, fr: true, de: true },
+          currentSlugs: { de: 'eins' },
+          slugEditor: { en: true, fr: true, de: true },
+        });
+
+        expect(getSlugs({ draft })).toEqual({
+          defaultLocaleSlug: '1',
+          localizedSlugs: { en: '1', fr: '1', de: 'eins' },
+          canonicalSlug: '1',
+        });
+      });
+
+      it('should give a locale enabled for an existing entry the entry’s number', () => {
+        const draft = createDraft({
+          isNew: false,
+          collection: {
+            _type: 'entry',
+            name: 'posts',
+            slug: { auto_increment: true, i18n: true },
+            _i18n: {
+              defaultLocale: 'en',
+              i18nEnabled: true,
+              structureMap: { i18nSingleFile: false, i18nSingleFileDefaultRoot: false },
+              canonicalSlug: { key: 'translationKey', value: '{{slug}}' },
+            },
+          },
+          originalLocales: { en: true, fr: true },
+          currentLocales: { en: true, fr: true, de: true },
+          currentSlugs: { en: 'news/4', fr: 'quatre' },
+          slugEditor: { en: false, fr: false, de: false },
+        });
+
+        expect(getSlugs({ draft }).localizedSlugs).toEqual({
+          en: 'news/4',
+          fr: 'quatre',
+          de: '4',
+        });
+      });
     });
   });
 });

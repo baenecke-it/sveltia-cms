@@ -3,9 +3,11 @@
   import { Divider, Icon, Option, Select, SelectButton, SelectButtonGroup } from '@sveltia/ui';
 
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
+  import { hasInvalidFields } from '$lib/services/contents/draft/validate/reveal';
+  import { afterPendingFieldUpdates } from '$lib/services/contents/editor/pending';
   import { entryEditorSettings } from '$lib/services/contents/editor/settings';
   import { getLocaleLabel } from '$lib/services/contents/i18n';
-  import { DEFAULT_I18N_CONFIG } from '$lib/services/contents/i18n/config';
+  import { getDraftI18nConfig } from '$lib/services/contents/i18n/config';
   import { env } from '$lib/services/user/env.svelte';
   import { createRawState } from '$lib/services/utils/state.svelte';
 
@@ -31,10 +33,8 @@
     /* eslint-enable prefer-const */
   } = $props();
 
-  const collection = $derived(entryDraft.current?.collection);
-  const collectionFile = $derived(entryDraft.current?.collectionFile);
+  const { allLocales } = $derived(getDraftI18nConfig(entryDraft.current));
   /* v8 ignore start -- the switcher is only rendered while the draft is there */
-  const { allLocales } = $derived((collectionFile ?? collection)?._i18n ?? DEFAULT_I18N_CONFIG);
   const validities = $derived(entryDraft.current?.validities ?? {});
   const canPreview = $derived(entryDraft.current?.canPreview ?? true);
   /* v8 ignore stop */
@@ -47,8 +47,7 @@
   );
   const hasAnyError = $derived(
     Object.entries(validities).some(
-      ([locale, validityMap]) =>
-        listedLocales.includes(locale) && Object.values(validityMap).some(({ valid }) => !valid),
+      ([locale, validityMap]) => listedLocales.includes(locale) && hasInvalidFields(validityMap),
     ),
   );
   const useDropDown = $derived(env.isSmallScreen || env.isMediumScreen || allLocales.length >= 5);
@@ -77,7 +76,8 @@
       {#each listedLocales as locale (locale)}
         {@const label = getLocaleLabel(locale) ?? locale}
         {@const disabled = !entryDraft.current?.currentLocales[locale]}
-        {@const hasError = Object.values(validities[locale]).some(({ valid }) => !valid)}
+        <!-- A locale without content, e.g. a disabled one, is left out of the validation -->
+        {@const hasError = hasInvalidFields(validities[locale])}
         <OptionComponent
           {variant}
           {size}
@@ -92,11 +92,13 @@
           class={hasError ? 'error' : ''}
           data-mode="edit"
           onSelect={() => {
-            thisPane.current = { mode: 'edit', locale };
+            afterPendingFieldUpdates(() => {
+              thisPane.current = { mode: 'edit', locale };
 
-            if (thatPane.current?.mode === 'preview') {
-              thatPane.current = { mode: 'preview', locale };
-            }
+              if (thatPane.current?.mode === 'preview') {
+                thatPane.current = { mode: 'preview', locale };
+              }
+            });
           }}
         >
           {#snippet startIcon()}
@@ -120,10 +122,12 @@
           selected={thisPane.current?.mode === 'preview'}
           data-mode="preview"
           onSelect={() => {
-            thisPane.current = {
-              mode: 'preview',
-              locale: /** @type {EntryEditorPane} */ (thatPane.current).locale,
-            };
+            // Read the locale now: the other pane may change while the updates land
+            const { locale } = /** @type {EntryEditorPane} */ (thatPane.current);
+
+            afterPendingFieldUpdates(() => {
+              thisPane.current = { mode: 'preview', locale };
+            });
           }}
         />
       {/if}
