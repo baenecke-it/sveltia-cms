@@ -1,6 +1,5 @@
 import { isValidFileType } from '@sveltia/utils/file';
 import { isObject } from '@sveltia/utils/object';
-import mime from 'mime';
 
 import { getMediaLibraryOptions } from '$lib/services/integrations/media-libraries';
 import {
@@ -12,6 +11,7 @@ import {
 import { isAnimatedImage } from '$lib/services/utils/media/image/animation';
 import { sniffRasterImageFormat } from '$lib/services/utils/media/image/sniff';
 import { optimizeSVG, transformImage } from '$lib/services/utils/media/image/transform';
+import mime from '$lib/services/utils/mime';
 
 /**
  * @import {
@@ -210,7 +210,7 @@ export const transformFile = async (file, transformations) => {
   const [, newFormat] = blob.type.split('/');
 
   const newFileName = RASTER_IMAGE_EXTENSION_REGEX.test(file.name)
-    ? file.name.replace(RASTER_IMAGE_EXTENSION_REGEX, newFormat)
+    ? file.name.replace(RASTER_IMAGE_EXTENSION_REGEX, `.${newFormat}`)
     : `${file.name}.${newFormat}`;
 
   return new File([blob], newFileName, { type: blob.type });

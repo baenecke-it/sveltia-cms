@@ -24,6 +24,12 @@ vi.mock('$lib/services/contents/collection', () => ({
           { name: 'rooms', widget: 'list' },
         ],
       },
+      {
+        name: 'place',
+        widget: 'object',
+        i18n: 'sync',
+        fields: [{ name: 'name', widget: 'string' }],
+      },
     ],
   })),
 }));
@@ -256,6 +262,35 @@ describe('Test resetField()', () => {
     });
   });
 
+  test('should reset the items of a paired List field in the other locales as well', () => {
+    /** @type {Field} */
+    const fieldConfig = {
+      name: 'speakers',
+      widget: 'list',
+      i18n: true,
+      default: [{ name: 'Host' }],
+      fields: [
+        { name: 'name', widget: 'string', i18n: 'duplicate' },
+        { name: 'bio', widget: 'string', i18n: true },
+      ],
+    };
+
+    const draft = createDraft({
+      en: { 'speakers.0.name': 'Ann', 'speakers.0.bio': 'Hi', 'speakers.1.name': 'Bob' },
+      fr: { 'speakers.0.name': 'Ann', 'speakers.0.bio': 'Salut', 'speakers.1.name': 'Bob' },
+    });
+
+    // The items are paired across the locales, so they’re removed from every locale at once
+    resetField({ draft, fieldConfig, keyPath: 'speakers', locale: 'en' });
+    expect(draft.currentValues.en).toEqual({ speakers: [] });
+    expect(draft.currentValues.fr).toEqual({ speakers: [] });
+
+    // Restoring gives every locale the default items
+    resetField({ draft, fieldConfig, keyPath: 'speakers', locale: 'en', restore: true });
+    expect(draft.currentValues.en).toMatchObject({ 'speakers.0.name': 'Host' });
+    expect(draft.currentValues.fr).toEqual(draft.currentValues.en);
+  });
+
   test('should clear a field duplicated along with an ancestor in the other locales', () => {
     const values = { 'venue.name': 'Hall', 'venue.rooms.0': 'r1' };
     const draft = createDraft({ en: { ...values }, fr: { ...values } });
@@ -271,11 +306,36 @@ describe('Test resetField()', () => {
     expect(draft.currentValues.en).toEqual({ 'venue.name': 'Hall', 'venue.rooms': [] });
     expect(draft.currentValues.fr).toEqual({ 'venue.name': 'Hall', 'venue.rooms': [] });
   });
+  test('should clear a synced field in every locale, whichever locale it’s cleared in', () => {
+    // https://github.com/sveltia/sveltia-cms/issues/1128
+    /** @type {Field} */
+    const fieldConfig = {
+      name: 'author',
+      widget: 'object',
+      i18n: true,
+      fields: [
+        { name: 'name', widget: 'string', i18n: true },
+        { name: 'url', widget: 'string', i18n: 'sync' },
+        // Can’t be edited in another locale
+        { name: 'bio', widget: 'string', i18n: 'duplicate' },
+      ],
+    };
+
+    const values = { 'author.name': 'Melvin', 'author.url': 'https://a', 'author.bio': 'Hi' };
+    const draft = createDraft({ en: { ...values }, fr: { ...values }, ja: { ...values } });
+
+    resetField({ draft, fieldConfig, keyPath: 'author', locale: 'fr' });
+
+    expect(draft.currentValues.fr).toEqual({ ...values, 'author.name': '', 'author.url': '' });
+    expect(draft.currentValues.en).toEqual({ ...values, 'author.url': '' });
+    expect(draft.currentValues.ja).toEqual({ ...values, 'author.url': '' });
+  });
 });
 
 describe('Test canResetField()', () => {
   test('should tell whether the field holds anything to clear', () => {
-    const args = { fieldConfig: authorField, keyPath: 'author', locale: 'en', defaultLocale: 'en' };
+    const draft = createDraft({});
+    const args = { draft, fieldConfig: authorField, keyPath: 'author', locale: 'en' };
 
     expect(canResetField({ ...args, valueMap: { title: 'Hello', ...authorValues } })).toBe(true);
     // Only the values the user doesn’t enter, which are kept
@@ -302,7 +362,7 @@ describe('Test canResetField()', () => {
   test('should tell whether a List or KeyValue field holds items or pairs', () => {
     const list = { fieldConfig: { name: 'tags', widget: 'list' }, keyPath: 'tags' };
     const meta = { fieldConfig: { name: 'meta', widget: 'keyvalue' }, keyPath: 'meta' };
-    const locales = { locale: 'en', defaultLocale: 'en' };
+    const locales = { draft: createDraft({}), locale: 'en' };
 
     expect(canResetField({ ...list, ...locales, valueMap: { 'tags.0': '' } })).toBe(true);
     expect(canResetField({ ...list, ...locales, valueMap: { tags: [] } })).toBe(false);
@@ -324,9 +384,9 @@ describe('Test canResetField()', () => {
         fields: [{ name: 'url', widget: 'string' }],
         ...options,
       },
+      draft: createDraft({}),
       keyPath: 'links',
       locale: 'en',
-      defaultLocale: 'en',
       valueMap: { links: [], 'links.0.url': '/docs', 'links.1.url': '/blog' },
     });
 
@@ -345,6 +405,22 @@ describe('Test canResetField()', () => {
         valueMap: { links: [], 'links.0': 'a' },
       }),
     ).toBe(true);
+  });
+
+  test('should tell whether a subfield synced along with its parent can be reset in another locale', () => {
+    const args = {
+      draft: createDraft({}),
+      fieldConfig: { name: 'name', widget: 'string' },
+      keyPath: 'place.name',
+      locale: 'fr',
+    };
+
+    expect(canResetField({ ...args, valueMap: { 'place.name': 'Salle' } })).toBe(true);
+    expect(canResetField({ ...args, valueMap: { 'place.name': '' } })).toBe(false);
+    // A subfield duplicated along with its parent can’t be edited in another locale
+    expect(
+      canResetField({ ...args, keyPath: 'venue.name', valueMap: { 'venue.name': 'Salle' } }),
+    ).toBe(false);
   });
 
   test('should keep a List field that doesn’t allow removing items within an Object field', () => {
@@ -421,6 +497,62 @@ describe('Test resetField() for restoring', () => {
     expect(draft.currentValues.en).toEqual({ 'venue.name': 'Hall', 'venue.city': 'Toronto' });
   });
 
+  test('should restore the localized default values of the locale', () => {
+    /** @type {Field} */
+    const fieldConfig = {
+      name: 'venue',
+      widget: 'object',
+      i18n: true,
+      default: { name: 'Hall' },
+      default_localized: { de: { name: 'Halle' } },
+      fields: [
+        {
+          name: 'name',
+          widget: 'string',
+          i18n: true,
+          default_localized: { de: 'Raum', fr: 'Salle' },
+        },
+        {
+          name: 'city',
+          widget: 'string',
+          i18n: true,
+          default: 'Toronto',
+          default_localized: { de: 'Köln' },
+        },
+      ],
+    };
+
+    const draft = createDraft({
+      en: { 'venue.name': 'Arena', 'venue.city': 'Ottawa' },
+      de: { 'venue.name': 'Arena', 'venue.city': 'Ottawa' },
+      fr: { 'venue.name': 'Arena', 'venue.city': 'Ottawa' },
+    });
+
+    resetField({ draft, fieldConfig, keyPath: 'venue', locale: 'de', restore: true });
+    resetField({ draft, fieldConfig, keyPath: 'venue', locale: 'fr', restore: true });
+
+    // The Object field’s default value, localized or not, takes precedence over the subfield’s own
+    expect(draft.currentValues.de).toEqual({ 'venue.name': 'Halle', 'venue.city': 'Köln' });
+    expect(draft.currentValues.fr).toEqual({ 'venue.name': 'Hall', 'venue.city': 'Toronto' });
+  });
+
+  test('should clear a field with a localized default value', () => {
+    /** @type {Field} */
+    const fieldConfig = {
+      name: 'title',
+      widget: 'string',
+      i18n: true,
+      default: 'Untitled',
+      default_localized: { de: 'Ohne Titel' },
+    };
+
+    const draft = createDraft({ en: { title: 'Hello' }, de: { title: 'Hallo' } });
+
+    resetField({ draft, fieldConfig, keyPath: 'title', locale: 'de' });
+
+    expect(draft.currentValues.de).toEqual({ title: '' });
+  });
+
   test('should not take an `Object.prototype` member for a subfield default value', () => {
     /** @type {Field} */
     const fieldConfig = {
@@ -444,7 +576,8 @@ describe('Test resetField() for restoring', () => {
   test('should tell whether the field holds anything but the default values', () => {
     /** @type {Field} */
     const fieldConfig = { name: 'tags', widget: 'list', default: ['a'] };
-    const args = { fieldConfig, keyPath: 'tags', locale: 'en', defaultLocale: 'en', restore: true };
+    const draft = createDraft({});
+    const args = { draft, fieldConfig, keyPath: 'tags', locale: 'en', restore: true };
 
     expect(canResetField({ ...args, valueMap: { tags: [], 'tags.0': 'b' } })).toBe(true);
     expect(canResetField({ ...args, valueMap: { tags: [], 'tags.0': 'a' } })).toBe(false);

@@ -9,6 +9,7 @@ import {
   checkRepositoryAccess,
   fetchBranch,
   fetchDefaultBranchName,
+  fetchRepositoryAccess,
   getBaseURLs,
   getRepositoryInfo,
   repository,
@@ -86,6 +87,14 @@ describe('Gitea Repository Service', () => {
       });
     });
 
+    test('should encode a branch name with a character that ends a URL path', () => {
+      const repoURL = 'https://gitea.example.com/owner/repo';
+      const result = getBaseURLs(repoURL, 'cms/posts/c#');
+
+      expect(result.treeBaseURL).toBe(`${repoURL}/src/branch/cms/posts/c%23`);
+      expect(result.blobBaseURL).toBe(`${repoURL}/src/branch/cms/posts/c%23`);
+    });
+
     test('should generate correct URLs without branch', () => {
       const repoURL = 'https://gitea.example.com/owner/repo';
       const result = getBaseURLs(repoURL);
@@ -108,6 +117,21 @@ describe('Gitea Repository Service', () => {
     });
   });
 
+  describe('fetchRepositoryAccess', () => {
+    test('reports read and write access from the repository’s own permissions', async () => {
+      fetchAPIMock.mockResolvedValue({ permissions: { pull: true, push: true } });
+      await expect(fetchRepositoryAccess()).resolves.toEqual({ canRead: true, canWrite: true });
+
+      _resetRepositoryInfoCache();
+      fetchAPIMock.mockResolvedValue({ permissions: { pull: true } });
+      await expect(fetchRepositoryAccess()).resolves.toEqual({ canRead: true, canWrite: false });
+
+      _resetRepositoryInfoCache();
+      fetchAPIMock.mockResolvedValue({});
+      await expect(fetchRepositoryAccess()).resolves.toEqual({ canRead: false, canWrite: false });
+    });
+  });
+
   describe('checkRepositoryAccess', () => {
     test('should pass when user has push permissions', async () => {
       const mockRepoInfo = {
@@ -123,7 +147,7 @@ describe('Gitea Repository Service', () => {
       expect(fetchAPIMock).toHaveBeenCalledWith(`/repos/${mockOwner}/${mockRepo}`);
     });
 
-    test('should throw error when user has no pull permissions', async () => {
+    test('should report no access when user has no pull permissions', async () => {
       const mockRepoInfo = {
         permissions: {
           pull: false,
@@ -133,33 +157,40 @@ describe('Gitea Repository Service', () => {
 
       fetchAPIMock.mockResolvedValue(mockRepoInfo);
 
-      await expect(checkRepositoryAccess()).rejects.toThrow('Not a collaborator of the repository');
+      await expect(checkRepositoryAccess()).rejects.toMatchObject({
+        message: 'Not a collaborator of the repository',
+        cause: { message: 'repository_no_access' },
+      });
     });
 
-    test('should throw error when user can only read the repository', async () => {
+    test('should say write access is missing when user can only read the repository', async () => {
       fetchAPIMock.mockResolvedValue({ permissions: { pull: true, push: false } });
 
-      await expect(checkRepositoryAccess()).rejects.toThrow('Not a collaborator of the repository');
+      await expect(checkRepositoryAccess()).rejects.toMatchObject({
+        message: 'Not a collaborator of the repository',
+        cause: { message: 'repository_no_write_access' },
+      });
     });
 
-    test('should throw error when permissions are missing', async () => {
+    test('should report no access when permissions are missing', async () => {
       const mockRepoInfo = {};
 
       fetchAPIMock.mockResolvedValue(mockRepoInfo);
 
-      await expect(checkRepositoryAccess()).rejects.toThrow('Not a collaborator of the repository');
+      await expect(checkRepositoryAccess()).rejects.toMatchObject({
+        message: 'Not a collaborator of the repository',
+        cause: { message: 'repository_no_access' },
+      });
     });
 
-    test('should report a missing repository on a 404', async () => {
-      fetchAPIMock.mockRejectedValue(new Error('Not found', { cause: { status: 404 } }));
-
-      await expect(checkRepositoryAccess()).rejects.toThrow('Failed to check repository access');
-    });
-
-    test.each([401, 403])('should report no access on a %i', async (status) => {
+    // A private repository answers someone without access with a 404, as on GitHub
+    test.each([401, 403, 404])('should report no access on a %i', async (status) => {
       fetchAPIMock.mockRejectedValue(new Error('Denied', { cause: { status } }));
 
-      await expect(checkRepositoryAccess()).rejects.toThrow('Not a collaborator of the repository');
+      await expect(checkRepositoryAccess()).rejects.toMatchObject({
+        message: 'Not a collaborator of the repository',
+        cause: { message: 'repository_no_access' },
+      });
     });
 
     test.each([

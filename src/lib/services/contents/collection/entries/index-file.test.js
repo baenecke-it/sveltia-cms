@@ -124,6 +124,21 @@ describe('getIndexFile()', () => {
     });
   });
 
+  test('passes every other option through, such as `summary`', () => {
+    const collection = {
+      name: 'test-collection',
+      folder: 'content/posts',
+      index_file: { label: 'Custom Index', summary: '{{title}} ({{locales}})' },
+    };
+
+    expect(getIndexFile(collection)).toStrictEqual({
+      name: '_index',
+      label: 'Custom Index',
+      icon: 'home',
+      summary: '{{title}} ({{locales}})',
+    });
+  });
+
   test('passes the extension and format options through', () => {
     const collection = {
       name: 'test-collection',
@@ -378,7 +393,7 @@ describe('isCollectionIndexFile()', () => {
     );
   });
 
-  test('doesn’t take a nested collection’s index file for its own', () => {
+  test('doesn’t take the index file of a collection with nested entries for its own', () => {
     // A `pages` collection on the content root with the `path` option claims a `posts` collection’s
     // own index file, which carries the slug computed by `posts`
     // @see https://github.com/sveltia/sveltia-cms/issues/1005

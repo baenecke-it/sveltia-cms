@@ -1,6 +1,8 @@
-import { describe, expect, test } from 'vitest';
+import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 
+import { allEntries, allEntryFolders } from '$lib/services/contents';
 import {
+  getCollectionFileSummary,
   getEntrySummary,
   getEntrySummaryFromContent,
   replace,
@@ -8,6 +10,7 @@ import {
   sanitizeEntrySummary,
 } from '$lib/services/contents/entry/summary';
 import { getEntryPathRegEx } from '$lib/services/contents/file/config';
+import { expectLinearTime } from '$lib/test/complexity';
 
 /**
  * @import { Entry, InternalCollection, LocalizedEntry } from '$lib/types/private';
@@ -510,7 +513,7 @@ describe('Test getEntrySummary()', () => {
 
   test('covers locales fallback when requested locale is undefined (line 211)', () => {
     // Create entry where first locale doesn't match requested locale
-    // Force the ternary: locales[undefined ?? defaultLocale] ?? Object.values(locales)[0] ?? {}
+    // Force the ternary: the requested locale, or the first one the entry has
     const entryWithMultipleLocales = {
       ...entry,
       slug: 'test-slug',
@@ -529,7 +532,7 @@ describe('Test getEntrySummary()', () => {
     });
 
     // With defaultLocale='de', tries to find 'de' locale
-    // Doesn't exist, so falls back to Object.values(locales)[0] which is 'fr' locale
+    // Doesn't exist, so falls back to the first locale the entry has, which is 'fr'
     expect(result).toContain('French');
   });
 });
@@ -539,9 +542,10 @@ describe('Test sanitizeEntrySummary()', () => {
     const input = 'This is **bold** and _italic_ and `code` and <script>alert("xss")</script>';
     const result = sanitizeEntrySummary(input, { allowMarkdown: true });
 
-    // Script tags are completely removed for security
+    // A tag other than a formatting one is kept as text, escaped
     expect(result).toBe(
-      'This is <strong>bold</strong> and <em>italic</em> and <code>code</code> and',
+      'This is <strong>bold</strong> and <em>italic</em> and <code>code</code> and ' +
+        '&lt;script&gt;alert("xss")&lt;/script&gt;',
     );
   });
 
@@ -549,8 +553,22 @@ describe('Test sanitizeEntrySummary()', () => {
     const input = 'This is **bold** and _italic_ and `code` and <script>alert("xss")</script>';
     const result = sanitizeEntrySummary(input, { allowMarkdown: false });
 
-    // All HTML tags are stripped including script content
-    expect(result).toBe('This is bold and italic and code and');
+    // The formatting is stripped, while another tag is kept as text
+    expect(result).toBe('This is bold and italic and code and <script>alert("xss")</script>');
+  });
+
+  test('should keep a tag other than a formatting one as text', () => {
+    expect(sanitizeEntrySummary('Vec<T> in Rust')).toBe('Vec<T> in Rust');
+    expect(sanitizeEntrySummary('Using <script> tags **safely**')).toBe(
+      'Using <script> tags safely',
+    );
+    expect(sanitizeEntrySummary('Vec<T> in **Rust**', { allowMarkdown: true })).toBe(
+      'Vec&lt;T&gt; in <strong>Rust</strong>',
+    );
+    // An unclosed tag doesn’t take the rest of the summary with it
+    expect(sanitizeEntrySummary('The <details> element', { allowMarkdown: true })).toBe(
+      'The &lt;details> element',
+    );
   });
 
   test('should parse HTML character entities', () => {
@@ -739,23 +757,22 @@ describe('Test getEntrySummaryFromContent()', () => {
     expect(getEntrySummaryFromContent({ body: 'Text # Not a header' })).toBe('');
   });
 
-  test('should find a header in linear time', () => {
-    const bodies = [
-      `# a${' '.repeat(100_000)}b`,
-      `# a${' '.repeat(100_000)}{#b`,
-      `# a${' {#'.repeat(50_000)}`,
-      `${'#'.repeat(100_000)}x`,
-      '# \n'.repeat(50_000),
-    ];
+  test.each(
+    /** @type {[string, (n: number) => string][]} */ ([
+      ['spaces in a header', (n) => `# a${' '.repeat(n)}b`],
+      ['spaces before an unclosed anchor', (n) => `# a${' '.repeat(n)}{#b`],
+      ['anchor starts', (n) => `# a${' {#'.repeat(n)}`],
+      ['header markers', (n) => `${'#'.repeat(n)}x`],
+      ['empty headers', (n) => '# \n'.repeat(n)],
+    ]),
+  )('should find a header in linear time: %s', (_name, build) => {
+    expectLinearTime(build, (body) => getEntrySummaryFromContent({ body }), 2000);
+  });
 
-    bodies.forEach((body) => {
-      const start = performance.now();
-
-      getEntrySummaryFromContent({ body });
-      expect(performance.now() - start).toBeLessThan(50);
-    });
-
-    expect(getEntrySummaryFromContent({ body: bodies[0] })).toBe(`a${' '.repeat(100_000)}b`);
+  test('should find a header with a long run of spaces', () => {
+    expect(getEntrySummaryFromContent({ body: `# a${' '.repeat(100_000)}b` })).toBe(
+      `a${' '.repeat(100_000)}b`,
+    );
   });
 
   test('should return empty string when nothing found', () => {
@@ -1195,7 +1212,7 @@ describe('Test replace()', () => {
         email: 'john@example.com',
       },
     },
-    defaultLocale: 'en',
+    locale: 'en',
   };
 
   test('should replace slug placeholder', () => {
@@ -1379,7 +1396,7 @@ describe('Test replace()', () => {
         ...context.replaceSubContext,
         locales: ['en'],
       },
-      defaultLocale: 'en',
+      locale: 'en',
     };
 
     // 'missingField' doesn't exist in replaceSub (returns undefined)
@@ -1596,9 +1613,12 @@ describe('Additional comprehensive tests for edge cases', () => {
     const input = 'Text <img src="x" onerror="alert(1)"> <iframe src="evil"></iframe>';
     const result = sanitizeEntrySummary(input, { allowMarkdown: true });
 
-    // Dangerous tags should be removed
-    expect(result).not.toContain('onerror');
-    expect(result).not.toContain('iframe');
+    // Dangerous tags are only shown as text
+    expect(result).not.toContain('<img');
+    expect(result).not.toContain('<iframe');
+    expect(result).toBe(
+      'Text &lt;img src="x" onerror="alert(1)"> &lt;iframe src="evil">&lt;/iframe>',
+    );
   });
 
   test('getEntrySummary should handle collection with no summary template', () => {
@@ -1666,7 +1686,7 @@ describe('Additional comprehensive tests for edge cases', () => {
         commitDate: undefined,
         commitAuthor: { name: '', login: '', email: '' },
       },
-      defaultLocale: 'en',
+      locale: 'en',
     };
 
     const result = replace('commit_author', context);
@@ -1701,7 +1721,7 @@ describe('Additional comprehensive tests for edge cases', () => {
         commitDate: undefined,
         commitAuthor: undefined,
       },
-      defaultLocale: 'en',
+      locale: 'en',
     };
 
     // Note: This depends on how transformations are applied
@@ -1782,7 +1802,7 @@ describe('Additional comprehensive tests for edge cases', () => {
           email: 'john@example.com',
         },
       },
-      defaultLocale: 'en',
+      locale: 'en',
     };
 
     // Regular field with no special transformation, not in replaceSub
@@ -1834,7 +1854,7 @@ describe('Additional comprehensive tests for edge cases', () => {
           email: 'john@example.com',
         },
       },
-      defaultLocale: 'en',
+      locale: 'en',
     };
 
     // With ternary transformation on falsy value, should use valueMap
@@ -1954,5 +1974,244 @@ describe('Test getEntrySummary() caching', () => {
 
     expect(getEntrySummary(collection, entry, { locale: 'en' })).toBe('Hello');
     expect(getEntrySummary(collection, otherEntry, { locale: 'en' })).toBe('World');
+  });
+});
+
+describe('Test getEntrySummary() with a collection file or an index file', () => {
+  const i18n = /** @type {any} */ ({ defaultLocale: '_default', allLocales: ['_default'] });
+  /**
+   * Build a collection file.
+   * @param {Record<string, any>} props Collection file properties.
+   * @returns {any} Collection file.
+   */
+  const createFile = (props) => ({ fields: [], _file: {}, _i18n: i18n, ...props });
+
+  /** @type {InternalCollection} */
+  const fileCollection = /** @type {any} */ ({
+    name: 'settings',
+    _type: 'file',
+    files: [],
+    _fileMap: {
+      general: createFile({
+        name: 'general',
+        label: 'General',
+        file: 'data/general.yml',
+        summary: '{{theme}} — {{filename}}',
+      }),
+      titled: createFile({
+        name: 'titled',
+        label: 'Titled',
+        file: 'data/titled.yml',
+        summary: '**{{title}}**',
+      }),
+      social: createFile({ name: 'social', file: 'data/social.yml' }),
+    },
+    _i18n: i18n,
+    _thumbnailFieldNames: [],
+  });
+
+  /**
+   * Build an entry collection with an index file.
+   * @param {any} indexFile The `index_file` option value.
+   * @returns {InternalCollection} Collection.
+   */
+  const createEntryCollection = (indexFile) =>
+    /** @type {any} */ ({
+      name: 'tags',
+      folder: 'content/tags',
+      fields: [],
+      summary: '{{title}} (tag)',
+      index_file: indexFile,
+      _type: 'entry',
+      _file: { basePath: 'content/tags', fullPathRegEx: /^content\/tags\/(?<subPath>.+)\.md$/ },
+      _i18n: i18n,
+      _thumbnailFieldNames: [],
+    });
+
+  /**
+   * Build an entry.
+   * @param {string} path File path.
+   * @param {Record<string, any>} [content] Content.
+   * @returns {Entry} Entry.
+   */
+  const createEntry = (path, content = {}) => {
+    const slug = /** @type {string} */ (path.split('/').pop()?.split('.')[0]);
+
+    return { id: path, slug, subPath: slug, locales: { _default: { slug, path, content } } };
+  };
+
+  test('formats the file’s own summary template', () => {
+    const entry = createEntry('data/general.yml', { theme: 'dark' });
+
+    expect(getEntrySummary(fileCollection, entry, { fileName: 'general', useTemplate: true })).toBe(
+      'dark — general',
+    );
+  });
+
+  test('returns the file label without `useTemplate` or with a given template', () => {
+    const entry = createEntry('data/general.yml', { theme: 'dark' });
+
+    expect(getEntrySummary(fileCollection, entry, { fileName: 'general' })).toBe('General');
+    expect(
+      getEntrySummary(fileCollection, entry, {
+        fileName: 'general',
+        useTemplate: true,
+        template: '{{filename}}',
+      }),
+    ).toBe('General');
+  });
+
+  test('returns the file label or name without a summary template', () => {
+    const entry = createEntry('data/social.yml');
+
+    expect(getEntrySummary(fileCollection, entry, { fileName: 'social', useTemplate: true })).toBe(
+      'social',
+    );
+  });
+
+  test('falls back to the file label for an empty `{{title}}`', () => {
+    const entry = createEntry('data/titled.yml');
+
+    expect(
+      getEntrySummary(fileCollection, entry, {
+        fileName: 'titled',
+        useTemplate: true,
+        allowMarkdown: true,
+      }),
+    ).toBe('<strong>Titled</strong>');
+  });
+
+  test('reads the file in its own default locale', () => {
+    /** @type {InternalCollection} */
+    const collection = /** @type {any} */ ({
+      ...fileCollection,
+      _fileMap: {
+        about: createFile({
+          name: 'about',
+          file: 'data/about.{{locale}}.yml',
+          summary: '{{headline}}',
+          _i18n: { defaultLocale: 'ja', allLocales: ['en', 'ja'] },
+        }),
+      },
+    });
+
+    /** @type {Entry} */
+    const entry = {
+      id: 'about',
+      slug: 'about',
+      subPath: 'about',
+      locales: {
+        en: { slug: 'about', path: 'data/about.en.yml', content: { headline: 'Hello' } },
+        ja: { slug: 'about', path: 'data/about.ja.yml', content: { headline: 'こんにちは' } },
+      },
+    };
+
+    expect(getEntrySummary(collection, entry, { fileName: 'about', useTemplate: true })).toBe(
+      'こんにちは',
+    );
+  });
+
+  test('keys the cache on the file name', () => {
+    const entry = createEntry('data/general.yml', { theme: 'dark' });
+
+    expect(getEntrySummary(fileCollection, entry, { useTemplate: true })).toBe('general');
+    expect(getEntrySummary(fileCollection, entry, { fileName: 'general', useTemplate: true })).toBe(
+      'dark — general',
+    );
+  });
+
+  test('formats the index file’s own summary template', () => {
+    const collection = createEntryCollection({
+      label: 'Tag Index',
+      summary: '{{theme}}: {{title}}',
+    });
+
+    const entry = createEntry('content/tags/_index.md', { theme: 'dark' });
+
+    expect(getEntrySummary(collection, entry, { useTemplate: true })).toBe('dark: Tag Index');
+    expect(getEntrySummary(collection, entry)).toBe('Tag Index');
+    // A given template, such as `nested.summary`, doesn’t apply to the index file
+    expect(getEntrySummary(collection, entry, { useTemplate: true, template: '{{slug}}' })).toBe(
+      'Tag Index',
+    );
+    // The collection’s template still applies to the other entries
+    expect(
+      getEntrySummary(collection, createEntry('content/tags/net.md', { title: '.Net' }), {
+        useTemplate: true,
+      }),
+    ).toBe('.Net (tag)');
+  });
+
+  test('returns the index file label without a summary template of its own', () => {
+    const collection = createEntryCollection({ label: 'Tag Index' });
+    const entry = createEntry('content/tags/_index.md');
+
+    expect(getEntrySummary(collection, entry, { useTemplate: true })).toBe('Tag Index');
+  });
+});
+
+describe('Test getCollectionFileSummary()', () => {
+  const i18n = /** @type {any} */ ({ defaultLocale: '_default', allLocales: ['_default'] });
+
+  /** @type {InternalCollection} */
+  const collection = /** @type {any} */ ({
+    name: 'settings',
+    _type: 'file',
+    files: [],
+    _fileMap: {
+      general: { name: 'general', file: 'data/general.yml', summary: '**{{theme}}**', _i18n: i18n },
+      social: { name: 'social', label: 'Social', file: 'data/social.yml', _i18n: i18n },
+    },
+    _i18n: i18n,
+    _thumbnailFieldNames: [],
+  });
+
+  /** @type {Entry} */
+  const entry = {
+    id: 'general',
+    slug: 'general',
+    subPath: 'general',
+    locales: {
+      _default: { slug: 'general', path: 'data/general.yml', content: { theme: 'dark' } },
+    },
+  };
+
+  beforeAll(() => {
+    allEntryFolders.current = /** @type {any} */ ([
+      {
+        collectionName: 'settings',
+        fileName: 'general',
+        filePathMap: { _default: 'data/general.yml' },
+      },
+      {
+        collectionName: 'settings',
+        fileName: 'social',
+        filePathMap: { _default: 'data/social.yml' },
+      },
+    ]);
+  });
+
+  afterAll(() => {
+    allEntryFolders.current = [];
+    allEntries.current = [];
+  });
+
+  test('formats the summary of a file with the `summary` option', () => {
+    allEntries.current = [entry];
+
+    expect(getCollectionFileSummary(collection, 'general')).toBe('<strong>dark</strong>');
+  });
+
+  test('returns `undefined` for a file that doesn’t exist yet', () => {
+    allEntries.current = [];
+
+    expect(getCollectionFileSummary(collection, 'general')).toBeUndefined();
+  });
+
+  test('returns `undefined` for a file without the `summary` option or an unknown file', () => {
+    allEntries.current = [entry];
+
+    expect(getCollectionFileSummary(collection, 'social')).toBeUndefined();
+    expect(getCollectionFileSummary(collection, 'unknown')).toBeUndefined();
   });
 });

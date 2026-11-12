@@ -10,6 +10,7 @@ import {
 import {
   createPendingEntry,
   getCreatableCollection,
+  getEditableEntries,
   hasCreationRoom,
 } from '$lib/services/contents/fields/relation/quick-add';
 import { initTestConfig } from '$lib/test/config';
@@ -34,6 +35,7 @@ vi.mock('$lib/services/contents/fields/relation/quick-add', async (importOrigina
   .../** @type {object} */ (await importOriginal()),
   createPendingEntry: vi.fn(),
   getCreatableCollection: vi.fn(),
+  getEditableEntries: vi.fn(() => []),
   hasCreationRoom: vi.fn(() => true),
 }));
 
@@ -74,6 +76,7 @@ describe('RelationEditor', () => {
       { label: 'Elsie Dean', value: 'elsie-dean', searchValue: 'Elsie Dean' },
     ]);
     vi.mocked(getCreatableCollection).mockReturnValue(undefined);
+    vi.mocked(getEditableEntries).mockReturnValue([]);
     vi.mocked(hasCreationRoom).mockReturnValue(true);
   });
 
@@ -130,6 +133,84 @@ describe('RelationEditor', () => {
       props: { ...props },
     });
     expect(getOptions).toHaveBeenLastCalledWith(expect.objectContaining({ currentSlug: 'shared' }));
+  });
+
+  test('passes the values of the fields that aren’t localized in another locale', async () => {
+    const props = {
+      locale: 'ja',
+      keyPath: 'author',
+      typedKeyPath: 'author',
+      fieldId: 'author',
+      fieldLabel: 'Author',
+      fieldConfig,
+      currentValue: '',
+    };
+
+    const draftArgs = {
+      fields: [fieldConfig],
+      i18n: { i18nEnabled: true, defaultLocale: 'en', allLocales: ['en', 'ja'] },
+      values: { en: { title: 'Hello', team: 'red' }, ja: { title: 'こんにちは' } },
+    };
+
+    await renderWithDraft(RelationEditor, { draft: createMockDraft(draftArgs), props });
+
+    // The field isn’t found in the test config, so it’s taken as one that isn’t localized
+    expect(getOptions).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        sharedValues: expect.objectContaining({ values: { title: 'Hello', team: 'red' } }),
+      }),
+    );
+
+    // The values of a rich text editor component are localized along with the document
+    await renderWithDraft(RelationEditor, {
+      draft: createMockDraft(draftArgs),
+      props,
+      context: { 'field-editor': { valueStoreKey: 'extraValues' } },
+    });
+
+    expect(getOptions).toHaveBeenLastCalledWith(
+      expect.objectContaining({ sharedValues: undefined }),
+    );
+  });
+
+  test('reads the entry of the row in the bulk editor, which has no draft', async () => {
+    // The referenced collection allows creating entries, but only from a draft
+    vi.mocked(getCreatableCollection).mockReturnValue(getMemberCollection());
+
+    const props = {
+      locale: '_default',
+      keyPath: 'author',
+      typedKeyPath: 'author',
+      fieldId: 'author',
+      fieldLabel: 'Author',
+      fieldConfig,
+      currentValue: '',
+    };
+
+    await renderWithDraft(RelationEditor, {
+      draft: undefined,
+      props,
+      context: { 'bulk-edit-row': { values: { title: 'Hello', team: 'red' }, slug: 'hello' } },
+    });
+
+    expect(getOptions).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        currentLocaleValues: { title: 'Hello', team: 'red' },
+        currentSlug: 'hello',
+        // The bulk editor only edits the default locale, which has every value
+        sharedValues: undefined,
+      }),
+    );
+    // The row isn’t a draft, so the quick-add dialog, which writes into one, stays off
+    expect(page.getByRole('button', { name: /^Add / }).elements()).toHaveLength(0);
+    expect(getCreatableCollection).not.toHaveBeenCalled();
+
+    // Neither a draft nor a row
+    await renderWithDraft(RelationEditor, { draft: undefined, props });
+
+    expect(getOptions).toHaveBeenLastCalledWith(
+      expect.objectContaining({ currentLocaleValues: undefined, currentSlug: undefined }),
+    );
   });
 
   test('offers the pending entries of the draft along with the saved ones', async () => {
@@ -263,5 +344,137 @@ describe('RelationEditor', () => {
 
     expect(page.getByRole('button').elements()).toHaveLength(0);
     expect(getCreatableCollection).not.toHaveBeenCalled();
+    expect(getEditableEntries).not.toHaveBeenCalled();
+  });
+
+  describe('editing a selected entry', () => {
+    /**
+     * Build a saved member.
+     * @param {string} slug Slug.
+     * @param {string} name Name.
+     * @returns {Entry} Entry.
+     */
+    const createMember = (slug, name) =>
+      /** @type {any} */ ({
+        id: `id-${slug}`,
+        slug,
+        subPath: slug,
+        locales: { _default: { slug, path: `content/members/${slug}.md`, content: { name } } },
+      });
+
+    const melvin = createMember('melvin-lucas', 'Melvin Lucas');
+    const elsie = createMember('elsie-dean', 'Elsie Dean');
+
+    beforeEach(() => {
+      // The value an entry goes by is its slug
+      vi.mocked(getEntryOptions).mockImplementation(({ refEntry }) => [
+        { label: refEntry.slug, value: refEntry.slug, searchValue: refEntry.slug },
+      ]);
+    });
+
+    test('edits the selected entry and follows a change of its value', async () => {
+      vi.mocked(getEditableEntries).mockReturnValue([
+        { value: 'melvin-lucas', label: 'Melvin Lucas', entry: melvin },
+      ]);
+
+      const updated = createMember('melvin-lucas-jr', 'Melvin Lucas Jr.');
+
+      vi.mocked(createPendingEntry).mockResolvedValue({
+        collectionName: 'members',
+        entry: updated,
+        changes: [],
+        savingAssets: [],
+        values: ['melvin-lucas-jr'],
+        baseEntry: melvin,
+      });
+
+      const draft = createMockDraft({
+        fields: [fieldConfig],
+        values: { _default: { author: 'melvin-lucas' } },
+      });
+
+      const props = $state({
+        locale: '_default',
+        keyPath: 'author',
+        typedKeyPath: 'author',
+        fieldId: 'author',
+        fieldLabel: 'Author',
+        fieldConfig,
+        currentValue: 'melvin-lucas',
+      });
+
+      await renderWithDraft(RelationEditor, { draft, props });
+
+      expect(getEditableEntries).toHaveBeenCalledWith({
+        draft,
+        locale: '_default',
+        fieldConfig,
+        refEntries,
+        currentValue: 'melvin-lucas',
+      });
+      // No entry can be created in the collection, but the selected one can be edited
+      expect(page.getByRole('button', { name: /Add/ }).elements()).toHaveLength(0);
+
+      const button = page.getByRole('button', { name: /Edit.*Melvin Lucas/ });
+
+      await expect.element(button).toHaveAttribute('aria-haspopup', 'dialog');
+      await button.click();
+
+      const dialog = page.getByRole('dialog', { name: /Editing.*Member/ });
+
+      await expect
+        .element(dialog.getByRole('textbox', { name: 'Name' }))
+        .toHaveValue('Melvin Lucas');
+      await dialog.getByRole('textbox', { name: 'Name' }).fill('Melvin Lucas Jr.');
+      await dialog.getByRole('button', { name: 'Update' }).click();
+
+      await expect.poll(() => draft.pendingEntries.length).toBe(1);
+      expect(draft.currentValues._default.author).toBe('melvin-lucas-jr');
+    });
+
+    test('lists the selected entries of a multiple-value field in a menu', async () => {
+      const multipleField = { ...fieldConfig, multiple: true };
+
+      vi.mocked(getCreatableCollection).mockReturnValue(getMemberCollection());
+      vi.mocked(getEditableEntries).mockReturnValue([
+        { value: 'melvin-lucas', label: 'Melvin Lucas', entry: melvin },
+        { value: 'elsie-dean', label: 'Elsie Dean', entry: elsie },
+      ]);
+
+      await renderWithDraft(RelationEditor, {
+        draft: createMockDraft({
+          fields: [multipleField],
+          values: { _default: { 'author.0': 'melvin-lucas', 'author.1': 'elsie-dean' } },
+        }),
+        props: {
+          locale: '_default',
+          keyPath: 'author',
+          typedKeyPath: 'author',
+          fieldId: 'author',
+          fieldLabel: 'Author',
+          fieldConfig: multipleField,
+          currentValue: ['melvin-lucas', 'elsie-dean'],
+        },
+      });
+
+      await expect.element(page.getByRole('button', { name: /Add.*Member/ })).toBeEnabled();
+      await page.getByRole('button', { name: /Edit.*Member/ }).click();
+
+      const menu = page.getByRole('menu', { name: 'Select an Entry to Edit' });
+
+      await expect.element(menu.getByRole('menuitem').nth(0)).toHaveAccessibleName('Melvin Lucas');
+      await expect.element(menu.getByRole('menuitem').nth(1)).toHaveAccessibleName('Elsie Dean');
+      await menu.getByRole('menuitem', { name: 'Elsie Dean' }).click();
+
+      await expect
+        .element(
+          page
+            .getByRole('dialog', { name: /Editing.*Member/ })
+            .getByRole('textbox', { name: 'Name' }),
+        )
+        .toHaveValue('Elsie Dean');
+      await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
+      await expect.poll(() => document.querySelector('[role="dialog"]')).toBeNull();
+    });
   });
 });

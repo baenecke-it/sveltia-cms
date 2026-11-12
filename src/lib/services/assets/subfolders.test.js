@@ -8,6 +8,7 @@ import {
   getAssetsInDir,
   getFolderBreadcrumbItems,
   getFolderNamesInDir,
+  getNonAssetFileNamesInDir,
   getRelativePath,
   getSubfolderPath,
   getSubfolders,
@@ -477,6 +478,33 @@ describe('assets/subfolders', () => {
     });
   });
 
+  describe('getNonAssetFileNamesInDir', () => {
+    it('should list the entry and Git config files right in the directory', async () => {
+      const { allEntries } = await import('$lib/services/contents');
+
+      allEntries.current = /** @type {any[]} */ ([
+        {
+          locales: {
+            en: { path: 'content/posts/hello/index.md' },
+            ja: { path: 'content/posts/hello/index.ja.md' },
+          },
+        },
+        { locales: { _default: { path: 'content/posts/other/index.md' } } },
+      ]);
+      _gitConfigFiles.current = [{ path: 'content/posts/hello/.gitkeep' }];
+
+      expect(getNonAssetFileNamesInDir('content/posts/hello')).toEqual([
+        'index.md',
+        'index.ja.md',
+        '.gitkeep',
+      ]);
+      expect(getNonAssetFileNamesInDir('content/posts')).toEqual([]);
+
+      allEntries.current = [];
+      _gitConfigFiles.current = [];
+    });
+  });
+
   describe('getFolderBreadcrumbItems', () => {
     it('should return no item at the root', () => {
       const onBrowse = vi.fn();
@@ -567,6 +595,12 @@ describe('assets/subfolders', () => {
       expect(validateSubfolderName({ name: 'a/b', takenNames })).toBe('invalid');
       expect(validateSubfolderName({ name: '.hidden', takenNames })).toBe('invalid');
       expect(validateSubfolderName({ name: '???', takenNames })).toBe('invalid');
+    });
+
+    it('should reject a leading dot even when slugification removes it', () => {
+      _config.slugify_filename = true;
+      expect(validateSubfolderName({ name: '.hidden', takenNames })).toBe('invalid');
+      _config.slugify_filename = false;
     });
 
     it('should reject a name taken by a folder or file, regardless of case', () => {

@@ -3,7 +3,7 @@ import { createBaseCommitMessage } from '$lib/services/backends/git/shared/commi
 import { toRepoChanges } from '$lib/services/backends/root-dir';
 import { cmsConfig } from '$lib/services/config';
 import { prefs } from '$lib/services/user/prefs.svelte';
-import { createRawState } from '$lib/services/utils/state.svelte';
+import { createRawState, requestAnswer } from '$lib/services/utils/state.svelte';
 
 /**
  * @import {
@@ -41,6 +41,30 @@ let lastAddition = '';
 export const isCommitCancelled = (ex) => ex?.message === COMMIT_CANCELLED;
 
 /**
+ * Run an action that commits changes, and sort out how it ended. A cancellation at the commit
+ * message prompt isn’t a failure, so it’s not logged. Any other error is logged to the console.
+ * @template T
+ * @param {() => Promise<T>} action Action to run.
+ * @returns {Promise<{ ok: true, cancelled: false, result: T, error: undefined }
+ * | { ok: false, cancelled: boolean, result: undefined, error: any }>} Outcome. `error` is what
+ * the action threw, whether it was a cancellation or a failure.
+ */
+export const runCommit = async (action) => {
+  try {
+    return { ok: true, cancelled: false, result: await action(), error: undefined };
+  } catch (/** @type {any} */ ex) {
+    const cancelled = isCommitCancelled(ex);
+
+    if (!cancelled) {
+      // eslint-disable-next-line no-console
+      console.error(ex);
+    }
+
+    return { ok: false, cancelled, result: undefined, error: ex };
+  }
+};
+
+/**
  * Get how the user is asked for a commit message. The user is only asked when the changes are
  * actually committed: by a Git backend, or by the local backend with local Git commits turned on.
  * @returns {CommitMessagePromptMode | undefined} Mode, or `undefined` if the user isn’t asked.
@@ -69,35 +93,14 @@ export const getCommitMessagePromptMode = () => {
  * @param {string} args.defaultMessage Message made from the template.
  * @returns {Promise<string | null>} Text entered, or `null` if the user has cancelled.
  */
-const requestCommitMessage = async ({ mode, defaultMessage }) => {
-  // Saves are made one at a time, so a second request can’t normally be outstanding, but be
-  // defensive: leaving an earlier request unresolved would hang that save forever
-  commitMessageRequest.current?.respond(null);
-
-  return new Promise((resolve) => {
-    /** @type {CommitMessageRequest} */
-    const request = {
-      mode,
-      defaultMessage,
-      initialValue: mode === true ? defaultMessage : lastAddition,
-      /**
-       * Answer the request.
-       * @param {string | null} message Text entered, or `null` if the user has cancelled.
-       */
-      respond: (message) => {
-        // Only take down the dialog that belongs to this request, so answering a stale one can’t
-        // dismiss a newer one. Resolving an already settled promise does nothing
-        if (commitMessageRequest.current === request) {
-          commitMessageRequest.current = undefined;
-        }
-
-        resolve(message);
-      },
-    };
-
-    commitMessageRequest.current = request;
-  });
-};
+const requestCommitMessage = async ({ mode, defaultMessage }) =>
+  // Saves are made one at a time, so a second request can’t normally be outstanding, but an earlier
+  // one is answered just in case
+  requestAnswer(
+    commitMessageRequest,
+    { mode, defaultMessage, initialValue: mode === true ? defaultMessage : lastAddition },
+    null,
+  );
 
 /**
  * Ask the user for a commit message if the `prompt_commit_messages` backend option is set, and add

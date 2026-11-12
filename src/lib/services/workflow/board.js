@@ -1,7 +1,18 @@
+import { _ } from '@sveltia/i18n';
+
+import { getCollection, getCollectionLabel } from '$lib/services/contents/collection';
+import { getCollectionFile, getCollectionFileLabel } from '$lib/services/contents/collection/files';
+import { getEntrySummary } from '$lib/services/contents/entry/summary';
+import { getListFormatter } from '$lib/services/contents/i18n';
 import { WORKFLOW_STAGES, WORKFLOW_STATUS_LABELS } from '$lib/services/workflow/constants';
 
 /**
- * @import { UnpublishedEntry, WorkflowStatus } from '$lib/types/private';
+ * @import {
+ * CompanionEntry,
+ * InternalLocaleCode,
+ * UnpublishedEntry,
+ * WorkflowStatus,
+ * } from '$lib/types/private';
  */
 
 /**
@@ -24,6 +35,16 @@ export const STATUS_UPDATE_MESSAGES = {
   info: 'workflow.updating_status',
   success: 'workflow.status_updated',
   error: 'workflow.status_change_failed',
+};
+
+/**
+ * Messages of the toast notification reporting a reload of the pull requests at the user’s request.
+ * @type {ToastMessages}
+ */
+export const REFRESH_MESSAGES = {
+  info: 'workflow.refreshing',
+  success: 'workflow.refreshed',
+  error: 'workflow.refresh_failed',
 };
 
 /** @type {ToastMessages} */
@@ -66,6 +87,38 @@ export const getPublishMessages = (pendingDeletion) =>
   pendingDeletion ? DELETION_MESSAGES : PUBLISHING_MESSAGES;
 
 /**
+ * Get the message announcing the Editorial Workflow page to screen readers, with the number of
+ * entries in each column. A column the board doesn’t have is left out of the announcement rather
+ * than reported as zero: there’s no Ready column for an Open Authoring contributor, no In Review
+ * column when the review stage is left out, and no column but the drafts with Preview Workflow.
+ * @param {{ status: WorkflowStatus, entries: UnpublishedEntry[] }[]} columns Stage columns. The
+ * board always has a Drafts column.
+ * @param {UnpublishedEntry[]} pendingDeletions Pending deletions.
+ * @returns {{ key: string, values: Record<string, number> }} I18n string key and its values.
+ */
+export const getBoardAnnouncement = (columns, pendingDeletions) => {
+  /**
+   * Get the number of entries in the given column.
+   * @param {WorkflowStatus} status Column status.
+   * @returns {number | undefined} Count, or `undefined` if the board has no such column.
+   */
+  const count = (status) => columns.find((column) => column.status === status)?.entries.length;
+  const draft = /** @type {number} */ (count('draft'));
+  const [review, ready] = [count('pending_review'), count('pending_publish')];
+  const deletion = pendingDeletions.length;
+
+  if (review === undefined) {
+    return ready === undefined
+      ? { key: 'viewing_preview_workflow', values: { draft, deletion } }
+      : { key: 'viewing_editorial_workflow_without_review', values: { draft, ready, deletion } };
+  }
+
+  return ready === undefined
+    ? { key: 'viewing_open_authoring_workflow', values: { draft, review, deletion } }
+    : { key: 'viewing_editorial_workflow', values: { draft, review, ready, deletion } };
+};
+
+/**
  * Sort the unpublished entries into the columns of the Editorial Workflow board. A pending deletion
  * has a status of its own, so it never lands in a stage column; such entries are listed separately.
  * An entry is placed by the stage it’s in, which may differ from its status: see `resolveStage()`
@@ -96,4 +149,85 @@ export const groupEntriesByStatus = (
     })),
     pendingDeletions: entries.filter((entry) => entryStages.get(entry) === 'pending_deletion'),
   };
+};
+
+/**
+ * Get the label naming the given unpublished entry, e.g. its title, or the label of the collection
+ * file it stands for.
+ * @param {UnpublishedEntry} entry Unpublished entry.
+ * @returns {string} Label, or the entry slug if its collection has been removed from the
+ * configuration since the entry was saved.
+ */
+export const getUnpublishedEntryLabel = (entry) => {
+  const { collectionName, fileName } = entry.workflow;
+  const collection = getCollection(collectionName);
+
+  if (!collection) {
+    return entry.slug;
+  }
+
+  const collectionFile = fileName ? getCollectionFile(collection, fileName) : undefined;
+
+  return collectionFile
+    ? getCollectionFileLabel(collectionFile)
+    : getEntrySummary(collection, entry);
+};
+
+/**
+ * Get the notes listing the entries that ride along in the pull request of the given entry, which
+ * are published with it, for the entry’s card on the board: one for the new entries, and one for
+ * the existing entries it changes.
+ * @param {UnpublishedEntry} entry Unpublished entry.
+ * @param {InternalLocaleCode | null | undefined} locale App locale, which the lists are formatted
+ * for. Nothing is listed until it’s set, which is when the UI strings have been loaded.
+ * @returns {string[]} Notes, e.g. `Also adds Section: Getting Started` and `Also changes Author:
+ * Ada Lovelace`, without the one for which there are no entries.
+ */
+export const getCompanionNotes = (entry, locale) => {
+  const { companions = [] } = entry.workflow;
+
+  if (!locale) {
+    return [];
+  }
+
+  /**
+   * Get a note listing the given entries.
+   * @param {CompanionEntry[]} entries Entries.
+   * @param {string} key Message key of the note.
+   * @returns {string[]} Note, or nothing if there are no entries.
+   */
+  const getNote = (entries, key) => {
+    if (!entries.length) {
+      return [];
+    }
+
+    const items = entries.map(({ collectionName, entry: companion }) => {
+      const collection = getCollection(collectionName);
+
+      // The collection may have been removed from the configuration since the entry was saved
+      if (collection?._type !== 'entry') {
+        return companion.slug;
+      }
+
+      return _('workflow.companion_entry', {
+        values: {
+          collection: getCollectionLabel(collection, { useSingular: true }),
+          title: getEntrySummary(collection, companion),
+        },
+      });
+    });
+
+    return [_(key, { values: { entries: getListFormatter(locale).format(items) } })];
+  };
+
+  return [
+    ...getNote(
+      companions.filter(({ edited }) => !edited),
+      'workflow.companion_entries',
+    ),
+    ...getNote(
+      companions.filter(({ edited }) => edited),
+      'workflow.edited_companion_entries',
+    ),
+  ];
 };

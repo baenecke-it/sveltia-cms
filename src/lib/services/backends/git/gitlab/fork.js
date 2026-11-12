@@ -5,9 +5,10 @@ import {
   repository,
 } from '$lib/services/backends/git/gitlab/repository';
 import { fetchAPI } from '$lib/services/backends/git/shared/api';
+import { fetchAPIOrUndefined } from '$lib/services/backends/git/shared/api-optional';
 import {
   createLocalizedError,
-  NOT_COLLABORATOR_ERROR_MESSAGE,
+  createNoAccessError,
 } from '$lib/services/backends/git/shared/errors';
 import {
   isOpenAuthoringConfiguredFor,
@@ -17,6 +18,7 @@ import {
   runOpenAuthoringSetUp,
   setUpForkFor,
 } from '$lib/services/backends/git/shared/fork';
+import { isSameRepository } from '$lib/services/backends/git/shared/repository';
 import { user } from '$lib/services/user/account.svelte';
 
 /**
@@ -66,34 +68,17 @@ export const getWorkflowRepository = () => resolveWorkflowRepository(repository)
  */
 export const fetchRepositoryAccess = async () => {
   const { owner, repo } = repository;
-  const repoPath = `${owner}/${repo}`;
-  /** @type {{ found: boolean, canPush: boolean }} */
-  let permissions;
-
-  try {
-    permissions = await fetchProjectPermissions();
-  } catch {
-    // A spent rate limit or an outage leaves the question unanswered. Reading that as “no write
-    // access” would send a maintainer down the fork path over something passing, and offer to make
-    // a copy of a project they can already write to, so make the failure visible instead
-    throw createLocalizedError(
-      'Failed to check the repository permission.',
-      'open_authoring.permission_check_failed',
-      { repo: repoPath },
-    );
-  }
+  const { found, canPush } = await fetchProjectPermissions();
 
   // Open Authoring still needs the contributor to be able to read the project, so being unable to
   // see it is a dead end rather than a reason to fall back to a fork. The shared message is what
   // the sign-in flow looks for to drop the cached credentials, the same as the regular access check
   // does, so the user gets the sign-in form rather than the same error on every reload
-  if (!permissions.found) {
-    throw createLocalizedError(NOT_COLLABORATOR_ERROR_MESSAGE, 'repository_no_access', {
-      repo: repoPath,
-    });
+  if (!found) {
+    throw createNoAccessError(`${owner}/${repo}`);
   }
 
-  return { canWrite: permissions.canPush };
+  return { canWrite: canPush };
 };
 
 /**
@@ -137,23 +122,21 @@ export const fetchProjectDetails = async () => {
  * @see https://docs.gitlab.com/api/projects/#get-a-single-project
  */
 export const fetchForkByName = async () => {
-  const { owner, repo } = repository;
+  const { repo } = repository;
   const userName = /** @type {string} */ (user.account?.login);
-  /** @type {Record<string, any>} */
-  let result;
 
-  try {
-    result = /** @type {Record<string, any>} */ (
-      await fetchAPI(`/projects/${getProjectId({ owner: userName, repo })}`)
-    );
-  } catch {
-    // The contributor has no project of that name, which is the common case on a first visit
+  // The contributor has no project of that name, which is the common case on a first visit. Only
+  // that means there’s no fork at the path: reading a rate limit or an outage the same way would
+  // have the contributor asked to create another one, so that is passed on
+  const result = /** @type {Record<string, any> | undefined} */ (
+    await fetchAPIOrUndefined(`/projects/${getProjectId({ owner: userName, repo })}`)
+  );
+
+  if (!result) {
     return undefined;
   }
 
-  const parent = result.forked_from_project?.path_with_namespace?.toLowerCase();
-
-  if (parent !== `${owner}/${repo}`.toLowerCase()) {
+  if (!isSameRepository(result.forked_from_project?.path_with_namespace, repository)) {
     return undefined;
   }
 
@@ -171,35 +154,31 @@ export const fetchForkByName = async () => {
 
 /**
  * Ask the configured project for the fork the signed-in user owns, wherever it’s named. This only
- * runs when {@link fetchForkByName} came up empty, so its worst case is the behavior without it: no
- * fork found, and the contributor asked whether to make one.
+ * runs when {@link fetchForkByName} came up empty. A failure to read the list is passed on rather
+ * than taken for no fork, which would have the contributor asked to create another one.
  * @returns {Promise<RepositoryPath | undefined>} The fork, or `undefined` if there is none.
  * @see https://docs.gitlab.com/api/project_forks/#list-forks-of-a-project
  */
 export const fetchForkFromNetwork = async () => {
   const userName = user.account?.login;
 
-  try {
-    const forks = /** @type {Record<string, any>[]} */ (
-      await fetchAPI(`/projects/${getProjectId()}/forks?owned=true&per_page=${MAX_FORKS}`)
-    );
+  const forks = /** @type {Record<string, any>[]} */ (
+    await fetchAPI(`/projects/${getProjectId()}/forks?owned=true&per_page=${MAX_FORKS}`)
+  );
 
-    // Check the namespace rather than trusting the filter to have applied: committing to a fork in
-    // a group the contributor merely belongs to would put their drafts somewhere unexpected
-    const fork = forks.find(
-      ({ namespace }) => namespace?.kind === 'user' && namespace?.full_path === userName,
-    );
+  // Check the namespace rather than trusting the filter to have applied: committing to a fork in
+  // a group the contributor merely belongs to would put their drafts somewhere unexpected
+  const fork = forks.find(
+    ({ namespace }) => namespace?.kind === 'user' && namespace?.full_path === userName,
+  );
 
-    if (!fork) {
-      return undefined;
-    }
-
-    projectIds.fork = fork.id;
-
-    return parseProjectPath(fork.path_with_namespace);
-  } catch {
+  if (!fork) {
     return undefined;
   }
+
+  projectIds.fork = fork.id;
+
+  return parseProjectPath(fork.path_with_namespace);
 };
 
 /**
@@ -219,7 +198,7 @@ const FORK_READY_STATUSES = ['none', 'finished'];
  * background and the request returns before the copy is complete, so committing to it right away
  * could fail.
  * @param {RepositoryPath} fork Fork to wait for.
- * @param {number} [attemptsLeft] Number of attempts remaining, used for the recursive retry.
+ * @param {number} [attemptsLeft] Number of checks at most, including the first one.
  * @throws {Error} When the fork hasn’t become available within the allotted time, or the import
  * failed outright.
  * @see https://docs.gitlab.com/api/project_import_export/#import-status
@@ -330,11 +309,10 @@ export const createFork = async () => {
  * @see https://sveltiacms.app/en/docs/workflows/open
  */
 const setUpOpenAuthoring = async () => {
-  const { owner, repo } = repository;
   let allowForking = false;
 
   await setUpForkFor({
-    repoPath: `${owner}/${repo}`,
+    repository,
     fetchAccess: fetchRepositoryAccess,
     /**
      * Look up the fork, along with the project details, which are needed whether or not there’s a

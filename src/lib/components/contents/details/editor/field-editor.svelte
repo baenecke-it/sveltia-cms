@@ -1,7 +1,6 @@
 <script>
   import { _ } from '@sveltia/i18n';
   import { Alert, Menu, MenuButton, Spacer } from '@sveltia/ui';
-  import { getContext, setContext } from 'svelte';
 
   import ErrorBoundary from '$lib/components/common/error-boundary.svelte';
   import CopyMenuItems from '$lib/components/contents/details/editor/copy-menu-items.svelte';
@@ -17,11 +16,16 @@
   import { canResetField, resetField } from '$lib/services/contents/draft/update/reset';
   import { isFieldChanged, revertChanges } from '$lib/services/contents/draft/update/revert';
   import { getFieldValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
-  import { isInEditorComponent } from '$lib/services/contents/editor/field-context';
+  import {
+    getFieldEditorContext,
+    isInEditorComponent,
+    setFieldEditorContext,
+  } from '$lib/services/contents/editor/field-context';
   import {
     getEditorFieldConfig,
     getFieldEditorFlags,
     getFieldInputLabels,
+    TRANSLATABLE_FIELD_TYPES,
   } from '$lib/services/contents/editor/field-flags';
   import { getFieldLocaleAccess } from '$lib/services/contents/editor/locale';
   import { createResetMenuState } from '$lib/services/contents/editor/reset-menu.svelte';
@@ -34,8 +38,9 @@
   import { isAutoNowField } from '$lib/services/contents/fields/date-time/auto-now';
   import { isAutoIncrementField } from '$lib/services/contents/fields/number/auto-increment';
   import { getDraftI18nConfig } from '$lib/services/contents/i18n/config';
+  import { getFieldLabel, getLocalizedOption } from '$lib/services/contents/i18n/options';
   import { createRawState } from '$lib/services/utils/state.svelte';
-  import { sanitizeInlineMarkdown } from '$lib/services/utils/string';
+  import { sanitizeHelpText } from '$lib/services/utils/string';
   import { isPendingDeletion } from '$lib/services/workflow';
 
   /**
@@ -48,16 +53,10 @@
    * InternalLocaleCode,
    * TypedFieldKeyPath,
    * } from '$lib/types/private';
-   * @import {
-   * CustomField,
-   * Field,
-   * FieldKeyPath,
-   * VisibleField,
-   * } from '$lib/types/public';
+   * @import { CustomField, Field, FieldKeyPath } from '$lib/types/public';
    */
 
-  /** @type {FieldEditorContext} */
-  const parent = getContext('field-editor') ?? {};
+  const parent = getFieldEditorContext();
 
   /**
    * @typedef {object} Props
@@ -78,7 +77,6 @@
 
   /** @type {Props} */
   let {
-    /* eslint-disable prefer-const */
     locale,
     keyPath,
     typedKeyPath,
@@ -87,21 +85,9 @@
     componentName,
     valueStoreKey = parent.valueStoreKey ?? 'currentValues',
     inline = false,
-    /* eslint-enable prefer-const */
   } = $props();
 
   const fieldId = $props.id();
-
-  /**
-   * Parse the given string as Markdown and sanitize the result to only allow certain tags. A
-   * literal `\n` is turned into a line break.
-   * @param {string} str Original string.
-   * @returns {string} Sanitized string.
-   */
-  const _sanitize = (str) =>
-    sanitizeInlineMarkdown(str.replaceAll('\\n', '<br>'), {
-      allowedTags: ['strong', 'em', 'del', 'code', 'a', 'br'],
-    });
 
   /**
    * Write a value coming from the widget editor back to the entry draft. Widget editors sync their
@@ -133,20 +119,9 @@
   /** @type {{ current: Component | undefined }} */
   const extraHint = createRawState();
 
-  setContext(
-    'field-editor',
-    // svelte-ignore state_referenced_locally
-    /** @type {FieldEditorContext} */ ({
-      fieldContext,
-      parentComponentNames: [...(parent.parentComponentNames ?? []), componentName].filter(Boolean),
-      extraHint,
-      valueStoreKey,
-    }),
-  );
-
   const inEditorComponent = $derived(isInEditorComponent(valueStoreKey));
-  const { name: fieldName, widget: fieldType = 'string' } = $derived(fieldConfig);
-  const { label = '', hint = '' } = $derived(/** @type {VisibleField} */ (fieldConfig));
+  const { widget: fieldType = 'string' } = $derived(fieldConfig);
+  const hint = $derived(getLocalizedOption({ config: fieldConfig, option: 'hint', locale }) ?? '');
   const required = $derived(isFieldRequired({ fieldConfig, locale }));
   const multiple = $derived(isFieldMultiple(fieldConfig));
   const { prefix, suffix, beforeInputLabel, afterInputLabel, hasExtraLabels } = $derived(
@@ -154,10 +129,9 @@
   );
   const isList = $derived(fieldType === 'list' || multiple);
   const originalValues = $derived(entryDraft.current?.originalValues);
-  const { i18nEnabled, allLocales, defaultLocale } = $derived(
-    getDraftI18nConfig(entryDraft.current),
-  );
-  const otherLocales = $derived(i18nEnabled ? allLocales.filter((l) => l !== locale) : []);
+  const { allLocales } = $derived(getDraftI18nConfig(entryDraft.current));
+  // Without i18n, the only locale is the one being edited, which leaves none
+  const otherLocales = $derived(allLocales.filter((l) => l !== locale));
   // Only the field’s own values are depended on, so the editor isn’t updated whenever another
   // field in the entry changes
   const valueMap = $derived(
@@ -193,7 +167,7 @@
     }),
   );
   const validity = $derived(entryDraft.current?.validities[locale][keyPath]);
-  const fieldLabel = $derived(label || fieldName);
+  const fieldLabel = $derived(getFieldLabel({ config: fieldConfig, locale }));
   // An entry awaiting deletion is shown for reference only. Unlike `readonly`, which is also set
   // for a duplicated locale, this hides the options that would change the content
   const pendingDeletion = $derived(isPendingDeletion(entryDraft.current?.originalEntry));
@@ -221,22 +195,42 @@
   );
   /* v8 ignore stop */
   const autoSet = $derived(autoNow || autoIncrement);
-  const { hidden, readonly } = $derived(
+  const { hidden, readonly, subfieldsReadonly } = $derived(
     getFieldEditorFlags({
       fieldConfig,
       autoSet,
       locked,
       isDuplicated,
       isNew: !!entryDraft.current?.isNew,
+      parentReadonly: !!parent.readonly,
     }),
   );
+
+  setFieldEditorContext(
+    // svelte-ignore state_referenced_locally
+    /** @type {FieldEditorContext} */ ({
+      fieldContext,
+      parentComponentNames: [...(parent.parentComponentNames ?? []), componentName].filter(Boolean),
+      extraHint,
+      valueStoreKey,
+      /**
+       * Get whether the subfields can’t be edited because this field can’t be.
+       * @returns {boolean} Result.
+       */
+      get readonly() {
+        return subfieldsReadonly;
+      },
+    }),
+  );
+
   // A field can be restored to its default value or cleared, unless it can’t be edited or its keys
   // follow the default locale, as with a KeyValue field using the `duplicate_keys` i18n strategy
   const canReset = $derived(!inEditorComponent && !readonly && !areKeysDuplicated);
   // The field’s reset actions are taken right away rather than confirmed in a dialog, so only the
   // availability is used
   const resetMenu = createResetMenuState(() => {
-    const args = { valueMap, fieldConfig, keyPath, locale, defaultLocale };
+    const draft = /** @type {EntryDraft} */ (entryDraft.current);
+    const args = { draft, valueMap, fieldConfig, keyPath, locale };
 
     return {
       restore: canResetField({ ...args, restore: true }),
@@ -260,7 +254,7 @@
 
 {#snippet beforeInput()}
   {#if beforeInputLabel}
-    <div role="none" class="before-input">{@html _sanitize(beforeInputLabel)}</div>
+    <div role="none" class="before-input">{@html sanitizeHelpText(beforeInputLabel)}</div>
   {/if}
   {#if prefix}
     <div role="none" class="prefix">{prefix}</div>
@@ -272,7 +266,7 @@
     <div role="none" class="suffix">{suffix}</div>
   {/if}
   {#if afterInputLabel}
-    <div role="none" class="after-input">{@html _sanitize(afterInputLabel)}</div>
+    <div role="none" class="after-input">{@html sanitizeHelpText(afterInputLabel)}</div>
   {/if}
 {/snippet}
 
@@ -310,7 +304,7 @@
         <span class="required" aria-hidden="true">*</span>
       {/if}
       <Spacer flex />
-      {#if canCopy && !draftReadonly && ['richtext', 'markdown', 'string', 'text', 'list', 'object'].includes(fieldType)}
+      {#if canCopy && !draftReadonly && TRANSLATABLE_FIELD_TYPES.includes(fieldType)}
         <TranslateButton size="small" {locale} {otherLocales} {keyPath} />
       {/if}
       <!-- Every option in the menu edits the content, which a read-only entry doesn’t allow -->
@@ -394,7 +388,7 @@
       {@const ExtraHint = extraHint.current}
       <div role="none" class="footer">
         {#if hint}
-          <p class="hint">{@html _sanitize(hint)}</p>
+          <p class="hint">{@html sanitizeHelpText(hint)}</p>
         {/if}
         <ExtraHint {fieldConfig} {locale} {currentValue} />
       </div>

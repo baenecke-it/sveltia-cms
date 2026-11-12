@@ -137,6 +137,24 @@ describe('integrations/media-libraries/stock/pexels', () => {
         });
       });
 
+      it('should escape the photographer name and the link in the credit', () => {
+        /** @type {any} */
+        const [result] = parseResults([
+          {
+            id: 1,
+            url: 'https://www.pexels.com/photo/sample-1/?a=1&b="2"',
+            alt: 'Sample',
+            src: { large2x: 'https://example.com/l.jpg', medium: 'https://example.com/m.jpg' },
+            photographer: 'Smith & <Jones>',
+          },
+        ]);
+
+        expect(result.credit).toBe(
+          '<a href="https://www.pexels.com/photo/sample-1/?a=1&amp;b=&quot;2&quot;">' +
+            'Photo by Smith &amp; &lt;Jones&gt; on Pexels</a>',
+        );
+      });
+
       it('should handle missing alt text', () => {
         /** @type {any} */
         const mockResponse = {

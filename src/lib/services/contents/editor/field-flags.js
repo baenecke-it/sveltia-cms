@@ -4,6 +4,7 @@
  * Field,
  * NumberField,
  * StringField,
+ * UuidField,
  * VisibleField,
  * } from '$lib/types/public';
  */
@@ -16,6 +17,20 @@
  * @property {string | undefined} afterInputLabel Label shown after the input, as Markdown.
  * @property {boolean} hasExtraLabels Whether any of the above is set.
  */
+
+/**
+ * Field types that the Translate button in the field header supports: the ones holding text, or
+ * subfields that hold text.
+ * @type {string[]}
+ */
+export const TRANSLATABLE_FIELD_TYPES = [
+  'richtext',
+  'markdown',
+  'string',
+  'text',
+  'list',
+  'object',
+];
 
 /**
  * Get the extra labels shown around a field’s input. The `prefix` and `suffix` options apply to
@@ -53,19 +68,40 @@ export const getFieldInputLabels = (fieldConfig) => {
  * deletion or in a read-only collection.
  * @param {boolean} args.isDuplicated Whether the field’s value follows the default locale.
  * @param {boolean} args.isNew Whether the entry is being created.
- * @returns {{ hidden: boolean, readonly: boolean }} Flags.
+ * @param {boolean} [args.parentReadonly] Whether the field belongs to a List or Object field, or a
+ * rich text editor component, that can’t be edited, which no subfield can opt out of.
+ * @returns {{ hidden: boolean, readonly: boolean, subfieldsReadonly: boolean }} Flags. The last one
+ * tells the subfields whether they can’t be edited because of this field. It leaves out whether
+ * the value follows the default locale, as a subfield made translatable has a value of its own,
+ * and whether the entry is locked, which each subfield works out itself.
  */
-export const getFieldEditorFlags = ({ fieldConfig, autoSet, locked, isDuplicated, isNew }) => {
+export const getFieldEditorFlags = ({
+  fieldConfig,
+  autoSet,
+  locked,
+  isDuplicated,
+  isNew,
+  parentReadonly = false,
+}) => {
   const { widget: fieldType = 'string' } = fieldConfig;
   const { readonly: readonlyOption } = /** @type {VisibleField} */ (fieldConfig);
   const isCompute = fieldType === 'compute';
+  const subfieldsReadonly = readonlyOption === true || parentReadonly;
 
   return {
     // A field set on save has no meaningful value until the entry is saved for the first time
     hidden: isCompute || (autoSet && isNew),
     readonly:
-      // The `readonly` option defaults to `true` for the UUID field type, which can be unlocked
-      (readonlyOption ?? fieldType === 'uuid') || autoSet || locked || isDuplicated || isCompute,
+      // The `readonly` option defaults to `true` for the UUID field type, which can be unlocked,
+      // also with the field type’s own `read_only` option, as in Decap CMS
+      (readonlyOption ??
+        (fieldType === 'uuid' && /** @type {UuidField} */ (fieldConfig).read_only !== false)) ||
+      subfieldsReadonly ||
+      autoSet ||
+      locked ||
+      isDuplicated ||
+      isCompute,
+    subfieldsReadonly,
   };
 };
 

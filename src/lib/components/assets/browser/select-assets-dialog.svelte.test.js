@@ -6,7 +6,7 @@ import { render } from 'vitest-browser-svelte';
 import { createSubfolder } from '$lib/services/assets/data/subfolder';
 import { globalAssetFolder } from '$lib/services/assets/folders';
 import { selectAssetsView, showContentOverlay } from '$lib/services/contents/editor';
-import { duplicates } from '$lib/services/contents/fields/file/duplicates.svelte';
+import { duplicatesRequest } from '$lib/services/contents/fields/file/duplicates.svelte';
 import { listAssets } from '$lib/services/contents/fields/file/helpers';
 import { getUnsavedAssets } from '$lib/services/contents/fields/file/process';
 import {
@@ -23,8 +23,10 @@ import {
   createMockExternalAsset,
   createMockImageFile,
   initTestConfig,
+  serveMediaFolderAtSiteRoot,
   setAssets,
 } from '$lib/test/config';
+import { waitForToastsToHide } from '$lib/test/toast';
 
 import SelectAssetsDialog from './select-assets-dialog.svelte';
 
@@ -130,6 +132,16 @@ const isDropIndicatorShownOnDragOver = async () => {
 
   return !!document.querySelector('.drop-indicator');
 };
+
+/**
+ * Get the text of the error toast shown, if any.
+ * @returns {string | undefined} Text.
+ */
+const getErrorToastText = () =>
+  document
+    .querySelector('.sui.toast:not([aria-hidden="true"]) .sui.alert.error')
+    ?.textContent?.replace(/\s+/g, ' ')
+    .trim();
 
 /**
  * Wait for the grid to be listed and activated.
@@ -327,6 +339,8 @@ describe('SelectAssetsDialog', () => {
     });
 
     test('neither creates nor uploads anything in a folder the CMS is served from', async () => {
+      serveMediaFolderAtSiteRoot();
+
       assets.push(
         createMockAsset({
           name: 'logo.png',
@@ -447,7 +461,7 @@ describe('SelectAssetsDialog', () => {
 
       dropFiles([file]);
       await waitForGrid(3);
-      expect(duplicates.showDialog).toBe(false);
+      expect(duplicatesRequest.current).toBeUndefined();
       await dialog.getByRole('button', { name: 'Insert' }).click();
 
       await vi.waitFor(() =>
@@ -701,7 +715,10 @@ describe('SelectAssetsDialog', () => {
     await dialog.getByRole('option', { name: 'Enter URL' }).click();
     await expect.element(dialog.getByText('Enter URL of the file:')).toBeInTheDocument();
 
-    await dialog.getByRole('textbox').fill(' https://example.com/x.pdf ');
+    // The prompt names the input
+    await dialog
+      .getByRole('textbox', { name: 'Enter URL of the file:' })
+      .fill(' https://example.com/x.pdf ');
     await dialog.getByRole('button', { name: 'Insert' }).click();
 
     await vi.waitFor(() =>
@@ -722,7 +739,9 @@ describe('SelectAssetsDialog', () => {
 
     const insert = dialog.getByRole('button', { name: 'Insert' });
 
-    await dialog.getByRole('textbox').fill('https://example.com/x.png');
+    await dialog
+      .getByRole('textbox', { name: 'Enter URL of the image:' })
+      .fill('https://example.com/x.png');
     await expect.element(insert).toBeEnabled();
     await dialog.getByRole('textbox').fill(' ');
     await expect.element(insert).toBeDisabled();
@@ -734,7 +753,9 @@ describe('SelectAssetsDialog', () => {
     const insert = dialog.getByRole('button', { name: 'Insert' });
 
     await dialog.getByRole('option', { name: 'Enter URL' }).click();
-    await dialog.getByRole('textbox').fill('https://example.com/x.png');
+    await dialog
+      .getByRole('textbox', { name: 'Enter URL of the image:' })
+      .fill('https://example.com/x.png');
     await expect.element(insert).toBeEnabled();
 
     // Nothing is selected in the repository folder
@@ -769,6 +790,81 @@ describe('SelectAssetsDialog', () => {
         { url: 'https://cdn.example.com/images/cloud.png', credit: undefined },
       ]),
     );
+  });
+
+  describe('with a cloud storage prefix made of an entry field', () => {
+    const fieldConfig = {
+      name: 'image',
+      widget: 'image',
+      media_libraries: { test_cloud: { prefix: '{{fields.release}}/' } },
+    };
+
+    test('lists the folder of the entry', async () => {
+      const list = vi.fn().mockResolvedValue([]);
+
+      await renderDialog(
+        {
+          fieldConfig,
+          draft: {
+            collection: { _type: 'entry', name: 'posts', _i18n: { defaultLocale: 'en-US' } },
+            currentValues: { 'en-US': { release: 12 } },
+            files: {},
+          },
+          locale: 'en-US',
+        },
+        { list },
+      );
+
+      await page.getByRole('dialog').getByRole('option', { name: 'Test Cloud' }).click();
+
+      await vi.waitFor(() =>
+        expect(list).toHaveBeenCalledWith(
+          expect.objectContaining({
+            fieldConfig: expect.objectContaining({
+              media_libraries: { test_cloud: { prefix: '12/' } },
+            }),
+          }),
+        ),
+      );
+    });
+
+    test('asks for the value first, without touching the service', async () => {
+      const list = vi.fn().mockResolvedValue([]);
+
+      await renderDialog({ fieldConfig }, { list, upload: vi.fn() });
+
+      const dialog = page.getByRole('dialog');
+
+      await dialog.getByRole('option', { name: 'Test Cloud' }).click();
+
+      await expect
+        .element(dialog.getByRole('alert'))
+        .toMatchTextContent('Fill in the fields this location depends on');
+      await expect.element(dialog.getByRole('button', { name: 'Upload' })).not.toBeInTheDocument();
+      expect(list).not.toHaveBeenCalled();
+    });
+
+    test('leaves pending files out once closed, so they don’t go up later', async () => {
+      const upload = vi.fn();
+      const pendingFiles = [await createMockImageFile({ name: 'pending.png' })];
+
+      const { props, onClose } = await renderDialog(
+        {
+          fieldConfig,
+          pendingFiles,
+          assetLibraryFolderMap: { global: { folder: globalAssetFolder.current, enabled: false } },
+        },
+        { upload },
+      );
+
+      await expect.element(page.getByRole('dialog').getByRole('alert')).toBeInTheDocument();
+      expect(props.pendingFiles).toHaveLength(1);
+
+      await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
+      await vi.waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+      expect(props.pendingFiles).toEqual([]);
+      expect(upload).not.toHaveBeenCalled();
+    });
   });
 
   test('creates a folder on a cloud storage service that has folders', async () => {
@@ -1080,15 +1176,15 @@ describe('SelectAssetsDialog', () => {
     const duplicate = await createMockImageFile({ name: 'a.png', width: 5 });
 
     dropFiles([duplicate]);
-    await expect.poll(() => duplicates.showDialog).toBe(true);
-    duplicates.resolve?.(undefined);
-    await expect.poll(() => duplicates.showDialog).toBe(false);
+    await expect.poll(() => !!duplicatesRequest.current).toBe(true);
+    duplicatesRequest.current?.respond(undefined);
+    await expect.poll(() => !!duplicatesRequest.current).toBe(false);
     await sleep(100);
     expect(document.querySelectorAll('#select-assets-grid [role="option"]')).toHaveLength(3);
 
     dropFiles([duplicate]);
-    await expect.poll(() => duplicates.showDialog).toBe(true);
-    duplicates.resolve?.(true);
+    await expect.poll(() => !!duplicatesRequest.current).toBe(true);
+    duplicatesRequest.current?.respond(true);
     // The new file takes the place of the existing asset in the list
     await expect.poll(() => document.querySelectorAll('.unsaved').length).toBe(1);
     await waitForGrid(3);
@@ -1157,8 +1253,8 @@ describe('SelectAssetsDialog', () => {
       .toHaveAttribute('aria-selected', 'true');
   });
 
-  test('falls back to a stock photo service for pending files without a cloud service', async () => {
-    await renderDialog({
+  test('reports pending files that no location can take, falling back to a stock photo service', async () => {
+    const { props } = await renderDialog({
       assetLibraryFolderMap: { global: { folder: globalAssetFolder.current, enabled: false } },
       enabledCloudServiceEntries: [],
       pendingFiles: [await createMockImageFile({ name: 'pending.png' })],
@@ -1167,6 +1263,76 @@ describe('SelectAssetsDialog', () => {
     await expect
       .element(page.getByRole('dialog').getByRole('option', { name: 'Lorem Picsum' }))
       .toHaveAttribute('aria-selected', 'true');
+    await expect.poll(getErrorToastText).toBe('error Error Upload failed.');
+    expect(props.pendingFiles).toEqual([]);
+    await waitForToastsToHide();
+  });
+
+  test('takes the files dropped on the field to the cloud service once signed in', async () => {
+    const upload = vi.fn(async (/** @type {File[]} */ files) =>
+      files.map((file) => createMockExternalAsset({ fileName: file.name })),
+    );
+
+    // The field renders the dialog closed, and opens it once files are dropped on the field, so
+    // the location offered first, Lorem Picsum, was picked before there were files to upload
+    const { props } = await renderDialog(
+      {
+        open: false,
+        pendingFiles: [],
+        assetLibraryFolderMap: { global: { folder: globalAssetFolder.current, enabled: false } },
+        draft: { originalEntry: undefined, files: {} },
+      },
+      { authType: 'api_key', apiKeyPattern: /^[a-z]+$/, upload },
+    );
+
+    const pending = await createMockImageFile({ name: 'pending.png' });
+
+    props.pendingFiles = [pending];
+    props.open = true;
+
+    const dialog = page.getByRole('dialog');
+
+    await expect
+      .element(dialog.getByRole('option', { name: 'Test Cloud' }))
+      .toHaveAttribute('aria-selected', 'true');
+
+    // Nothing is uploaded without the credentials, which the service asks for first
+    const input = dialog.getByRole('textbox', { name: /Test Cloud/ });
+
+    await expect.element(input).toBeInTheDocument();
+    await expect.element(dialog.getByRole('button', { name: 'Upload' })).toBeDisabled();
+    await sleep(100);
+    expect(upload).not.toHaveBeenCalled();
+    expect(props.pendingFiles).toEqual([pending]);
+
+    await input.fill('secret');
+    await vi.waitFor(() =>
+      expect(upload).toHaveBeenCalledWith([pending], expect.objectContaining({ apiKey: 'secret' })),
+    );
+    expect(props.pendingFiles).toEqual([]);
+    await expect.element(dialog.getByRole('button', { name: 'Upload' })).toBeEnabled();
+  });
+
+  test('leaves the pending files out once another location is picked', async () => {
+    const pending = await createMockImageFile({ name: 'pending.png' });
+
+    const { props } = await renderDialog(
+      {
+        pendingFiles: [pending],
+        assetLibraryFolderMap: { global: { folder: globalAssetFolder.current, enabled: false } },
+      },
+      { authType: 'api_key', apiKeyPattern: /^[a-z]+$/, upload: vi.fn() },
+    );
+
+    const dialog = page.getByRole('dialog');
+
+    await expect.element(dialog.getByRole('textbox', { name: /Test Cloud/ })).toBeInTheDocument();
+    expect(props.pendingFiles).toEqual([pending]);
+
+    await dialog.getByRole('option', { name: 'Lorem Picsum' }).click();
+    expect(props.pendingFiles).toEqual([]);
+    // They were meant for the cloud service, so no failure is reported
+    expect(getErrorToastText()).toBeUndefined();
   });
 
   test('opens the Cloudinary library, and closes once assets are picked', async () => {

@@ -3,16 +3,24 @@
   import { Button, ConfirmationDialog, Icon, PromptDialog, Spacer } from '@sveltia/ui';
   import { onMount } from 'svelte';
 
-  import { allBackendServices } from '$lib/services/backends';
+  import { DOCS_BASE_URL } from '$lib/services/app';
+  import { loadBackendService } from '$lib/services/backends';
   import { isDemoSite } from '$lib/services/backends/fs/seed';
+  import { cancelAuthorization } from '$lib/services/backends/git/shared/auth';
   import { cmsConfig } from '$lib/services/config';
-  import { auth, signInAutomatically, signInManually } from '$lib/services/user/auth.svelte';
+  import {
+    auth,
+    magicLinkConfirmation,
+    signInAutomatically,
+    signInManually,
+  } from '$lib/services/user/auth.svelte';
   import { env } from '$lib/services/user/env.svelte';
   import { getSignInOptions } from '$lib/services/user/sign-in-options';
   import { makeLink } from '$lib/services/utils/string';
   import { isWorkflowConfigured } from '$lib/services/workflow/config';
 
   /**
+   * @import { BackendService } from '$lib/types/private';
    * @import { Backend, GitBackend } from '$lib/types/public';
    */
 
@@ -21,9 +29,15 @@
 
   const configuredBackend = $derived(/** @type {Backend} */ (cmsConfig.current?.backend));
   const backendName = $derived(/** @type {string} */ (configuredBackend.name));
-  const backend = $derived(allBackendServices[backendName]);
+  /**
+   * The configured backend service, once loaded: a Git backend other than GitHub is kept in a chunk
+   * of its own, which is only fetched for a site that uses it.
+   * @type {BackendService | undefined}
+   */
+  let backend = $state.raw();
   const isTestRepo = $derived(backendName === 'test-repo');
   const isDemo = $derived(isDemoSite(backendName));
+  const testRepoUnsupported = $derived(isTestRepo && !env.isTestBackendSupported);
   // The test repository has no `repo` option, and the name only goes with the local option
   const repositoryName = $derived(
     /** @type {GitBackend} */ (configuredBackend).repo?.split('/').pop(),
@@ -48,11 +62,30 @@
    * Account name to show when the user is asked whether to sign in with a magic link.
    */
   const magicLinkAccountName = $derived.by(() => {
-    const { login, name } = auth.magicLinkConfirmation?.account ?? {};
+    const { login, name } = magicLinkConfirmation.current?.account ?? {};
 
     return login || name || '';
   });
   /* v8 ignore stop */
+
+  $effect(() => {
+    const name = backendName;
+
+    // Don’t offer the previous backend while the configured one is being loaded
+    backend = undefined;
+
+    loadBackendService(name).then(
+      (service) => {
+        // The configuration may have changed while the service was being loaded
+        if (name === backendName) {
+          backend = service;
+        }
+      },
+      () => {
+        // The automatic sign-in loads the same service and reports the failure
+      },
+    );
+  });
 
   onMount(() => {
     // Skip automatic sign-in if there’s already an error (e.g. repository access denied), so the
@@ -68,6 +101,13 @@
 <div role="none" class="buttons">
   {#if auth.signingIn}
     <div role="alert" class="message">{_('signing_in')}</div>
+    {#if cancelAuthorization.current}
+      <!--
+        The app can’t always tell when the user closes the sign-in popup, e.g. when GitLab’s sign-in
+        page has severed it from this window, so let the user get out of the pending sign-in
+      -->
+      <Button variant="secondary" label={_('cancel')} onclick={cancelAuthorization.current} />
+    {/if}
   {:else if backend}
     {#if showLocalBackendOption}
       <Button
@@ -83,7 +123,7 @@
           {#if env.isBrave}
             {@html makeLink(
               _('local_workflow.disabled'),
-              'https://sveltiacms.app/en/docs/workflows/local#enabling-file-system-access-api-in-brave',
+              `${DOCS_BASE_URL}/workflows/local#enabling-file-system-access-api-in-brave`,
             )}
           {:else}
             {_('local_workflow.unsupported_browser')}
@@ -108,11 +148,14 @@
           : isTestRepo
             ? _('work_with_test_repo')
             : _('sign_in_with_x', { values: { service: serviceLabel } })}
-        disabled={oauthOptionDisabled}
+        disabled={oauthOptionDisabled || testRepoUnsupported}
         onclick={async () => {
           await signInManually(backendName);
         }}
       />
+      {#if testRepoUnsupported}
+        <div role="alert">{_('test_repo_unsupported_browser')}</div>
+      {/if}
     {/if}
     {#if !isTestRepo && !tokenOptionHidden}
       <Button
@@ -163,16 +206,16 @@
 </PromptDialog>
 
 <ConfirmationDialog
-  open={!!auth.magicLinkConfirmation}
+  open={!!magicLinkConfirmation.current}
   title={_('sign_in_with_link')}
   okLabel={_('sign_in')}
   onOk={() => {
-    auth.magicLinkConfirmation?.resolve(true);
+    magicLinkConfirmation.current?.respond(true);
   }}
   onClose={() => {
     // Covers the Cancel button, the Escape key and any other way out. Signing in has already
     // settled the prompt, so this leaves it alone
-    auth.magicLinkConfirmation?.resolve(false);
+    magicLinkConfirmation.current?.respond(false);
   }}
 >
   {_('sign_in_with_link_confirmation', {

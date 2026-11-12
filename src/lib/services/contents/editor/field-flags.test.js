@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'vitest';
 
-import { getEditorFieldConfig, getFieldEditorFlags, getFieldInputLabels } from './field-flags';
+import {
+  getEditorFieldConfig,
+  getFieldEditorFlags,
+  getFieldInputLabels,
+  TRANSLATABLE_FIELD_TYPES,
+} from './field-flags';
 
 /**
  * @import { Field } from '$lib/types/public';
@@ -73,7 +78,7 @@ describe('Test getFieldEditorFlags()', () => {
   test('returns false for both flags for a plain field', () => {
     expect(
       getFieldEditorFlags({ ...defaults, fieldConfig: { name: 'title', widget: 'string' } }),
-    ).toEqual({ hidden: false, readonly: false });
+    ).toEqual({ hidden: false, readonly: false, subfieldsReadonly: false });
   });
 
   test('honors the readonly option', () => {
@@ -82,7 +87,7 @@ describe('Test getFieldEditorFlags()', () => {
         ...defaults,
         fieldConfig: { name: 'title', widget: 'string', readonly: true },
       }),
-    ).toEqual({ hidden: false, readonly: true });
+    ).toEqual({ hidden: false, readonly: true, subfieldsReadonly: true });
   });
 
   test('makes a UUID field read-only by default, which the readonly option can unlock', () => {
@@ -97,13 +102,30 @@ describe('Test getFieldEditorFlags()', () => {
     ).toBe(false);
   });
 
+  test('lets the read_only option unlock a UUID field, but not override a lock', () => {
+    /** @type {Field} */
+    const fieldConfig = { name: 'id', widget: 'uuid', read_only: false };
+
+    expect(getFieldEditorFlags({ ...defaults, fieldConfig }).readonly).toBe(false);
+    expect(
+      getFieldEditorFlags({
+        ...defaults,
+        fieldConfig: { name: 'id', widget: 'uuid', read_only: true },
+      }).readonly,
+    ).toBe(true);
+    expect(getFieldEditorFlags({ ...defaults, fieldConfig, locked: true }).readonly).toBe(true);
+    expect(getFieldEditorFlags({ ...defaults, fieldConfig, isDuplicated: true }).readonly).toBe(
+      true,
+    );
+  });
+
   test('hides a Compute field and makes it read-only', () => {
     expect(
       getFieldEditorFlags({
         ...defaults,
         fieldConfig: /** @type {Field} */ ({ name: 'slug', widget: 'compute', value: '' }),
       }),
-    ).toEqual({ hidden: true, readonly: true });
+    ).toEqual({ hidden: true, readonly: true, subfieldsReadonly: false });
   });
 
   test('makes a field set on save read-only, and hides it in a new entry', () => {
@@ -112,25 +134,71 @@ describe('Test getFieldEditorFlags()', () => {
     expect(getFieldEditorFlags({ ...defaults, fieldConfig, autoSet: true })).toEqual({
       hidden: false,
       readonly: true,
+      subfieldsReadonly: false,
     });
     expect(getFieldEditorFlags({ ...defaults, fieldConfig, autoSet: true, isNew: true })).toEqual({
       hidden: true,
       readonly: true,
+      subfieldsReadonly: false,
     });
     expect(getFieldEditorFlags({ ...defaults, fieldConfig, isNew: true })).toEqual({
       hidden: false,
       readonly: false,
+      subfieldsReadonly: false,
     });
   });
 
-  test.each(['locked', 'isDuplicated'])('makes the field read-only when %s', (key) => {
+  // Each subfield works out the lock itself
+  test('makes the field read-only when locked', () => {
     expect(
       getFieldEditorFlags({
         ...defaults,
         fieldConfig: { name: 'title', widget: 'string', readonly: false },
-        [key]: true,
+        locked: true,
       }),
-    ).toEqual({ hidden: false, readonly: true });
+    ).toEqual({ hidden: false, readonly: true, subfieldsReadonly: false });
+  });
+
+  // A subfield made translatable has a value of its own, so it can still be edited
+  test('makes only the field read-only when duplicated', () => {
+    expect(
+      getFieldEditorFlags({
+        ...defaults,
+        fieldConfig: { name: 'items', widget: 'list' },
+        isDuplicated: true,
+      }),
+    ).toEqual({ hidden: false, readonly: true, subfieldsReadonly: false });
+  });
+
+  test('makes a subfield of a read-only field read-only, which it can’t opt out of', () => {
+    expect(
+      getFieldEditorFlags({
+        ...defaults,
+        fieldConfig: { name: 'title', widget: 'string', readonly: false },
+        parentReadonly: true,
+      }),
+    ).toEqual({ hidden: false, readonly: true, subfieldsReadonly: true });
+    expect(
+      getFieldEditorFlags({
+        ...defaults,
+        fieldConfig: { name: 'id', widget: 'uuid', readonly: false },
+        parentReadonly: true,
+      }).readonly,
+    ).toBe(true);
+  });
+
+  test('passes the readonly option of a List or Object field down to the subfields', () => {
+    expect(
+      getFieldEditorFlags({
+        ...defaults,
+        fieldConfig: { name: 'items', widget: 'list', readonly: true },
+      }).subfieldsReadonly,
+    ).toBe(true);
+    // The UUID default only applies to the field itself
+    expect(
+      getFieldEditorFlags({ ...defaults, fieldConfig: { name: 'id', widget: 'uuid' } })
+        .subfieldsReadonly,
+    ).toBe(false);
   });
 });
 
@@ -158,4 +226,17 @@ describe('Test getEditorFieldConfig()', () => {
       expect(getEditorFieldConfig({ fieldConfig, inline: true })).toBe(fieldConfig);
     },
   );
+});
+
+describe('Test TRANSLATABLE_FIELD_TYPES', () => {
+  test('lists the field types the Translate button supports', () => {
+    expect(TRANSLATABLE_FIELD_TYPES).toEqual([
+      'richtext',
+      'markdown',
+      'string',
+      'text',
+      'list',
+      'object',
+    ]);
+  });
 });

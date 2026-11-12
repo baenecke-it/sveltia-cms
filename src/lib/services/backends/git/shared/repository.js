@@ -1,10 +1,12 @@
+import { stripSlashes } from '@sveltia/utils/string';
+
 import { createLocalizedError } from '$lib/services/backends/git/shared/errors';
 import { getRootDir } from '$lib/services/backends/root-dir';
 import { prefs } from '$lib/services/user/prefs.svelte';
 import { encodePathSegments } from '$lib/services/utils/url';
 
 /**
- * @import { RepositoryBaseURLs, RepositoryInfo } from '$lib/types/private';
+ * @import { RepositoryBaseURLs, RepositoryInfo, RepositoryPath } from '$lib/types/private';
  * @import { BackendName } from '$lib/types/public';
  */
 
@@ -51,6 +53,81 @@ export const getInstanceURL = (restApiRoot) =>
  * @returns {string} Base URL for the repository.
  */
 export const getRepoURL = (restApiRoot, repoPath) => `${getInstanceURL(restApiRoot)}/${repoPath}`;
+
+/**
+ * Get the REST API path of the given repository on GitHub or Gitea/Forgejo, whose APIs address a
+ * repository the same way. The owner and repository names are encoded, though a valid name never
+ * needs it.
+ * @param {RepositoryPath} repository Repository.
+ * @returns {string} Path, e.g. `/repos/owner/repo`.
+ * @see https://docs.github.com/en/rest/repos/repos#get-a-repository
+ * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoGet
+ */
+export const getRepositoryPath = ({ owner, repo }) =>
+  `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+
+/**
+ * Parse a full repository name returned by GitHub or Gitea/Forgejo, like `full_name` or
+ * `nameWithOwner`, into the owner and name pair the CMS works with.
+ * @param {string} fullName Full name, e.g. `owner/repo`.
+ * @returns {RepositoryPath} Repository owner and name.
+ */
+export const toRepositoryPath = (fullName) => {
+  const [owner, repo] = fullName.split('/');
+
+  return { owner, repo };
+};
+
+/**
+ * Check whether a full repository name returned by a Git service, like `full_name` on GitHub and
+ * Gitea/Forgejo or `path_with_namespace` on GitLab, names the given repository. The services treat
+ * owner and repository names as case-insensitive, so they’re compared that way.
+ * @param {string | undefined} fullName Full name, e.g. `Owner/Repo`.
+ * @param {RepositoryPath} repository Repository to compare with.
+ * @returns {boolean} Result. `false` if no name is given.
+ */
+export const isSameRepository = (fullName, { owner, repo }) =>
+  typeof fullName === 'string' && fullName.toLowerCase() === `${owner}/${repo}`.toLowerCase();
+
+/**
+ * Get the REST API path of the given pull request on GitHub or Gitea/Forgejo.
+ * @param {RepositoryPath} repository Repository holding the pull request.
+ * @param {number | undefined} number Pull request number.
+ * @returns {string} Path, e.g. `/repos/owner/repo/pulls/1`.
+ */
+export const getPullRequestPath = (repository, number) =>
+  `${getRepositoryPath(repository)}/pulls/${number}`;
+
+/**
+ * Get the REST API path of the given branch on GitHub or Gitea/Forgejo.
+ * @param {RepositoryPath} repository Repository holding the branch.
+ * @param {string} branch Branch name.
+ * @returns {string} Path, e.g. `/repos/owner/repo/branches/main`.
+ */
+export const getRestBranchPath = (repository, branch) =>
+  `${getRepositoryPath(repository)}/branches/${encodePathSegments(branch)}`;
+
+/**
+ * Create a function to generate base URLs for accessing the repository’s resources on a service’s
+ * web interface, which only differs from another service’s by the path segments that come after the
+ * repository URL.
+ * @param {object} paths Path segments, with a leading slash.
+ * @param {string} paths.tree Path to browse a branch, e.g. `/tree`.
+ * @param {string} paths.blob Path to read a file on a branch, e.g. `/blob`.
+ * @param {string} paths.commit Path to view a commit, e.g. `/commit`.
+ * @returns {(repoURL: string, branch?: string) => RepositoryBaseURLs} Function that takes the base
+ * URL of the repository and the branch name, which can be `undefined` if the branch is not
+ * specified in the CMS configuration, and returns an object containing the tree base URL for
+ * browsing files, the blob base URL for accessing file contents, and the commit base URL.
+ */
+export const createBaseURLsGetter =
+  ({ tree, blob, commit }) =>
+  (repoURL, branch) => ({
+    // A branch name may contain a character that ends a URL path, like `#` in `cms/posts/c#`
+    treeBaseURL: branch ? `${repoURL}${tree}/${encodePathSegments(branch)}` : repoURL,
+    blobBaseURL: branch ? `${repoURL}${blob}/${encodePathSegments(branch)}` : '',
+    commitBaseURL: `${repoURL}${commit}`,
+  });
 
 /**
  * Generate the base URLs for accessing the repository’s resources, pointing the tree and blob URLs
@@ -110,6 +187,10 @@ export const initRepositoryInfo = (
     getBaseURLs,
   },
 ) => {
+  // Drop any trailing slash from the configured URL, e.g. `https://gitlab.com/api/v4/`, so the
+  // hosted service isn’t taken for a self-hosted instance and the repository URL has no `//`
+  restApiRoot = stripSlashes(restApiRoot);
+
   const repoPath = `${owner}/${repo}`;
   const repoURL = getRepoURL(restApiRoot, repoPath);
   const rootDir = getRootDir();

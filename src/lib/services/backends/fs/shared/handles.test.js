@@ -3,13 +3,20 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import {
+  findEntryName,
   getDirectoryHandle,
   getFileHandle,
   getHandleByPath,
   getScopedRootDirHandle,
+  hasOtherSpellings,
+  isNotFoundError,
+  isTypeMismatchError,
+  pickEntryName,
   readFile,
+  readFileIfExists,
 } from '$lib/services/backends/fs/shared/handles';
 import { createMockDirectoryHandle } from '$lib/test/fs-handles';
+import { createMemoryDirectoryHandle, writeMemoryFile } from '$lib/test/memory-fs-handles';
 
 vi.mock('@sveltia/utils/misc', () => ({
   sleep: vi.fn(async () => {}),
@@ -414,6 +421,51 @@ describe('readFile', () => {
   });
 });
 
+describe('isNotFoundError / isTypeMismatchError', () => {
+  test('should recognize the DOMException names', () => {
+    expect(isNotFoundError(new DOMException('', 'NotFoundError'))).toBe(true);
+    expect(isNotFoundError(new DOMException('', 'TypeMismatchError'))).toBe(false);
+    expect(isNotFoundError(undefined)).toBe(false);
+    expect(isTypeMismatchError(new DOMException('', 'TypeMismatchError'))).toBe(true);
+    expect(isTypeMismatchError(new DOMException('', 'NotFoundError'))).toBe(false);
+    expect(isTypeMismatchError(undefined)).toBe(false);
+  });
+});
+
+describe('readFileIfExists', () => {
+  /**
+   * Create a directory handle whose file lookup fails with the given error.
+   * @param {Error} error Error.
+   * @returns {FileSystemDirectoryHandle} Handle.
+   */
+  const createFailingHandle = (error) =>
+    /** @type {any} */ ({
+      getFileHandle: vi.fn(async () => {
+        throw error;
+      }),
+    });
+
+  test('should read an existing file', async () => {
+    const rootDirHandle = createMockDirectoryHandle();
+
+    await getFileHandle(rootDirHandle, 'a.png');
+
+    expect((await readFileIfExists(rootDirHandle, 'a.png'))?.name).toBe('a.png');
+  });
+
+  test('should return undefined for a missing file', async () => {
+    const handle = createFailingHandle(new DOMException('', 'NotFoundError'));
+
+    expect(await readFileIfExists(handle, 'a.png')).toBeUndefined();
+  });
+
+  test('should rethrow any other error', async () => {
+    const handle = createFailingHandle(new DOMException('', 'NotAllowedError'));
+
+    await expect(readFileIfExists(handle, 'a.png')).rejects.toThrow(DOMException);
+  });
+});
+
 describe('getScopedRootDirHandle', () => {
   afterEach(() => {
     mockGetRootDir.mockReturnValue('');
@@ -527,5 +579,103 @@ describe('getHandleByPath', () => {
     await getHandleByPath(rootDirHandle, 'folder/subfolder/file.txt', 'file');
 
     expect(rootDirHandle.getDirectoryHandle).toHaveBeenCalledWith('folder', { create: true });
+  });
+});
+
+describe('hasOtherSpellings', () => {
+  test('tells whether a name can be spelled in another normalization form', () => {
+    expect(hasOtherSpellings('cafe.md')).toBe(false);
+    expect(hasOtherSpellings('漢字.md')).toBe(false);
+    expect(hasOtherSpellings('caf\u00e9.md')).toBe(true);
+    expect(hasOtherSpellings('cafe\u0301.md')).toBe(true);
+    // Kana with a voiced sound mark decomposes too
+    expect(hasOtherSpellings('\u304c')).toBe(true);
+  });
+});
+
+describe('pickEntryName', () => {
+  const decomposed = 'cafe\u0301';
+  const composed = decomposed.normalize();
+
+  test('prefers the exact spelling', () => {
+    expect(pickEntryName([decomposed, composed], composed)).toBe(composed);
+    expect(pickEntryName([composed, decomposed], decomposed)).toBe(decomposed);
+  });
+
+  test('finds a name spelled in another normalization form', () => {
+    expect(pickEntryName(['tea', decomposed], composed)).toBe(decomposed);
+    expect(pickEntryName(['tea', composed], decomposed)).toBe(composed);
+  });
+
+  test('returns `undefined` if there’s no such name', () => {
+    expect(pickEntryName(['tea'], composed)).toBeUndefined();
+    expect(pickEntryName([], 'tea')).toBeUndefined();
+  });
+});
+
+describe('findEntryName', () => {
+  const decomposed = 'cafe\u0301';
+  const composed = decomposed.normalize();
+  /** @type {FileSystemDirectoryHandle & { children: Map<string, any> }} */
+  let dirHandle;
+
+  beforeEach(() => {
+    dirHandle = createMemoryDirectoryHandle();
+  });
+
+  test('returns an ASCII name without looking it up', async () => {
+    const getFileHandleSpy = vi.spyOn(dirHandle, 'getFileHandle');
+
+    await expect(findEntryName(dirHandle, 'tea.md')).resolves.toBe('tea.md');
+    expect(getFileHandleSpy).not.toHaveBeenCalled();
+  });
+
+  test('returns the name of an existing file or folder as it is', async () => {
+    await writeMemoryFile(dirHandle, `${composed}.md`, '');
+    await dirHandle.getDirectoryHandle(composed, { create: true });
+
+    const keysSpy = vi.spyOn(dirHandle, 'keys');
+
+    await expect(findEntryName(dirHandle, `${composed}.md`)).resolves.toBe(`${composed}.md`);
+    await expect(findEntryName(dirHandle, composed)).resolves.toBe(composed);
+    expect(keysSpy).not.toHaveBeenCalled();
+  });
+
+  test('finds a file or folder spelled in another normalization form', async () => {
+    await writeMemoryFile(dirHandle, 'tea.md', '');
+    await writeMemoryFile(dirHandle, `${decomposed}.md`, '');
+    await dirHandle.getDirectoryHandle(composed, { create: true });
+
+    await expect(findEntryName(dirHandle, `${composed}.md`)).resolves.toBe(`${decomposed}.md`);
+    await expect(findEntryName(dirHandle, decomposed)).resolves.toBe(composed);
+  });
+
+  test('returns the given name if there’s no such file or folder', async () => {
+    await writeMemoryFile(dirHandle, 'tea.md', '');
+
+    await expect(findEntryName(dirHandle, `${composed}.md`)).resolves.toBe(`${composed}.md`);
+  });
+
+  test('throws an error other than a missing file', async () => {
+    vi.spyOn(dirHandle, 'getFileHandle').mockRejectedValueOnce(
+      new DOMException('Denied', 'NotAllowedError'),
+    );
+
+    await expect(findEntryName(dirHandle, composed)).rejects.toThrow('Denied');
+  });
+
+  test('lets a path be resolved through folders spelled in another normalization form', async () => {
+    await writeMemoryFile(dirHandle, `${decomposed}/${decomposed}.md`, 'Coffee');
+
+    const file = await readFile(dirHandle, `${composed}/${composed}.md`);
+
+    await expect(file.text()).resolves.toBe('Coffee');
+    expect(file.name).toBe(`${decomposed}.md`);
+    // A missing file is created with the given spelling
+    await getFileHandle(dirHandle, `${composed}/new-${composed}.md`);
+    expect([...dirHandle.children.get(decomposed).children.keys()]).toEqual([
+      `${decomposed}.md`,
+      `new-${composed}.md`,
+    ]);
   });
 });

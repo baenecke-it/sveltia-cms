@@ -7,7 +7,7 @@
   import QuickSearchBar from '$lib/components/global/toolbar/items/quick-search-bar.svelte';
   import { appNumberFormatter } from '$lib/services/app/i18n';
   import { goto } from '$lib/services/app/navigation';
-  import { getAssetsByFolder } from '$lib/services/assets';
+  import { countAssetsInFolder } from '$lib/services/assets';
   import {
     enabledCloudServices,
     externalAssetCounts,
@@ -18,6 +18,7 @@
   import {
     allAssetFolders,
     canCreateAsset,
+    getAssetFolderKey,
     selectedAssetFolder,
   } from '$lib/services/assets/folders';
   import { allAssets } from '$lib/services/assets/state';
@@ -41,11 +42,7 @@
    */
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    isSearchPage = false,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { isSearchPage = false } = $props();
 
   /* v8 ignore start -- the app locale is loaded before the sidebar is rendered */
   /**
@@ -99,10 +96,13 @@
       }}
     />
   {/if}
-  <Listbox ariaLabel={_('asset_folder_list')} aria-controls="assets-container">
+  <Listbox
+    ariaLabel={_('asset_folder_list')}
+    aria-controls={isSearchPage || env.isSmallScreen ? undefined : 'assets-container'}
+  >
     {#if folders.length}
       <OptionGroup label={_('asset_location.repository')}>
-        {#each folders as folder, index ([folder.collectionName, folder.fileName, folder.internalPath].join(':'))}
+        {#each folders as folder, index (getAssetFolderKey(folder))}
           {#await sleep() then}
             {@const { collectionName, fileName, internalPath } = folder}
             {@const collection = collectionName ? getCollection(collectionName) : undefined}
@@ -184,9 +184,10 @@
               {#snippet endIcon()}
                 {#key allAssets.current}
                   {#await sleep() then}
-                    {@const count = (
-                      internalPath !== undefined ? getAssetsByFolder(folder) : allAssets.current
-                    ).length}
+                    {@const count =
+                      internalPath !== undefined
+                        ? countAssetsInFolder(folder)
+                        : allAssets.current.length}
                     <span class="count" aria-label="({_('x_assets', { values: { count } })})">
                       {appNumberFormatter.current.format(count)}
                     </span>

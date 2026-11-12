@@ -1,14 +1,11 @@
 import equal from 'fast-deep-equal';
 
 import { checkForRemoteChanges } from '$lib/services/backends/refresh';
-import { saveChanges } from '$lib/services/backends/save';
 import { isConfigReadonly } from '$lib/services/config/readonly';
-import {
-  contentUpdatesToast,
-  UPDATE_TOAST_DEFAULT_STATE,
-} from '$lib/services/contents/collection/data';
 import { getEntriesByCollection } from '$lib/services/contents/collection/entries';
+import { findFieldByName } from '$lib/services/contents/collection/entries/bulk-edit/config';
 import { isCollectionIndexFile } from '$lib/services/contents/collection/entries/index-file';
+import { saveEntryUpdates } from '$lib/services/contents/collection/entries/save';
 import { resolveCacheDB } from '$lib/services/contents/draft/save/file-changes';
 import { validateAnyField } from '$lib/services/contents/draft/validate/fields';
 import { getFieldValidationMessages } from '$lib/services/contents/draft/validate/messages';
@@ -19,16 +16,22 @@ import {
   createSyntheticDraft,
 } from '$lib/services/contents/entry/changes';
 import { getEntryPaths } from '$lib/services/contents/entry/paths';
+import { refreshPermalinks } from '$lib/services/contents/entry/permalink';
 import { isEntryReadonly } from '$lib/services/contents/entry/readonly';
 import { assignAutoNowValues } from '$lib/services/contents/fields/date-time/auto-now';
+import { getLocalizedFieldValue } from '$lib/services/contents/fields/locale';
+import {
+  followsDefaultLocale,
+  isDuplicateIfEmptyField,
+} from '$lib/services/contents/i18n/duplicate-if-empty';
+import { isFieldMirrored } from '$lib/services/contents/i18n/fields';
 import { getOrCreate } from '$lib/services/utils/cache';
 import { isValueEmpty } from '$lib/services/utils/object';
-import { getUnpublishedEntriesByCollection } from '$lib/services/workflow';
+import { getCompanionEntries, getUnpublishedEntriesByCollection } from '$lib/services/workflow';
 
 /**
  * @import {
  * Entry,
- * EntryDraft,
  * FileChange,
  * InternalEntryCollection,
  * } from '$lib/types/private';
@@ -121,7 +124,7 @@ export const setBulkEditValue = ({ collection, entry, keyPath, value, edits }) =
   const { [keyPath]: _previous, ...otherFieldEdits } = edits[entry.id] ?? {};
   const { [entry.id]: _entryEdits, ...otherEntryEdits } = edits;
   const storedValue = getStoredValue(collection, entry, keyPath);
-  const fieldConfig = collection.fields.find(({ name }) => name === keyPath);
+  const fieldConfig = findFieldByName(collection.fields, keyPath);
   // A Boolean field without a value is shown as off, so turning it off isn’t a change
   const shownValue = fieldConfig?.widget === 'boolean' ? (storedValue ?? false) : storedValue;
 
@@ -144,9 +147,11 @@ export const countBulkEdits = (edits) =>
 
 /**
  * Apply the pending edits to a copy of an entry. A field with the `duplicate` i18n option gets the
- * same value in every locale that has content, as it does in the entry editor; any other field is
- * only changed in the default locale. The DateTime fields with the `auto_now` option are updated
- * too, as a save in the entry editor would.
+ * same value in every locale that has content, localized for each the way the entry editor copies
+ * it, e.g. a DateTime field value written in the locale, and one with the `duplicate_if_empty`
+ * option gets it in the locales where it’s empty or still holds the default locale’s value; any
+ * other field is only changed in the default locale. The DateTime fields with the `auto_now` option
+ * are updated too, as a save in the entry editor would.
  * @param {object} args Arguments.
  * @param {InternalEntryCollection} args.collection Entry collection.
  * @param {Entry} args.entry Entry, which is not modified.
@@ -164,25 +169,41 @@ export const applyBulkEdits = ({ collection, entry, entryEdits }) => {
   );
 
   Object.entries(entryEdits).forEach(([keyPath, value]) => {
-    const fieldConfig = collection.fields.find(({ name }) => name === keyPath);
+    const fieldConfig = findFieldByName(collection.fields, keyPath);
+    // A `duplicate_if_empty` field is updated in the other locales where it’s empty or still holds
+    // the default locale’s value
+    const fillEmpty = !!fieldConfig && isDuplicateIfEmptyField(fieldConfig);
+    const previousValue = currentValues[defaultLocale][keyPath];
 
     Object.entries(currentValues).forEach(([locale, content]) => {
-      if (locale === defaultLocale || fieldConfig?.i18n === 'duplicate') {
+      if (locale === defaultLocale) {
         content[keyPath] = value;
+
+        return;
+      }
+
+      if (
+        isFieldMirrored(fieldConfig?.i18n) ||
+        (fillEmpty &&
+          followsDefaultLocale({
+            fieldConfig: /** @type {Field} */ (fieldConfig),
+            targetValue: content[keyPath],
+            previousValue,
+            sourceLocale: defaultLocale,
+            targetLocale: locale,
+          }))
+      ) {
+        content[keyPath] = getLocalizedFieldValue({
+          fieldConfig: /** @type {Field} */ (fieldConfig),
+          value,
+          sourceLocale: defaultLocale,
+          targetLocale: locale,
+        });
       }
     });
   });
 
-  assignAutoNowValues(
-    /** @type {EntryDraft} */ (
-      /** @type {unknown} */ ({
-        isNew: false,
-        collectionName: collection.name,
-        isIndexFile: false,
-        currentValues,
-      })
-    ),
-  );
+  assignAutoNowValues({ ...createSyntheticDraft({ collection }), isNew: false, currentValues });
 
   return {
     ...entry,
@@ -229,7 +250,9 @@ const countUniqueValues = ({ collection, keyPath, fieldType, edits }) => {
       !getEntryPaths(entry, { includePrevious: true }).some((path) => publishedPaths.has(path)),
   );
 
-  [...published, ...unpublished].forEach((entry) => {
+  // The new entries riding along in the pull request of an entry of another collection have never
+  // been published either
+  [...published, ...unpublished, ...getCompanionEntries(collection.name)].forEach((entry) => {
     const value = normalizeUniqueValue(
       getBulkEditValue({ collection, entry, keyPath, edits }),
       fieldType,
@@ -271,9 +294,7 @@ export const validateBulkEdits = ({ collection, entries, edits }) => {
     const content = { ...entry.locales[defaultLocale]?.content, ...entryEdits };
 
     Object.entries(entryEdits).forEach(([keyPath, value]) => {
-      const fieldConfig = /** @type {Field} */ (
-        collection.fields.find(({ name }) => name === keyPath)
-      );
+      const fieldConfig = /** @type {Field} */ (findFieldByName(collection.fields, keyPath));
 
       let validity = validateAnyField({
         draft: { ...draft, originalEntry: entry },
@@ -335,10 +356,13 @@ export const buildBulkEditChanges = async ({ collection, entries, edits }) => {
   const savingEntries = entries
     .filter((entry) => !!edits[entry.id] && currentEntries.has(entry.id))
     .map((entry) =>
-      applyBulkEdits({
+      refreshPermalinks({
         collection,
-        entry: /** @type {Entry} */ (currentEntries.get(entry.id)),
-        entryEdits: edits[entry.id],
+        entry: applyBulkEdits({
+          collection,
+          entry: /** @type {Entry} */ (currentEntries.get(entry.id)),
+          entryEdits: edits[entry.id],
+        }),
       }),
     );
 
@@ -378,21 +402,5 @@ export const saveBulkEdits = async ({ collection, entries, edits }) => {
 
   const { changes, savingEntries } = await buildBulkEditChanges({ collection, entries, edits });
 
-  if (!changes.length) {
-    return 0;
-  }
-
-  await saveChanges({
-    changes,
-    savingEntries,
-    options: { commitType: 'update', collection },
-  });
-
-  contentUpdatesToast.current = {
-    ...UPDATE_TOAST_DEFAULT_STATE,
-    saved: true,
-    count: savingEntries.length,
-  };
-
-  return savingEntries.length;
+  return saveEntryUpdates({ collection, changes, savingEntries });
 };

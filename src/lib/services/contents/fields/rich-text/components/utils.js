@@ -1,6 +1,8 @@
+import { isInternalPropKey } from '$lib/services/contents/fields/internal-props';
 import { flattenKeys, unflattenKeys } from '$lib/services/utils/object';
 
 /**
+ * @import { ResolvedEditorComponentDefinition } from '$lib/types/private';
  * @import { EditorComponentDefinition } from '$lib/types/public';
  */
 
@@ -11,6 +13,17 @@ import { flattenKeys, unflattenKeys } from '$lib/services/utils/object';
  */
 export const isMultiLinePattern = ({ multiline, dotAll, source }) =>
   multiline || dotAll || source.includes('[\\s\\S]') || source.includes('[\\S\\s]');
+
+/**
+ * Check if the given component is inline, which means it’s matched within a paragraph and rendered
+ * within the text. A pattern-based inline component always is; any other component is if its
+ * pattern is not multiline.
+ * @param {Pick<ResolvedEditorComponentDefinition, 'pattern' | 'inlinePattern'>} componentDef
+ * Component definition.
+ * @returns {boolean} Result.
+ */
+export const isInlineComponentDef = ({ pattern, inlinePattern }) =>
+  !!inlinePattern || !isMultiLinePattern(pattern);
 
 /**
  * Get the subject of each complex selector in the given selector list, the compound selector after
@@ -122,7 +135,7 @@ export const normalizeProps = (props) =>
   unflattenKeys(
     Object.fromEntries(
       Object.entries(flattenKeys(props)).filter(
-        ([key]) => !key.split('.').pop()?.startsWith('__sc_'),
+        ([key]) => !isInternalPropKey(/** @type {string} */ (key.split('.').pop())),
       ),
     ),
   );
@@ -143,12 +156,72 @@ export const getParentComponentNames = (element) => {
 };
 
 /**
+ * Follow whether the rich text editor the given component is in can’t be edited, which its textbox
+ * tells with the `aria-readonly` attribute. Lexical mounts each component outside the Svelte
+ * component tree, so the state can’t come from the context. Lexical also keeps applying updates
+ * while the editor isn’t editable, so the component has to hold back the changes itself.
+ * @param {Element | undefined} element Element of a component.
+ * @param {(readonly: boolean) => void} callback Function called with the state right away, and
+ * again whenever it changes.
+ * @returns {MutationObserver | undefined} Observer to disconnect once the component is gone, or
+ * `undefined` if the component isn’t in an editor.
+ */
+export const observeReadonly = (element, callback) => {
+  const textbox = element?.closest('[role="textbox"]');
+
+  if (!textbox) {
+    return undefined;
+  }
+
+  /**
+   * Call the function with the current state.
+   */
+  const update = () => {
+    callback(textbox.getAttribute('aria-readonly') === 'true');
+  };
+
+  const observer = new MutationObserver(update);
+
+  update();
+  observer.observe(textbox, { attributes: true, attributeFilter: ['aria-readonly'] });
+
+  return observer;
+};
+
+/**
+ * Follow the read-only state of the rich text editor the given component is in, like
+ * {@link observeReadonly}, from the next frame on: Lexical mounts the component before putting it
+ * in the editor, so the textbox can’t be found right away.
+ * @param {Element | undefined} element Element of a component.
+ * @param {(readonly: boolean) => void} callback Function called with the state once the frame has
+ * come, and again whenever it changes.
+ * @returns {() => void} Function to stop following the state once the component is gone. If the
+ * frame hasn’t come by then, the callback is never called.
+ */
+export const followReadonly = (element, callback) => {
+  /** @type {MutationObserver | undefined} */
+  let observer;
+
+  const frame = window.requestAnimationFrame(() => {
+    observer = observeReadonly(element, callback);
+  });
+
+  return () => {
+    window.cancelAnimationFrame(frame);
+    observer?.disconnect();
+  };
+};
+
+/**
  * Unescape the title of a Markdown image, like `T \"q\"` in `![a](/a.png "T \"q\"")`, so the
  * field shows `T "q"`. A backslash before an ASCII punctuation character escapes it, as anywhere
- * else in Markdown, while one before any other character is a literal backslash.
- * @param {string} title Title as it appears in Markdown, between the quotes.
- * @returns {string} Unescaped title.
+ * else in Markdown, while one before any other character is a literal backslash. The alt text,
+ * like `Figure \[1` in `![Figure \[1](/a.png)`, is unescaped the same way.
+ * @param {string} title Title or alt text as it appears in Markdown, between the quotes or the
+ * brackets.
+ * @returns {string} Unescaped title or alt text.
  * @see https://spec.commonmark.org/0.31.2/#link-title
+ * @see https://spec.commonmark.org/0.31.2/#backslash-escapes
  */
 export const unescapeTitle = (title) => title.replace(/\\([!-/:-@[-`{-~])/g, '$1');
 
@@ -161,3 +234,14 @@ export const unescapeTitle = (title) => title.replace(/\\([!-/:-@[-`{-~])/g, '$1
  */
 export const escapeTitle = (title) =>
   title.replace(/\\(?=[!-/:-@[-`{-~]|$)/g, '\\\\').replace(/"/g, '\\"');
+
+/**
+ * Escape the alt text of a Markdown image, the counterpart of `unescapeTitle()`, so it can be put
+ * between the brackets of `![…]`: a bracket is escaped, so an unbalanced one doesn’t end the alt
+ * text early or keep it open, as well as a backslash that would otherwise escape the next character
+ * or the closing bracket.
+ * @param {string} alt Alt text.
+ * @returns {string} Escaped alt text.
+ */
+export const escapeAlt = (alt) =>
+  alt.replace(/\\(?=[!-/:-@[-`{-~]|$)/g, '\\\\').replace(/[[\]]/g, '\\$&');

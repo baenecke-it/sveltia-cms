@@ -98,4 +98,77 @@ describe('AddItemButton', () => {
 
     expect(addItem).toHaveBeenCalledWith({ type: 'gallery' });
   });
+
+  test('describes a type in the menu with its description', async () => {
+    const addItem = vi.fn();
+
+    await render(AddItemButton, {
+      fieldConfig: {
+        name: 'sections',
+        widget: 'list',
+        types: [
+          { name: 'hero', label: 'Hero', description: 'A large banner', fields: [] },
+          { name: 'gallery', description: 'A grid of images', fields: [] },
+          { name: 'quote', label: 'Quote', fields: [] },
+        ],
+      },
+      addItem,
+    });
+
+    await page.getByRole('button', { name: /Add\W+sections/ }).click();
+
+    const menu = page.getByRole('menu', { name: 'Select List Type' });
+    // The description isn’t part of the item’s name
+    const hero = menu.getByRole('menuitem', { name: 'Hero', exact: true });
+    const gallery = menu.getByRole('menuitem', { name: 'gallery', exact: true });
+    const quote = menu.getByRole('menuitem', { name: 'Quote', exact: true });
+
+    await expect.element(hero).toHaveAccessibleDescription('A large banner');
+    await expect.element(hero).toMatchTextContent(/^Hero\s*A large banner$/);
+    await expect.element(gallery).toHaveAccessibleDescription('A grid of images');
+    await expect.element(quote).not.toHaveAttribute('aria-describedby');
+
+    await gallery.click();
+
+    expect(addItem).toHaveBeenCalledWith({ type: 'gallery' });
+  });
+
+  test('is labelled in the locale of the pane', async () => {
+    /** @type {ListField} */
+    const fieldConfig = {
+      name: 'blocks',
+      widget: 'list',
+      label: 'Blocks',
+      label_localized: { de: 'Blöcke' },
+      types: [
+        { name: 'quote', label: 'Quote', label_localized: { de: 'Zitat' }, fields: [] },
+        { name: 'hero', label: 'Hero', description: 'A banner', label_localized: { de: 'Held' } },
+      ],
+    };
+
+    await render(AddItemButton, { fieldConfig, locale: 'de' });
+    await page.getByRole('button', { name: /Add\W+Blöcke/ }).click();
+
+    const menu = page.getByRole('menu', { name: 'Select List Type' });
+
+    await expect.element(menu.getByRole('menuitem', { name: 'Zitat' })).toBeVisible();
+    await expect.element(menu.getByRole('menuitem', { name: 'Held', exact: true })).toBeVisible();
+  });
+
+  test('takes the singular label of the pane’s locale', async () => {
+    /** @type {ListField} */
+    const fieldConfig = {
+      name: 'tags',
+      widget: 'list',
+      label: 'Tags',
+      label_singular: 'Tag',
+      label_singular_localized: { de: 'Schlagwort' },
+    };
+
+    await render(AddItemButton, { fieldConfig, locale: 'de' });
+    await expect.element(page.getByRole('button', { name: /Add\W+Schlagwort/ })).toBeVisible();
+
+    await render(AddItemButton, { fieldConfig, locale: 'fr' });
+    await expect.element(page.getByRole('button', { name: /Add\W+Tag\W*$/ })).toBeVisible();
+  });
 });

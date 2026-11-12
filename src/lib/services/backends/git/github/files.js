@@ -1,5 +1,3 @@
-import mime from 'mime';
-
 import { fetchLastCommit } from '$lib/services/backends/git/github/commits';
 import {
   getWorkflowRepository,
@@ -18,6 +16,7 @@ import { mapConcurrently, runConcurrently } from '$lib/services/backends/git/sha
 import { createLocalizedError } from '$lib/services/backends/git/shared/errors';
 import { fetchRepositoryFiles } from '$lib/services/backends/git/shared/files';
 import { startSimulatedProgress } from '$lib/services/backends/git/shared/progress';
+import { getRepositoryPath } from '$lib/services/backends/git/shared/repository';
 import { toFileListItems } from '$lib/services/backends/git/shared/tree';
 import { getRootDir } from '$lib/services/backends/root-dir';
 import { encodePathSegments } from '$lib/services/utils/url';
@@ -45,11 +44,12 @@ import { encodePathSegments } from '$lib/services/utils/url';
  * @see https://docs.github.com/en/rest/git/trees#get-a-tree
  */
 const fetchTree = async (treeRef, recursive) => {
-  const { owner, repo } = repository;
   const query = recursive ? '?recursive=1' : '';
 
   return /** @type {{ tree: GitTreeEntry[], truncated: boolean }} */ (
-    await fetchAPI(`/repos/${owner}/${repo}/git/trees/${encodePathSegments(treeRef)}${query}`)
+    await fetchAPI(
+      `${getRepositoryPath(repository)}/git/trees/${encodePathSegments(treeRef)}${query}`,
+    )
   );
 };
 
@@ -211,7 +211,7 @@ export const getFileMetadataFragment = ({ path }) => `
  */
 const requestBlob = async ({ owner, repo, sha, responseType }) =>
   /** @type {Promise<string | Response>} */ (
-    fetchAPI(`/repos/${owner}/${repo}/git/blobs/${sha}`, {
+    fetchAPI(`${getRepositoryPath({ owner, repo })}/git/blobs/${sha}`, {
       headers: { Accept: 'application/vnd.github.raw' },
       responseType,
     })
@@ -380,7 +380,7 @@ export const fetchBlob = async (asset) => {
   // An asset attached to an unpublished entry is committed to a workflow branch, which lives in the
   // contributor’s fork with Open Authoring, so the blob has to be read from there
   const { owner, repo } = asset.workflow ? getWorkflowRepository() : repository;
-  const { sha, path } = asset;
+  const { sha } = asset;
 
   const response = /** @type {Response} */ (
     await requestBlob({ owner, repo, sha, responseType: 'raw' })
@@ -392,10 +392,9 @@ export const fetchBlob = async (asset) => {
     throw new Error('Failed to fetch the blob', { cause: { status: response.status } });
   }
 
-  // Handle SVG and other non-binary files
-  if (response.headers.get('Content-Type') !== 'application/octet-stream') {
-    return new Blob([await response.text()], { type: mime.getType(path) ?? 'text/plain' });
-  }
-
+  // Keep the bytes as they are, even for a text file: decoding it would strip a UTF-8 BOM and
+  // transcode a file GitHub serves in another encoding, e.g. `charset=iso-8859-1`, and moving or
+  // renaming the asset would then commit the altered bytes. The caller sets the MIME type from the
+  // file name, as GitHub serves an SVG or any other text file as `text/plain`
   return response.blob();
 };

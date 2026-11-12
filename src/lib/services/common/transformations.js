@@ -6,12 +6,19 @@ import dayjsUTC from 'dayjs/plugin/utc';
 
 import { customStringTransformationRegistry } from '$lib/services/api/registries';
 import { slugify } from '$lib/services/common/slug';
+import { getAdjacentChar } from '$lib/services/common/template/tags';
 import { parseDateTimeConfig } from '$lib/services/contents/fields/date-time/config';
-import { getParser, parseWithFormatFallback } from '$lib/services/contents/fields/date-time/parse';
+import { getFormatLocale } from '$lib/services/contents/fields/date-time/locales';
+import {
+  formatInLocale,
+  getParser,
+  parseWithFormatFallback,
+} from '$lib/services/contents/fields/date-time/parse';
 import { getOrCreate, getOrCreateBounded } from '$lib/services/utils/cache';
+import { stripMarkdown } from '$lib/services/utils/markdown';
 
 /**
- * @import { StringTransformation } from '$lib/types/private';
+ * @import { InternalLocaleCode, StringTransformation } from '$lib/types/private';
  * @import { DateTimeField, Field, StringTransformer } from '$lib/types/public';
  */
 
@@ -55,6 +62,7 @@ export const BUILTIN_STRING_TRANSFORMATIONS = Object.freeze([
   'default',
   'localize',
   'lower',
+  'plainify',
   'slugify',
   'ternary',
   'truncate',
@@ -87,9 +95,9 @@ const OTHER_TRANSFORMATION_ARG_REGEX =
 
 const TRANSFORMATION_PARSERS = Object.entries({
   date: /^date\('(?<format>.+?)'(?:,\s*'(?<timeZone>.+?)')?\)$/,
-  default: /^default\('(?<defaultValue>.+?)'\)$/,
+  default: /^default\('(?<defaultValue>.*?)'\)$/,
   ternary: /^ternary\('(?<truthyValue>.*?)',\s*'(?<falsyValue>.*?)'\)$/,
-  truncate: /^truncate\((?<max>\d+)(?:,\s*'(?<ellipsis>.+?)')?\)$/,
+  truncate: /^truncate\((?<max>\d+)(?:,\s*'(?<ellipsis>.*?)')?\)$/,
 });
 
 /**
@@ -166,21 +174,26 @@ const parseTransformation = (transformation) => {
  * Split a string containing a value and transformations at the pipe (`|`) characters, except for
  * those within a quoted transformation argument like `default('Untitled | Draft')`. A single quote
  * only opens an argument after `(` or `,`, and only closes it before `,` or `)`, so an apostrophe
- * within an argument, as in `default('Don't')`, doesn’t throw off the parsing.
+ * within an argument, as in `default('Don't')`, doesn’t throw off the parsing. Only the whitespace
+ * next to each quote is looked at, so the string is parsed in linear time.
  * @param {string} string The string to be split.
  * @returns {string[]} Trimmed segments.
  */
-const splitTransformations = (string) => {
+export const splitTransformations = (string) => {
   /** @type {string[]} */
   const segments = [];
   let segment = '';
   let quoted = false;
 
-  [...string].forEach((char, index) => {
+  // Go through the UTF-16 code units, which the quote lookups index into. A surrogate pair is
+  // never a quote or a pipe, so its halves are just added to the segment one after the other
+  for (let index = 0; index < string.length; index += 1) {
+    const char = string[index];
+
     if (char === "'") {
-      if (!quoted && /[(,]\s*$/.test(string.slice(0, index))) {
+      if (!quoted && ['(', ','].includes(getAdjacentChar(string, index, -1))) {
         quoted = true;
-      } else if (quoted && /^\s*[,)]/.test(string.slice(index + 1))) {
+      } else if (quoted && [',', ')'].includes(getAdjacentChar(string, index, 1))) {
         quoted = false;
       }
     }
@@ -191,7 +204,7 @@ const splitTransformations = (string) => {
     } else {
       segment += char;
     }
-  });
+  }
 
   segments.push(segment.trim());
 
@@ -245,27 +258,30 @@ export const parseTransformations = (string) =>
  * @param {any} value The value to be transformed to uppercase.
  * @returns {string} The uppercase string representation of the input value.
  */
-export const applyUpperCaseTransformation = (value) => String(value).toUpperCase();
+export const applyUpperCaseTransformation = (value) => String(value ?? '').toUpperCase();
 
 /**
  * Transform the input value to a string and returns it in lowercase.
  * @param {any} value The value to be transformed to lowercase.
  * @returns {string} The lowercase string representation of the input value.
  */
-export const applyLowerCaseTransformation = (value) => String(value).toLowerCase();
+export const applyLowerCaseTransformation = (value) => String(value ?? '').toLowerCase();
 
 /**
  * Transform the input value to a formatted string based on the provided format and time zone
  * options. A value other than a `Date` is parsed in the field’s own `format` if it has one,
- * falling back to the default parsing if the value doesn’t match the format.
+ * falling back to the default parsing if the value doesn’t match the format. With the field’s
+ * `localize_format` option, the value is parsed and formatted in the locale the field writes it in.
  * @param {any} value The input value to be transformed into a date string.
  * @param {DateTimeTransformationArgs} args Transformation arguments.
  * @param {DateTimeField} fieldConfig Field configuration containing date and time settings.
+ * @param {InternalLocaleCode} [locale] Locale of the content the value belongs to.
  * @returns {string} The formatted date string if valid, otherwise an empty string.
  */
-export const applyDateTransformation = (value, { format, timeZone }, fieldConfig) => {
+export const applyDateTransformation = (value, { format, timeZone }, fieldConfig, locale) => {
   const sValue = String(value);
   const { format: storedFormat, dateOnly, utc } = parseDateTimeConfig(fieldConfig);
+  const localeKey = storedFormat ? getFormatLocale(fieldConfig, locale) : undefined;
 
   const useUTC =
     timeZone === 'utc' ||
@@ -276,11 +292,16 @@ export const applyDateTransformation = (value, { format, timeZone }, fieldConfig
   const date =
     // A value in a format like `X` (Unix timestamp) can come as a number from the front matter
     storedFormat && !(value instanceof Date)
-      ? parseWithFormatFallback({ value: sValue, format: storedFormat, parseAsUTC: useUTC })
+      ? parseWithFormatFallback({
+          value: sValue,
+          format: storedFormat,
+          parseAsUTC: useUTC,
+          localeKey,
+        })
       : getParser(useUTC)(sValue);
 
   if (date.isValid()) {
-    return date.format(format);
+    return formatInLocale(date, format, localeKey);
   }
 
   return '';
@@ -312,7 +333,15 @@ export const ternaryTransformation = (value, { truthyValue, falsyValue }) =>
  * @returns {string} The truncated string with ellipsis if applicable.
  */
 export const applyTruncateTransformation = (value, { max, ellipsis = '…' }) =>
-  truncate(String(value), Number(max), { ellipsis });
+  truncate(String(value ?? ''), Number(max), { ellipsis });
+
+/**
+ * Convert a Markdown or HTML value to plain text. The result can contain markup, e.g. `&lt;img&gt;`
+ * becomes `<img>`, so it’s only safe as text; see {@link stripMarkdown}.
+ * @param {any} value The value to be converted.
+ * @returns {string} The plain text.
+ */
+export const applyPlainifyTransformation = (value) => stripMarkdown(String(value ?? ''));
 
 /**
  * Names of the custom transformations that have failed, keyed by the function, so the error is
@@ -386,16 +415,19 @@ export const applyTransformation = ({ fieldConfig, value, transformation, locale
       return applyUpperCaseTransformation(value);
     case 'lower':
       return applyLowerCaseTransformation(value);
+    case 'plainify':
+      return applyPlainifyTransformation(value);
     case 'slugify':
       // Don’t fall back to a random UUID for an empty value; the transformation is used in Compute
       // fields, where a value that changes on every render causes an infinite update loop
       // @see https://github.com/sveltia/sveltia-cms/issues/946
-      return slugify(String(value), { fallback: false, locale });
+      return slugify(String(value ?? ''), { fallback: false, locale });
     case 'date':
       return applyDateTransformation(
         value,
         /** @type {DateTimeTransformationArgs} */ (args),
         /** @type {DateTimeField} */ (fieldConfig ?? {}),
+        locale,
       );
     case 'default':
       return applyDefaultTransformation(value, /** @type {DefaultTransformationArgs} */ (args));

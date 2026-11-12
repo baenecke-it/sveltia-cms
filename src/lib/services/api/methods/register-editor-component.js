@@ -1,5 +1,10 @@
+import { isObject } from '@sveltia/utils/object';
+
 import { preloadImmutable } from '$lib/services/api/immutable';
 import { customComponentRegistry } from '$lib/services/api/registries';
+import { assertDefinition, assertOption, assertValid } from '$lib/services/api/validate';
+import { normalizeEditorComponentTemplates } from '$lib/services/config/templates';
+import { isInlinePatternComponent } from '$lib/services/contents/fields/rich-text/components/inline-pattern';
 import {
   getSelectorTagNames,
   isValidSelector,
@@ -7,81 +12,117 @@ import {
 import { isNonEmptyString } from '$lib/services/utils/string';
 
 /**
- * @import { EditorComponentDefinition } from '../../../types/public';
+ * @import {
+ * CustomEditorComponentDefinition,
+ * EditorComponentDefinition,
+ * InlineEditorComponentDefinition,
+ * } from '../../../types/public';
  */
 // Don’t use `$lib` in `from` above, or type declarations will not be exported
 
 /**
- * Register a custom rich text editor component, which can be used in RichText and Markdown fields.
- * Registering a component with the same `id` again replaces the previous one.
- * @param {EditorComponentDefinition} definition Component definition.
- * @throws {TypeError} If `definition` is not an object, `id` is not a non-empty string, `label` is
- * given but not a non-empty string, `pattern` is not a regular expression, `toBlock` is not a
- * function, `toPreview` is given but not a function, `fields` is not an array, or the HTML options
- * are invalid: `htmlSelector`, `fromBlockHTML` and `toBlockHTML` must be given together, and
- * `htmlSelector` must be a valid CSS selector naming the element types it matches.
- * @see https://decapcms.org/docs/custom-widgets/#registereditorcomponent
- * @see https://sveltiacms.app/en/docs/api/editor-components
+ * Assert that the given option of a definition is a function, if given.
+ * @param {any} value Option value.
+ * @param {string} name Option name.
  */
-const registerEditorComponent = (definition) => {
-  if (!definition || typeof definition !== 'object') {
-    throw new TypeError(
-      'The `definition` option for `CMS.registerEditorComponent()` must be an object',
-    );
-  }
+const assertOptionalFunction = (value, name) => {
+  assertDefinition(value === undefined || typeof value === 'function', name, 'a function');
+};
 
-  if (!isNonEmptyString(definition.id)) {
-    throw new TypeError('The `definition.id` must be a non-empty string');
-  }
+/**
+ * Validate the options of a pattern-based inline component, which has the `type` option set to
+ * `inline`. Like Decap CMS, `fromBlock` and `toBlock` are accepted in place of `fromInline` and
+ * `toInline`.
+ * @param {InlineEditorComponentDefinition} definition Component definition.
+ */
+const validateInlineDefinition = (definition) => {
+  const { fromInline, toInline, trigger, toPreview, onInsert, onEdit } = definition;
+  const { fromBlock, toBlock } = /** @type {Record<string, any>} */ (definition);
 
-  if (definition.label !== undefined && !isNonEmptyString(definition.label)) {
-    throw new TypeError('The `definition.label` must be a non-empty string');
-  }
+  assertDefinition(typeof (toInline ?? toBlock) === 'function', 'toInline', 'a function');
+  assertOptionalFunction(fromInline ?? fromBlock, 'fromInline');
+  assertOptionalFunction(toPreview, 'toPreview');
+  assertOptionalFunction(onInsert, 'onInsert');
+  assertOptionalFunction(onEdit, 'onEdit');
 
-  if (typeof definition.pattern !== 'object' || !(definition.pattern instanceof RegExp)) {
-    throw new TypeError('The `definition.pattern` must be a RegExp');
-  }
+  assertDefinition(
+    trigger === undefined || isNonEmptyString(trigger),
+    'trigger',
+    'a non-empty string',
+  );
+};
 
-  if (typeof definition.toBlock !== 'function') {
-    throw new TypeError('The `definition.toBlock` must be a function');
-  }
-
-  if (definition.toPreview !== undefined && typeof definition.toPreview !== 'function') {
-    throw new TypeError('The `definition.toPreview` must be a function');
-  }
-
-  if (!Array.isArray(definition.fields)) {
-    throw new TypeError('The `definition.fields` must be an array');
-  }
+/**
+ * Validate the options of a field-based component.
+ * @param {EditorComponentDefinition} definition Component definition.
+ */
+const validateBlockDefinition = (definition) => {
+  assertDefinition(typeof definition.toBlock === 'function', 'toBlock', 'a function');
+  assertOptionalFunction(definition.toPreview, 'toPreview');
+  assertDefinition(Array.isArray(definition.fields), 'fields', 'an array');
 
   const { htmlSelector, fromBlockHTML, toBlockHTML } = definition;
   const htmlOptions = [htmlSelector, fromBlockHTML, toBlockHTML];
 
   if (htmlOptions.some((option) => option !== undefined)) {
-    if (htmlOptions.includes(undefined)) {
-      throw new TypeError(
-        'The `definition.htmlSelector`, `definition.fromBlockHTML` and `definition.toBlockHTML` ' +
-          'must be given together',
-      );
-    }
+    assertValid(
+      !htmlOptions.includes(undefined),
+      'The `definition.htmlSelector`, `definition.fromBlockHTML` and `definition.toBlockHTML` ' +
+        'must be given together',
+    );
 
-    if (!isNonEmptyString(htmlSelector) || !isValidSelector(htmlSelector)) {
-      throw new TypeError('The `definition.htmlSelector` must be a valid CSS selector');
-    }
+    assertDefinition(
+      isNonEmptyString(htmlSelector) && isValidSelector(htmlSelector),
+      'htmlSelector',
+      'a valid CSS selector',
+    );
 
-    if (!getSelectorTagNames(htmlSelector)) {
-      throw new TypeError(
-        'Each selector in the `definition.htmlSelector` must name the element type it matches',
-      );
-    }
+    assertValid(
+      !!getSelectorTagNames(/** @type {string} */ (htmlSelector)),
+      'Each selector in the `definition.htmlSelector` must name the element type it matches',
+    );
 
-    if (typeof fromBlockHTML !== 'function') {
-      throw new TypeError('The `definition.fromBlockHTML` must be a function');
-    }
+    assertDefinition(typeof fromBlockHTML === 'function', 'fromBlockHTML', 'a function');
+    assertDefinition(typeof toBlockHTML === 'function', 'toBlockHTML', 'a function');
+  }
+};
 
-    if (typeof toBlockHTML !== 'function') {
-      throw new TypeError('The `definition.toBlockHTML` must be a function');
-    }
+/**
+ * Register a custom rich text editor component, which can be used in RichText and Markdown fields.
+ * Registering a component with the same `id` again replaces the previous one. A component with the
+ * `type` option set to `inline` is a pattern-based inline component, compatible with Decap CMS,
+ * which has no fields.
+ * @param {CustomEditorComponentDefinition} definition Component definition.
+ * @throws {TypeError} If `definition` is not an object, `id` is not a non-empty string, `label` is
+ * given but not a non-empty string, `pattern` is not a regular expression, `toPreview` is given
+ * but not a function, or the other options are invalid. A field-based component must have
+ * `toBlock` as a function and `fields` as an array, and the HTML options must be valid:
+ * `htmlSelector`, `fromBlockHTML` and `toBlockHTML` must be given together, and `htmlSelector`
+ * must be a valid CSS selector naming the element types it matches. An inline component must have
+ * `toInline` as a function, `fromInline`, `onInsert` and `onEdit` must be functions if given, and
+ * `trigger` must be a non-empty string if given.
+ * @see https://decapcms.org/docs/custom-widgets/#registereditorcomponent
+ * @see https://sveltiacms.app/en/docs/api/editor-components
+ */
+const registerEditorComponent = (definition) => {
+  assertOption(isObject(definition), 'registerEditorComponent', 'definition', 'an object');
+  assertDefinition(isNonEmptyString(definition.id), 'id', 'a non-empty string');
+
+  assertDefinition(
+    definition.label === undefined || isNonEmptyString(definition.label),
+    'label',
+    'a non-empty string',
+  );
+
+  assertDefinition(definition.pattern instanceof RegExp, 'pattern', 'a RegExp');
+
+  if (isInlinePatternComponent(definition)) {
+    validateInlineDefinition(definition);
+  } else {
+    validateBlockDefinition(definition);
+    // Like the configuration, the templates are written in their canonical form, e.g. `{{ slug }}`
+    // as `{{slug}}`
+    normalizeEditorComponentTemplates(definition);
   }
 
   customComponentRegistry.set(definition.id, definition);

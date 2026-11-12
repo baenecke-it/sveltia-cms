@@ -14,7 +14,10 @@
   } from '$lib/services/assets/external';
   import { externalAssetAvailability } from '$lib/services/assets/external/availability';
   import { LINKED_FILES_SERVICE_ID } from '$lib/services/assets/external/linked';
-  import { browsingExternalFolders } from '$lib/services/assets/external/view';
+  import {
+    browsingExternalFolders,
+    listedExternalAssetIndexMap,
+  } from '$lib/services/assets/external/view';
   import { toggleListItem } from '$lib/services/utils/array';
 
   /**
@@ -24,18 +27,11 @@
   /**
    * @typedef {object} Props
    * @property {ExternalAsset} asset Asset.
-   * @property {number} index Index of the asset in the list.
    * @property {ViewType} viewType View type.
    */
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    asset,
-    index,
-    viewType,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { asset, viewType } = $props();
 
   const selected = $derived(selectedExternalAssetIdSet.current.has(asset.id));
   /**
@@ -92,7 +88,7 @@
   {name}
   kind={asset.kind}
   src={asset.previewURL}
-  rowIndex={index}
+  rowIndex={listedExternalAssetIndexMap.current.get(asset.id) ?? -1}
   {viewType}
   {selected}
   canPreview={canPreviewExternalAsset(asset)}

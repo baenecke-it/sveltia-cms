@@ -1,3 +1,4 @@
+import { mergeRefusedPullRequest } from '$lib/services/backends/git/github/auto-merge';
 import { commitChanges } from '$lib/services/backends/git/github/commits';
 import { getWorkflowRepository } from '$lib/services/backends/git/github/fork';
 import { fetchAliasedBatch } from '$lib/services/backends/git/github/graphql';
@@ -8,6 +9,7 @@ import {
   fetchPullRequestFileList,
   fetchPullRequestFiles,
   MAX_ITEMS,
+  parseAuthor,
   parseFileNodes,
   updateDraftState,
   updateLabels,
@@ -22,13 +24,22 @@ import { runConcurrently } from '$lib/services/backends/git/shared/concurrency';
 import { createLocalizedError } from '$lib/services/backends/git/shared/errors';
 import { checkPublishAllowed } from '$lib/services/backends/git/shared/fork';
 import {
-  getMovedHeadMergeState,
+  getPullRequestPath,
+  getRepositoryPath,
+  isSameRepository,
+} from '$lib/services/backends/git/shared/repository';
+import {
+  approvePullRequest,
+  createBranchGoneError,
+  discardPullRequest,
+  findOwnApprovals,
   getParentDirs,
-  isPullRequestMerged,
   isSquashMergeEnabled,
-  openWorkflowPullRequest,
+  resolveMergeState,
+  saveWorkflowBranch,
   toChangedFilesWithModes,
   updateLabelledStatus,
+  updatePullRequestDescription,
 } from '$lib/services/backends/git/shared/workflow';
 import { encodePathSegments } from '$lib/services/utils/url';
 import { getAllStatusLabels, getStatusFromLabels } from '$lib/services/workflow/labels';
@@ -36,7 +47,9 @@ import { openAuthoring } from '$lib/services/workflow/open-authoring';
 
 /**
  * @import {
+ * CommitOptions,
  * CommitResults,
+ * FileChange,
  * WorkflowPullRequest,
  * WorkflowSaveOptions,
  * WorkflowChangedFile,
@@ -54,6 +67,7 @@ const getPullRequestFields = () => `
   number
   title
   url
+  body
   isDraft
   isCrossRepository
   baseRefName
@@ -115,23 +129,20 @@ const getFetchPullRequestsQuery = () => `
  * @param {WorkflowStatus} status Status of the pull request.
  * @returns {WorkflowPullRequest} Pull request.
  */
-const toPullRequest = (node, status) => {
-  const { login, name, email, databaseId } = node.author ?? {};
-
-  return {
-    number: node.number,
-    nodeId: node.id,
-    title: node.title,
-    url: node.url,
-    branch: node.headRefName,
-    headSHA: node.headRefOid,
-    status,
-    createdDate: new Date(node.createdAt),
-    updatedDate: new Date(node.updatedAt),
-    author: login ? { name: name ?? login, email: email ?? '', id: databaseId, login } : undefined,
-    files: parseFileNodes(node.files?.nodes ?? []),
-  };
-};
+const toPullRequest = (node, status) => ({
+  number: node.number,
+  nodeId: node.id,
+  title: node.title,
+  url: node.url,
+  branch: node.headRefName,
+  headSHA: node.headRefOid,
+  status,
+  createdDate: new Date(node.createdAt),
+  updatedDate: new Date(node.updatedAt),
+  author: parseAuthor(node.author),
+  files: parseFileNodes(node.files?.nodes ?? []),
+  description: node.body ?? '',
+});
 
 /**
  * Parse a pull request node returned by the GraphQL API.
@@ -204,7 +215,8 @@ export const fetchPullRequests = async () =>
  * two different repositories — the contributor’s fork and the configured one — because a fork that
  * has drifted would otherwise pass its own commits on to everything branched from it. A fork shares
  * an object store with its parent, so a commit that only exists upstream can still be branched from
- * in the fork.
+ * in the fork. Whether the fork has its own copy of the branch, and the name of its default branch,
+ * are fetched as well, for when GitHub refuses that: see {@link createBranch}.
  */
 const FETCH_BRANCH_BASE_QUERY = `
   query(
@@ -216,6 +228,12 @@ const FETCH_BRANCH_BASE_QUERY = `
   ) {
     fork: repository(owner: $forkOwner, name: $forkRepo) {
       id
+      ref(qualifiedName: $branch) {
+        name
+      }
+      defaultBranchRef {
+        name
+      }
     }
     base: repository(owner: $owner, name: $repo) {
       ref(qualifiedName: $branch) {
@@ -282,12 +300,61 @@ const fetchOpenPullRequests = async (branch) => {
  * @see https://docs.github.com/en/rest/git/refs#update-a-reference
  */
 const resetBranch = async (branch, sha) => {
-  const { owner, repo } = repository;
-
-  await fetchAPI(`/repos/${owner}/${repo}/git/refs/heads/${encodePathSegments(branch)}`, {
+  await fetchAPI(`${getRepositoryPath(repository)}/git/refs/heads/${encodePathSegments(branch)}`, {
     method: 'PATCH',
     body: { sha, force: true },
   });
+};
+
+/**
+ * Get the message GitHub gave for a failed GraphQL request, which comes as the error’s cause.
+ * @param {any} error Error thrown by `fetchGraphQL`.
+ * @returns {string} Message, or an empty string if there is none.
+ */
+const getErrorMessage = (error) => error.cause?.message ?? '';
+
+/**
+ * Create a branch pointing at the given commit, without letting a failure propagate.
+ * @param {string} repositoryId Node ID of the repository to create the branch in.
+ * @param {string} branch Branch name.
+ * @param {string} oid Git object ID.
+ * @returns {Promise<any>} The error the mutation failed with, or `undefined` if it succeeded.
+ */
+const tryCreateRef = async (repositoryId, branch, oid) => {
+  try {
+    await fetchGraphQL(CREATE_REF_MUTATION, {
+      input: { repositoryId, name: `refs/heads/${branch}`, oid },
+    });
+
+    return undefined;
+  } catch (ex) {
+    return ex;
+  }
+};
+
+/**
+ * Find the newest commit a branch of the Open Authoring fork has in common with the configured
+ * branch, which is where the two diverged, or the fork branch’s head if it’s only behind.
+ * @param {string} forkOwner Owner of the fork.
+ * @param {string} forkBranch Branch in the fork.
+ * @returns {Promise<string | undefined>} Git object ID, or `undefined` if it couldn’t be found.
+ * @see https://docs.github.com/en/rest/commits/commits#compare-two-commits
+ */
+const fetchForkMergeBase = async (forkOwner, forkBranch) => {
+  const { branch } = repository;
+  const base = encodePathSegments(/** @type {string} */ (branch));
+  // A comparison across repositories identifies the head branch by the fork’s owner
+  const head = `${encodeURIComponent(forkOwner)}:${encodePathSegments(forkBranch)}`;
+
+  try {
+    const { merge_base_commit: mergeBase } = /** @type {Record<string, any>} */ (
+      await fetchAPI(`${getRepositoryPath(repository)}/compare/${base}...${head}?per_page=1`)
+    );
+
+    return mergeBase?.sha;
+  } catch {
+    return undefined;
+  }
 };
 
 /**
@@ -307,7 +374,8 @@ export const createBranch = async (branch) => {
   const { repo } = repository;
   // With Open Authoring the branch is created in the contributor’s fork, but starts from the head
   // of the configured repository rather than the fork’s own copy of it, so a fork that has fallen
-  // behind or gained commits of its own doesn’t pass them on to the pull request
+  // behind or gained commits of its own doesn’t pass them on to the pull request, unless GitHub
+  // refuses that, as explained below
   const { owner: forkOwner, repo: forkRepo } = getWorkflowRepository();
 
   const { fork, base } = /** @type {Record<string, any>} */ (
@@ -331,18 +399,35 @@ export const createBranch = async (branch) => {
     });
   }
 
-  const sha = base.ref.target.oid;
+  let sha = base.ref.target.oid;
+  let error = await tryCreateRef(fork.id, branch, sha);
 
-  try {
-    await fetchGraphQL(CREATE_REF_MUTATION, {
-      input: { repositoryId: fork.id, name: `refs/heads/${branch}`, oid: sha },
-    });
-  } catch (/** @type {any} */ ex) {
-    const message = ex.cause?.message ?? '';
+  // An OAuth token without the `workflow` scope can’t bring changes to GitHub Actions workflow
+  // files into a repository, which a branch starting upstream does when a fork that has fallen
+  // behind lacks the latest ones. GitHub then refuses the mutation for lack of permission, and the
+  // sync on sign-in has been refused for the same reason. The branch starts instead from where the
+  // fork’s own copy of the configured branch meets it, which the fork already has, so the pull
+  // request holds nothing but the entry. A fork has no copy of a branch created upstream after it
+  // was made, e.g. for a deploy preview, nor of any but the default branch if it was made with that
+  // alone, so its default branch stands in then
+  if (error && openAuthoring.current && /permission/i.test(getErrorMessage(error))) {
+    const forkBranch = fork.ref?.name ?? fork.defaultBranchRef?.name;
+    const mergeBase = forkBranch ? await fetchForkMergeBase(forkOwner, forkBranch) : undefined;
+
+    if (mergeBase && mergeBase !== sha) {
+      sha = mergeBase;
+      error = await tryCreateRef(fork.id, branch, sha);
+    }
+  }
+
+  if (error) {
+    const message = getErrorMessage(error);
 
     // “A ref named ... already exists in the repository.” Anything else is a real failure
     if (!message.includes('already exists')) {
-      throw new Error('Failed to create the branch.', { cause: new Error(message || ex.message) });
+      throw new Error('Failed to create the branch.', {
+        cause: new Error(message || error.message),
+      });
     }
 
     // With Open Authoring a draft is a branch without a pull request, so there’s no telling a
@@ -389,59 +474,109 @@ export const updateStatus = (pullRequest, status) =>
   updateLabelledStatus(pullRequest, status, { updateForkStatus, updateLabels, updateDraftState });
 
 /**
+ * Approve the pull request on behalf of the signed-in user, pinned to the head commit the entry was
+ * reviewed at.
+ * @param {WorkflowPullRequest} pullRequest Pull request.
+ * @returns {Promise<void>}
+ */
+export const approve = (pullRequest) => approvePullRequest(repository, pullRequest, 'APPROVE');
+
+/**
+ * Message a review is dismissed with when the entry is moved back from the ready stage.
+ */
+const WITHDRAWAL_MESSAGE = 'The entry is no longer ready to publish.';
+
+/**
+ * Withdraw the signed-in user’s approval of the pull request. A submitted review can’t be deleted
+ * on GitHub, so it’s dismissed instead, which a branch protection rule may restrict to some users.
+ * @param {WorkflowPullRequest} pullRequest Pull request.
+ * @see https://docs.github.com/en/rest/pulls/reviews#list-reviews-for-a-pull-request
+ * @see https://docs.github.com/en/rest/pulls/reviews#dismiss-a-review-for-a-pull-request
+ */
+export const withdrawApproval = async (pullRequest) => {
+  const path = `${getPullRequestPath(repository, pullRequest.number)}/reviews`;
+  const reviews = /** @type {Record<string, any>[]} */ (await fetchAPI(`${path}?per_page=100`));
+
+  await Promise.all(
+    findOwnApprovals(reviews).map(({ id }) =>
+      fetchAPI(`${path}/${id}/dismissals`, {
+        method: 'PUT',
+        body: { message: WITHDRAWAL_MESSAGE, event: 'DISMISS' },
+      }),
+    ),
+  );
+};
+
+/**
+ * Commit the given changes on a workflow branch that no pull request is known for, creating the
+ * branch from the configured one first.
+ * @param {FileChange[]} changes Changes to be committed.
+ * @param {CommitOptions} options Commit options, with the workflow branch.
+ * @returns {Promise<CommitResults>} Commit results.
+ * @throws {Error} When the branch exists and a pull request is open from it.
+ */
+const commitToNewBranch = async (changes, options) => {
+  const { headOid } = await createBranch(/** @type {string} */ (options.branch));
+
+  return commitChanges(changes, { ...options, headOid });
+};
+
+/**
+ * Commit the given changes onto the branch of an existing pull request, on top of the commit the
+ * entry was loaded or saved at, which the conflict check has just compared with the branch, rather
+ * than whatever the branch points at by the time the commit is made. A commit pushed in between
+ * makes GitHub refuse the save, instead of being taken along unseen and vouched for by the head
+ * recorded afterwards.
+ * @param {FileChange[]} changes Changes to be committed.
+ * @param {CommitOptions} options Commit options, with the workflow branch.
+ * @param {WorkflowPullRequest} pullRequest Pull request.
+ * @returns {Promise<CommitResults>} Commit results.
+ */
+const commitToExistingBranch = async (changes, options, pullRequest) => {
+  const { branch = '' } = options;
+
+  try {
+    return await commitChanges(changes, { ...options, headOid: pullRequest.headSHA });
+  } catch (ex) {
+    // The branch can have gone, which GitHub reports as a ref it can’t resolve. A lookup that
+    // fails says nothing about the branch, so GitHub’s error is passed on then
+    const branchGone = await fetchBranchHead(branch).then(
+      (head) => head === undefined,
+      () => false,
+    );
+
+    if (branchGone) {
+      throw createBranchGoneError(branch, getWorkflowRepository());
+    }
+
+    throw ex;
+  }
+};
+
+/**
+ * Update the description of the given pull request with the given function.
+ * @param {WorkflowPullRequest} pullRequest Pull request.
+ * @param {(description: string) => string} transform Function to get the new description from the
+ * current one.
+ * @returns {Promise<string>} New description.
+ */
+const updateDescription = (pullRequest, transform) =>
+  updatePullRequestDescription(repository, pullRequest, transform);
+
+/**
  * Commit the given changes on the workflow branch, creating the branch and the pull request if they
  * don’t exist yet.
  * @param {WorkflowSaveOptions} args Arguments.
  * @returns {Promise<{ commit: CommitResults, pullRequest: WorkflowPullRequest }>} Commit results
  * and the new or updated pull request.
  */
-export const savePullRequest = async ({ changes, options, branch, title, status, pullRequest }) => {
-  // A save onto an existing pull request goes on top of the commit the entry was loaded or saved
-  // at, which the conflict check has just compared with the branch, rather than whatever the branch
-  // points at by the time the commit is made. A commit pushed in between makes GitHub refuse the
-  // save, instead of being taken along unseen and vouched for by the head recorded afterwards
-  const { headOid } = pullRequest ? { headOid: pullRequest.headSHA } : await createBranch(branch);
-  /** @type {CommitResults} */
-  let commit;
-
-  try {
-    commit = await commitChanges(changes, { ...options, branch, headOid });
-  } catch (ex) {
-    // The branch can have gone, e.g. with a pull request merged or closed on GitHub, which is
-    // worth saying in words rather than with GitHub’s message about a ref it can’t resolve. A
-    // lookup that fails says nothing about the branch, so GitHub’s error is passed on then
-    const branchGone =
-      !!pullRequest &&
-      (await fetchBranchHead(branch).then(
-        (head) => head === undefined,
-        () => false,
-      ));
-
-    if (branchGone) {
-      throw createLocalizedError('Failed to save the changes.', 'branch_not_found', {
-        repo: getWorkflowRepository().repo,
-        branch,
-      });
-    }
-
-    throw ex;
-  }
-
-  if (pullRequest) {
-    return { commit, pullRequest };
-  }
-
-  return {
-    commit,
-    pullRequest: await openWorkflowPullRequest({
-      commit,
-      branch,
-      title,
-      status,
-      createPullRequest,
-    }),
-  };
-};
+export const savePullRequest = async (args) =>
+  saveWorkflowBranch(args, {
+    commitToNewBranch,
+    commitToExistingBranch,
+    createPullRequest,
+    updateDescription,
+  });
 
 /**
  * Maximum number of files the comparison API lists. A comparison that reaches it may have left
@@ -519,46 +654,46 @@ const fetchFileModes = async ({ headSHA, paths }) => {
  * @see https://docs.github.com/en/rest/commits/commits#compare-two-commits
  */
 export const fetchMergeState = async (pullRequest) => {
-  const { owner, repo, branch } = repository;
+  const { branch } = repository;
 
   const { head, base } = /** @type {Record<string, any>} */ (
-    await fetchAPI(`/repos/${owner}/${repo}/pulls/${pullRequest.number}`)
+    await fetchAPI(getPullRequestPath(repository, pullRequest.number))
   );
 
   const headSHA = /** @type {string | undefined} */ (head?.sha);
-  const fullName = `${owner}/${repo}`.toLowerCase();
 
   const onConfiguredBranches =
     base?.ref === branch &&
-    base?.repo?.full_name?.toLowerCase() === fullName &&
-    head?.repo?.full_name?.toLowerCase() === fullName;
+    isSameRepository(base?.repo?.full_name, repository) &&
+    isSameRepository(head?.repo?.full_name, repository);
 
-  if (!headSHA || !onConfiguredBranches) {
-    return { headSHA, onConfiguredBranches: false, files: [], complete: false };
-  }
-
-  const movedHeadState = getMovedHeadMergeState(pullRequest, headSHA);
-
-  if (movedHeadState) {
-    return movedHeadState;
-  }
-
-  const encodedBranch = encodePathSegments(/** @type {string} */ (branch));
-
-  const { files = [] } = /** @type {{ files?: Record<string, any>[] }} */ (
-    await fetchAPI(`/repos/${owner}/${repo}/compare/${encodedBranch}...${headSHA}`)
-  );
-
-  return {
+  return resolveMergeState({
+    pullRequest,
     headSHA,
     onConfiguredBranches,
-    files: await toChangedFilesWithModes(files, {
-      statusMap: REST_FILE_STATUSES,
-      headSHA,
-      fetchFileModes,
-    }),
-    complete: files.length < MAX_COMPARE_FILES,
-  };
+    /**
+     * List the files the head commit changes from the configured branch.
+     * @param {string} sha Head commit.
+     * @returns {Promise<{ files: WorkflowChangedFile[], complete: boolean }>} Files, and whether
+     * the comparison listed them all.
+     */
+    listChangedFiles: async (sha) => {
+      const encodedBranch = encodePathSegments(/** @type {string} */ (branch));
+
+      const { files = [] } = /** @type {{ files?: Record<string, any>[] }} */ (
+        await fetchAPI(`${getRepositoryPath(repository)}/compare/${encodedBranch}...${sha}`)
+      );
+
+      return {
+        files: await toChangedFilesWithModes(files, {
+          statusMap: REST_FILE_STATUSES,
+          headSHA: sha,
+          fetchFileModes,
+        }),
+        complete: files.length < MAX_COMPARE_FILES,
+      };
+    },
+  });
 };
 
 /**
@@ -593,38 +728,46 @@ export const fetchUnchangedPaths = async ({ headSHA, paths }) => {
 /**
  * Merge the pull request and delete the workflow branch. The merge is pinned to the commit the
  * entry was loaded or saved at, so a commit pushed to the branch since — after the entry has been
- * reviewed — makes GitHub refuse the merge rather than take it along unseen.
+ * reviewed — makes GitHub refuse the merge rather than take it along unseen. Branch protection or a
+ * ruleset can require status checks to pass before a pull request is merged, and GitHub refuses an
+ * immediate merge while they’re running, which is likely right after the entry is saved. In that
+ * case, the pull request is set to auto-merge instead, pinned to the same commit, and GitHub merges
+ * it once the checks have passed. Scheduling the merge is not the same as making it: a check can
+ * still fail, so this resolves only once the merge has landed. GitHub also refuses the merge while
+ * it’s still working out whether the pull request can be merged, which it does in the background
+ * after a push, so the pull request is read again until that settles, and merged or set to
+ * auto-merge then. See {@link mergeRefusedPullRequest} for that part.
  * @param {WorkflowPullRequest} pullRequest Pull request.
  * @see https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request
+ * @see https://docs.github.com/en/graphql/reference/mutations#enablepullrequestautomerge
+ * @see https://github.com/sveltia/sveltia-cms/issues/1094
  */
 export const publish = async (pullRequest) => {
   checkPublishAllowed();
 
-  const { owner, repo } = repository;
-  const { number } = pullRequest;
+  const { number, title, headSHA } = pullRequest;
   const squash = isSquashMergeEnabled();
 
-  try {
-    await fetchAPI(`/repos/${owner}/${repo}/pulls/${number}/merge`, {
+  /**
+   * Merge the pull request right away, pinned to the commit on record.
+   * @returns {Promise<any>} Response.
+   */
+  const merge = () =>
+    fetchAPI(`${getPullRequestPath(repository, number)}/merge`, {
       method: 'PUT',
-      body: {
-        merge_method: squash ? 'squash' : 'merge',
-        commit_title: pullRequest.title,
-        sha: pullRequest.headSHA,
-      },
+      body: { merge_method: squash ? 'squash' : 'merge', commit_title: title, sha: headSHA },
     });
+
+  try {
+    await merge();
   } catch (/** @type {any} */ ex) {
-    // GitHub answers `405 Method Not Allowed` whenever the pull request can’t be merged, including
-    // when it has been merged already — by a maintainer on GitHub while this board was open, say.
-    // That’s the outcome the user asked for, so it’s the branch cleanup below that’s left to do
-    // rather than an error to report. Anything else the status covers, such as a failing required
-    // check or a conflict, is a real refusal
-    if (
-      ex.cause?.status !== 405 ||
-      !(await isPullRequestMerged(repository, /** @type {number} */ (number)))
-    ) {
+    // GitHub answers `405 Method Not Allowed` whenever the pull request can’t be merged, whatever
+    // the reason, so the pull request is read to tell them apart
+    if (ex.cause?.status !== 405) {
       throw ex;
     }
+
+    await mergeRefusedPullRequest({ pullRequest, squash, merge, refusal: ex });
   }
 
   await deleteBranch(pullRequest.branch);
@@ -633,21 +776,10 @@ export const publish = async (pullRequest) => {
 /**
  * Close the pull request without merging it, and delete the workflow branch.
  * @param {WorkflowPullRequest} pullRequest Pull request.
- * @see https://docs.github.com/en/rest/pulls/pulls#update-a-pull-request
+ * @returns {Promise<void>}
  */
-export const discard = async (pullRequest) => {
-  const { owner, repo } = repository;
-
-  // An Open Authoring draft has no pull request yet, so deleting the branch is all there is to do
-  if (pullRequest.number !== undefined) {
-    await fetchAPI(`/repos/${owner}/${repo}/pulls/${pullRequest.number}`, {
-      method: 'PATCH',
-      body: { state: 'closed' },
-    });
-  }
-
-  await deleteBranch(pullRequest.branch);
-};
+export const discard = (pullRequest) =>
+  discardPullRequest(repository, pullRequest, { deleteBranch });
 
 /**
  * GitHub’s Editorial Workflow implementation.
@@ -657,6 +789,8 @@ export default {
   fetchPullRequests,
   savePullRequest,
   updateStatus,
+  approve,
+  withdrawApproval,
   fetchBranchHead,
   fetchMergeState,
   fetchUnchangedPaths,

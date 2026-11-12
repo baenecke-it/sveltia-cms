@@ -15,14 +15,11 @@
   import { goto } from '$lib/services/app/navigation';
   import { isReadonly } from '$lib/services/config/readonly';
   import { getCollection, getCollectionLabel } from '$lib/services/contents/collection';
-  import {
-    getCollectionFile,
-    getCollectionFileLabel,
-  } from '$lib/services/contents/collection/files';
-  import { getEntrySummary } from '$lib/services/contents/entry/summary';
+  import { getCollectionFile } from '$lib/services/contents/collection/files';
+  import { getEntryEditorPath } from '$lib/services/contents/editor/route';
   import { deployments, productionSHA } from '$lib/services/deployments';
-  import { encodePathSegments } from '$lib/services/utils/url';
   import { checkPublishedVersion, isPublishAllowed } from '$lib/services/workflow';
+  import { getCompanionNotes, getUnpublishedEntryLabel } from '$lib/services/workflow/board';
   import { getWorkflowStages } from '$lib/services/workflow/stages';
 
   /**
@@ -46,7 +43,6 @@
 
   /** @type {Props} */
   let {
-    /* eslint-disable prefer-const */
     entry,
     dragging = false,
     busy = false,
@@ -55,7 +51,6 @@
     onDragEnd = undefined,
     onDelete = undefined,
     onPublish = undefined,
-    /* eslint-enable prefer-const */
   } = $props();
 
   const { collectionName, fileName, status, pullRequest } = $derived(entry.workflow);
@@ -79,16 +74,12 @@
   const deployState = $derived(
     (deploySHA ? deployments.current[deploySHA]?.state : undefined) ?? 'unknown',
   );
-  const summary = $derived.by(() => {
-    // `appLocale.current` is a key, because the labels can be localized
-    if (!appLocale.current || !collection) {
-      return entry.slug;
-    }
-
-    return collectionFile
-      ? getCollectionFileLabel(collectionFile)
-      : getEntrySummary(collection, entry);
-  });
+  /* v8 ignore start -- the app locale is always set once the UI strings are loaded */
+  // `appLocale.current` is a key, because the labels can be localized
+  const summary = $derived(appLocale.current ? getUnpublishedEntryLabel(entry) : entry.slug);
+  /* v8 ignore stop */
+  // The entries created or edited from a Relation field of the entry are published along with it
+  const companionNotes = $derived(getCompanionNotes(entry, appLocale.current));
   const collectionLabel = $derived(
     appLocale.current && collection ? getCollectionLabel(collection, { useSingular: true }) : '',
   );
@@ -142,12 +133,9 @@ a merged or read-only one, or one with no other stage to move to -->
     disabled={gone}
     onclick={() => {
       // A collection file is addressed by its name, while its `subPath` is the whole file path
-      goto(
-        encodePathSegments(`/collections/${collectionName}/entries/${fileName ?? entry.subPath}`),
-        {
-          transitionType: 'forwards',
-        },
-      );
+      goto(getEntryEditorPath(collectionName, fileName ?? entry.subPath), {
+        transitionType: 'forwards',
+      });
     }}
   >
     {#if collection?._type === 'entry'}
@@ -158,6 +146,9 @@ a merged or read-only one, or one with no other stage to move to -->
       <span role="none" class="title"><bdi>{summary}</bdi></span>
     </span>
   </button>
+  {#each companionNotes as note (note)}
+    <p class="companions">{note}</p>
+  {/each}
   <footer role="none">
     <div role="none" class="meta">
       {#if pullRequest.author?.name}
@@ -282,6 +273,13 @@ a merged or read-only one, or one with no other stage to move to -->
   .title {
     font-size: var(--sui-font-size-default);
     line-height: 1.4;
+    overflow-wrap: anywhere;
+  }
+
+  .companions {
+    margin: 0;
+    color: var(--sui-secondary-foreground-color);
+    font-size: var(--sui-font-size-small);
     overflow-wrap: anywhere;
   }
 

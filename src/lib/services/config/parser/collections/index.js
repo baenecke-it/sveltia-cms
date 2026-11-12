@@ -12,7 +12,10 @@ import { checkBodyField, isFormatMismatch } from '$lib/services/config/parser/co
 import { checkIdentifierField } from '$lib/services/config/parser/collections/identifier';
 import { checkPreviewPath } from '$lib/services/config/parser/collections/preview';
 import { checkSlugOptions } from '$lib/services/config/parser/collections/slug';
-import { checkCollectionTemplates } from '$lib/services/config/parser/collections/templates';
+import {
+  checkCollectionTemplates,
+  checkSummaryTemplate,
+} from '$lib/services/config/parser/collections/templates';
 import { checkViewOptions } from '$lib/services/config/parser/collections/views';
 import { parseFields } from '$lib/services/config/parser/fields';
 import { checkI18nOverrides } from '$lib/services/config/parser/i18n';
@@ -175,6 +178,7 @@ export const parseEntryCollection = (context, collectors) => {
         extension: indexExtension,
         format: indexFormat,
         fields: indexFields,
+        summary: indexSummary,
       } = /** @type {CollectionIndexFile} */ (index_file);
 
       const hasOwnFormat = indexExtension !== undefined || indexFormat !== undefined;
@@ -190,6 +194,14 @@ export const parseEntryCollection = (context, collectors) => {
           collectors,
         });
       }
+
+      // Validate the index file’s `summary` option against the fields it uses
+      checkSummaryTemplate({
+        template: indexSummary,
+        fields: indexFileFields,
+        context: indexFileContext,
+        collectors,
+      });
     }
   }
 
@@ -267,6 +279,11 @@ export const parseCollection = ({ cmsConfig, collection }, collectors) => {
     });
 
     return;
+  }
+
+  // @todo Remove the option prior to the 1.0 release.
+  if (/** @type {Collection} */ (collection).yaml_quote !== undefined) {
+    warnDeprecation('yaml_quote');
   }
 
   // Validate the `i18n` option against the site-level configuration it builds on. A divider has

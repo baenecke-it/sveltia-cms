@@ -1,19 +1,19 @@
 <script>
   import { _ } from '@sveltia/i18n';
-  import { Alert, Toast } from '@sveltia/ui';
   import { getPathInfo } from '@sveltia/utils/file';
 
   import RenameDialog from '$lib/components/assets/list/rename-dialog.svelte';
   import { goto, parseLocation } from '$lib/services/app/navigation';
   import { getAssetsByDirName } from '$lib/services/assets';
+  import { runAssetCommit } from '$lib/services/assets/data/commit';
   import { moveAssets } from '$lib/services/assets/data/move';
   import { getAssetUsedEntries } from '$lib/services/assets/details';
   import { getAssetFolderHistoryState } from '$lib/services/assets/navigation';
   import { renamingAsset } from '$lib/services/assets/state';
-  import { getFolderNamesInDir } from '$lib/services/assets/subfolders';
-  import { isCommitCancelled } from '$lib/services/backends/commit-prompt';
+  import { getFolderNamesInDir, getNonAssetFileNamesInDir } from '$lib/services/assets/subfolders';
   import { getReadonlyEntryLabel, isEntryReadonly } from '$lib/services/contents/entry/readonly';
   import { getDefaultMediaLibraryOptions } from '$lib/services/integrations/media-libraries/default';
+  import { createPath } from '$lib/services/utils/file';
   import { watchAsync } from '$lib/services/utils/state.svelte';
   import { encodePathSegments } from '$lib/services/utils/url';
 
@@ -22,7 +22,6 @@
    */
 
   let open = $state(false);
-  let renamingFailed = $state(false);
   /** @type {Entry[]} */
   let usedEntries = $state([]);
 
@@ -40,15 +39,22 @@
       : undefined,
   );
   const { dirname = '', basename = '' } = $derived(getPathInfo(asset?.path ?? ''));
-  const otherNames = $derived(
+  /**
+   * Names of the other files next to the asset, and those of the subfolders there, which a file
+   * can’t take either.
+   */
+  const { otherNames, fileNames, folderNames } = $derived(
     asset
-      ? getAssetsByDirName(dirname)
-          .map((a) => a.name)
-          .filter((n) => n !== asset.name)
-      : [],
+      ? {
+          otherNames: getAssetsByDirName(dirname)
+            .map((a) => a.name)
+            .filter((n) => n !== asset.name),
+          // An entry file next to the asset would be overwritten
+          fileNames: getNonAssetFileNamesInDir(dirname),
+          folderNames: getFolderNamesInDir(dirname),
+        }
+      : { otherNames: [], fileNames: [], folderNames: [] },
   );
-  /** Names of the subfolders next to the asset, which a file can’t take either. */
-  const folderNames = $derived(asset ? getFolderNamesInDir(dirname) : []);
 
   /**
    * Rename the asset by moving it to a new path. Also, update the URL hash silently to reflect the
@@ -62,18 +68,14 @@
     }
 
     const oldPath = asset.path;
-    const newPath = `${dirname}/${newName}`;
+    // An asset in a root media folder has no directory
+    const newPath = createPath([dirname, newName]);
 
-    try {
-      await moveAssets('rename', [{ asset, path: newPath }]);
-    } catch (/** @type {any} */ ex) {
-      // The user has cancelled the commit at the commit message prompt, which isn’t a failure
-      if (!isCommitCancelled(ex)) {
-        renamingFailed = true;
-        // eslint-disable-next-line no-console
-        console.error(ex);
-      }
+    const { ok } = await runAssetCommit(() => moveAssets('rename', [{ asset, path: newPath }]), {
+      failure: 'renaming_asset_failed',
+    });
 
+    if (!ok) {
       return;
     }
 
@@ -102,6 +104,7 @@
   bind:open
   name={basename}
   {otherNames}
+  {fileNames}
   {folderNames}
   usedEntryCount={usedEntries.length}
   {blockedMessage}
@@ -111,7 +114,3 @@
     renamingAsset.current = undefined;
   }}
 />
-
-<Toast bind:show={renamingFailed}>
-  <Alert status="error">{_('renaming_asset_failed')}</Alert>
-</Toast>

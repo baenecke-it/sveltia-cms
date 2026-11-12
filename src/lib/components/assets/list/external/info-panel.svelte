@@ -26,11 +26,7 @@
    */
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    asset,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { asset } = $props();
 
   /** @type {ExternalAssetDetails} */
   let details = $state({});
@@ -75,10 +71,20 @@
       // The file could not be loaded; leave the media info out
     }
 
-    const _usedEntries = await getExternalAssetUsedEntries(_asset);
+    try {
+      const _usedEntries = await getExternalAssetUsedEntries(_asset);
 
-    if (isLatest()) {
-      usedEntries = _usedEntries;
+      if (isLatest()) {
+        usedEntries = _usedEntries;
+      }
+    } catch (/** @type {any} */ ex) {
+      // eslint-disable-next-line no-console
+      console.error(ex);
+
+      if (isLatest()) {
+        // Stop showing the used entries as being loaded
+        usedEntries = [];
+      }
     }
   };
 

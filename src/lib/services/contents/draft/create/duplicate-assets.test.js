@@ -1,3 +1,5 @@
+// @vitest-environment happy-dom
+
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { createMockAssetFolder } from '$lib/test/factories';
@@ -40,11 +42,7 @@ vi.mock('$lib/services/assets/info', () => ({
   createDisplayBlobURL: vi.fn(async (/** @type {Blob} */ blob) => URL.createObjectURL(blob)),
 }));
 
-vi.mock('$lib/services/assets/references', () => ({
-  MARKDOWN_IMAGE_REGEX: /!\[.*?\]\((.+?)(?:\s+".*?")?\)/g,
-}));
-
-vi.mock('$lib/services/contents/draft/save/assets', () => ({
+vi.mock('$lib/services/assets/entry-folder', () => ({
   getOwnedEntryFolderPath: mockGetOwnedEntryFolderPath,
 }));
 
@@ -62,8 +60,9 @@ vi.mock('$lib/services/contents/fields', () => ({
 }));
 
 vi.mock('$lib/services/contents/fields/file/helpers', () => ({
-  getAssetLibraryFolderMap: mockGetAssetLibraryFolderMap,
-  getDefaultAssetFolder: mockGetDefaultAssetFolder,
+  getFieldAssetFolder: vi.fn((args) =>
+    mockGetDefaultAssetFolder(mockGetAssetLibraryFolderMap(args)),
+  ),
 }));
 
 const { copyEntryRelativeAssets } = await import('./duplicate-assets');
@@ -154,6 +153,10 @@ beforeEach(() => {
 
     if (keyPath === 'body') {
       return { name: 'body', widget: 'markdown' };
+    }
+
+    if (keyPath === 'html') {
+      return { name: 'html', widget: 'richtext', format: 'html' };
     }
 
     if (keyPath === 'title') {
@@ -330,6 +333,77 @@ describe('copyEntryRelativeAssets()', () => {
         `![Plain again](${plainBlobURL} "image.png")`,
       ].join('\n\n'),
     );
+  });
+
+  test('copies the images embedded in an HTML body', async () => {
+    currentValues = {
+      en: {
+        html: [
+          '<p>Intro</p>',
+          '<p><img src="./one.png" alt="First"></p>',
+          '<!-- <img src="two.png"> -->',
+          '<p><a href="./one.png">Link</a><img src="./one.png" alt="First again"></p>',
+          '<p><img src="https://example.com/three.png"></p>',
+        ].join(''),
+      },
+    };
+
+    const files = await copyEntryRelativeAssets({ draft, currentValues });
+    const [blobURL] = getCreatedBlobURLs();
+
+    // The image in the comment isn’t copied
+    expect(Object.keys(files)).toEqual([blobURL]);
+    expect(files[blobURL].file.name).toBe('one.png');
+    expect(currentValues.en.html).toBe(
+      [
+        '<p>Intro</p>',
+        `<p><img src="${blobURL}" alt="First"></p>`,
+        '<!-- <img src="two.png"> -->',
+        // A link to the same file is left alone
+        `<p><a href="./one.png">Link</a><img src="${blobURL}" alt="First again"></p>`,
+        '<p><img src="https://example.com/three.png"></p>',
+      ].join(''),
+    );
+  });
+
+  test('copies the other media embedded in an HTML or Markdown body', async () => {
+    currentValues = {
+      en: {
+        html: [
+          '<picture><source srcset="./one.png 2x, https://example.com/a.png 3x"></picture>',
+          '<video src="./one.png" poster="./one.png"><source src="./one.png"></video>',
+          '<audio src="./one.png"></audio>',
+        ].join(''),
+        body: '![a](./one.png)\n\n<img src="./one.png" alt="Raw">',
+      },
+    };
+
+    const files = await copyEntryRelativeAssets({ draft, currentValues });
+    const [blobURL] = Object.keys(files);
+
+    // The file is copied once, however many references to it there are
+    expect(Object.keys(files)).toEqual([blobURL]);
+    expect(files[blobURL].file.name).toBe('one.png');
+    expect(currentValues.en.html).toBe(
+      [
+        `<picture><source srcset="${blobURL} 2x, https://example.com/a.png 3x"></picture>`,
+        `<video src="${blobURL}" poster="${blobURL}"><source src="${blobURL}"></video>`,
+        `<audio src="${blobURL}"></audio>`,
+      ].join(''),
+    );
+    expect(currentValues.en.body).toBe(`![a](${blobURL})\n\n<img src="${blobURL}" alt="Raw">`);
+  });
+
+  test('leaves an HTML body without an entry-relative image as is', async () => {
+    const html = "<p class='a'>Text<br/><img src='/images/a.png'></p>";
+
+    currentValues = { en: { html } };
+
+    const files = await copyEntryRelativeAssets({ draft, currentValues });
+
+    expect(files).toEqual({});
+    // Not even serialized again
+    expect(currentValues.en.html).toBe(html);
   });
 
   test('copies a file referenced from a File field', async () => {

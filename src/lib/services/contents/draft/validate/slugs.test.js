@@ -6,7 +6,7 @@ import {
   getEntriesInCollectionFolder,
 } from '$lib/services/contents/collection/entries';
 import { getSharedEntryFileName } from '$lib/services/contents/collection/nested';
-import { getUnpublishedEntriesByCollection } from '$lib/services/workflow';
+import { getCompanionEntries, getUnpublishedEntriesByCollection } from '$lib/services/workflow';
 
 import {
   validateSlugs as _validateSlugs,
@@ -21,9 +21,25 @@ vi.mock('$lib/services/contents/collection/entries', () => ({
   getEntriesByCollection: vi.fn(() => []),
   getEntriesInCollectionFolder: vi.fn(() => []),
 }));
-vi.mock('$lib/services/workflow', () => ({
-  getUnpublishedEntriesByCollection: vi.fn(() => []),
-}));
+vi.mock('$lib/services/workflow', () => {
+  /** @type {import('vitest').Mock<(name: string) => any[]>} */
+  const companionEntries = vi.fn(() => []);
+  /** @type {import('vitest').Mock<(name: string) => any[]>} */
+  const unpublishedEntriesByCollection = vi.fn(() => []);
+
+  return {
+    getCompanionEntries: companionEntries,
+    getUnpublishedEntriesByCollection: unpublishedEntriesByCollection,
+    // Mirror the real helper so the tests can drive it through the two it combines
+    getPullRequestEntries: vi.fn((/** @type {string} */ name) => [
+      ...unpublishedEntriesByCollection(name),
+      ...companionEntries(name),
+    ]),
+    // Used to look up the localized folders
+    mergeUnpublishedEntries: vi.fn((/** @type {any[]} */ entries) => entries),
+    unpublishedEntries: { current: [] },
+  };
+});
 vi.mock('$lib/services/contents/collection/nested', async (importOriginal) => ({
   ...(await importOriginal()),
   getSharedEntryFileName: vi.fn(),
@@ -88,6 +104,17 @@ describe('draft/validate/slugs', () => {
       vi.mocked(getUnpublishedEntriesByCollection).mockReturnValue([unpublished]);
 
       expect(getOtherEntries(mockEntryDraft)).toEqual([listed, unlisted, unpublished]);
+    });
+
+    it('should include the new entries riding along in the pull request of another entry', () => {
+      const listed = createEntry('a', { en: 'a' });
+      const companion = createEntry('b', { en: 'b' });
+
+      vi.mocked(getEntriesInCollectionFolder).mockReturnValue([listed]);
+      vi.mocked(getCompanionEntries).mockReturnValueOnce([companion]);
+
+      expect(getOtherEntries(mockEntryDraft)).toEqual([listed, companion]);
+      expect(getCompanionEntries).toHaveBeenCalledWith('posts');
     });
 
     it('should include only the entries the collection lists with `inFolder: false`', () => {
@@ -357,10 +384,62 @@ describe('draft/validate/slugs', () => {
     it('should only count the file names of the entries in the chosen folder', () => {
       mockEntryDraft.currentPath = '/docs/';
 
-      // The folders aren’t localized, so the other locales keep the sub paths
+      // The folders aren’t localized, so every locale’s file goes to the same folder
+      expect(getTakenSlugs(mockEntryDraft)).toEqual({ en: ['intro'], fr: ['intro'] });
+    });
+
+    it('should count the file names in the localized folder of each locale', () => {
+      const entries = [
+        // The folder’s entry is stored beside it, and gives its name in each locale
+        createEntry('1', { en: 'docs', fr: 'documents' }),
+        createEntry('2', { en: 'docs/intro', fr: 'documents/introduction' }),
+        createEntry('3', { en: 'setup', fr: 'installation' }),
+      ];
+
+      vi.mocked(getEntriesByCollection).mockReturnValue(entries);
+      vi.mocked(getEntriesInCollectionFolder).mockReturnValue(entries);
+      mockEntryDraft.collection = {
+        ...mockEntryDraft.collection,
+        fields: [],
+        slug: '{{title | localize}}',
+        _i18n: {
+          i18nEnabled: true,
+          defaultLocale: 'en',
+          structureMap: { i18nSingleFile: false, i18nSingleFileDefaultRoot: false },
+        },
+      };
+      mockEntryDraft.currentPath = 'docs';
+
+      expect(getTakenSlugs(mockEntryDraft)).toEqual({ en: ['intro'], fr: ['introduction'] });
+    });
+
+    it('should count the file names in the folder of a locale just enabled for an existing entry', () => {
+      const entries = [
+        createEntry('1', { en: 'docs', fr: 'documents' }),
+        createEntry('2', { en: 'docs/intro', fr: 'documents/introduction' }),
+      ];
+
+      vi.mocked(getEntriesByCollection).mockReturnValue(entries);
+      vi.mocked(getEntriesInCollectionFolder).mockReturnValue(entries);
+      mockEntryDraft.collection = {
+        ...mockEntryDraft.collection,
+        fields: [],
+        slug: '{{title | localize}}',
+        _i18n: {
+          i18nEnabled: true,
+          defaultLocale: 'en',
+          structureMap: { i18nSingleFile: false, i18nSingleFileDefaultRoot: false },
+        },
+      };
+      mockEntryDraft.isNew = false;
+      mockEntryDraft.originalLocales = { en: true, fr: false };
+      mockEntryDraft.originalPath = 'docs';
+      mockEntryDraft.currentPath = 'docs';
+
+      // The entry already has a sub path in English, which other entries’ sub paths are compared to
       expect(getTakenSlugs(mockEntryDraft)).toEqual({
-        en: ['intro'],
-        fr: ['docs/intro', 'setup', 'docs/guides/start'],
+        en: ['docs', 'docs/intro'],
+        fr: ['introduction'],
       });
     });
 
@@ -401,6 +480,37 @@ describe('draft/validate/slugs', () => {
       expect(validateSlug({ slug: 'a/b' })).toBe('invalid');
       expect(validateSlug({ slug: 'a b' })).toBe('invalid');
       expect(validateSlug({ slug: 'ab ' })).toBe('invalid');
+    });
+
+    it('should report a leading dot, which would make a hidden dot file', () => {
+      expect(validateSlug({ slug: '.hidden' })).toBe('invalid');
+      expect(validateSlug({ slug: '..' })).toBe('invalid');
+      expect(validateSlug({ slug: ' .net-tips', allowSpaces: true })).toBe('invalid');
+      // A dot elsewhere is fine
+      expect(validateSlug({ slug: 'release-2.0' })).toBeUndefined();
+    });
+
+    it('should allow a plain space when `allowSpaces` is set', () => {
+      expect(validateSlug({ slug: 'Sourdough focaccia', allowSpaces: true })).toBeUndefined();
+      expect(validateSlug({ slug: 'a/b', allowSpaces: true })).toBe('invalid');
+      expect(validateSlug({ slug: 'a\tb', allowSpaces: true })).toBe('invalid');
+      expect(validateSlug({ slug: 'a b', allowSpaces: false })).toBe('invalid');
+    });
+
+    // @see https://github.com/sveltia/sveltia-cms/issues/1093
+    it('should allow a plain space when the replacement has one', async () => {
+      const { cmsConfig } = await import('$lib/services/config');
+
+      cmsConfig.current = { slug: { sanitize_replacement: ' ' } };
+
+      try {
+        expect(validateSlug({ slug: 'Sourdough focaccia' })).toBeUndefined();
+        expect(validateSlug({ slug: 'a/b' })).toBe('invalid');
+        expect(validateSlug({ slug: 'a\tb' })).toBe('invalid');
+        expect(validateSlug({ slug: 'a\u00A0b' })).toBe('invalid');
+      } finally {
+        cmsConfig.current = undefined;
+      }
     });
 
     it('should check the pattern', () => {

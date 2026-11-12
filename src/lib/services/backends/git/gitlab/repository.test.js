@@ -5,6 +5,8 @@ import {
   checkBranchAccess,
   checkRepositoryAccess,
   fetchDefaultBranchName,
+  fetchProjectBranchHead,
+  fetchProjectPermissions,
   getBaseURLs,
   getBranchPath,
   getProjectId,
@@ -15,9 +17,9 @@ import { fetchAPI, fetchGraphQL } from '$lib/services/backends/git/shared/api';
 
 // Mock dependencies
 vi.mock('$lib/services/backends/git/shared/api');
-vi.mock('@sveltia/i18n', () => ({
-  _: vi.fn(() => 'Translation message'),
-}));
+vi.mock('@sveltia/i18n', async () =>
+  (await import('$lib/test/i18n')).createI18nMock({ values: true }),
+);
 
 describe('GitLab repository service', () => {
   beforeEach(() => {
@@ -74,6 +76,43 @@ describe('GitLab repository service', () => {
     });
   });
 
+  describe('fetchProjectBranchHead', () => {
+    test('reads the commit the branch points at in the configured project', async () => {
+      Object.assign(repository, { owner: 'group', repo: 'project' });
+      vi.mocked(fetchAPI).mockResolvedValue({ commit: { id: 'abc123' } });
+
+      await expect(fetchProjectBranchHead('main')).resolves.toBe('abc123');
+      expect(fetchAPI).toHaveBeenCalledWith('/projects/group%2Fproject/repository/branches/main');
+    });
+
+    test('reads a branch in another project, such as a contributor’s fork', async () => {
+      vi.mocked(fetchAPI).mockResolvedValue({ commit: { id: 'abc123' } });
+
+      await expect(
+        fetchProjectBranchHead('cms/x', { owner: 'contributor', repo: 'project' }),
+      ).resolves.toBe('abc123');
+      expect(fetchAPI).toHaveBeenCalledWith(
+        '/projects/contributor%2Fproject/repository/branches/cms%2Fx',
+      );
+    });
+
+    test('answers undefined for a branch that doesn’t exist', async () => {
+      vi.mocked(fetchAPI).mockRejectedValue(
+        new Error('Server responded with an error', { cause: { status: 404 } }),
+      );
+
+      await expect(fetchProjectBranchHead('gone')).resolves.toBeUndefined();
+    });
+
+    test('raises any other failure', async () => {
+      vi.mocked(fetchAPI).mockRejectedValue(
+        new Error('Server responded with an error', { cause: { status: 500 } }),
+      );
+
+      await expect(fetchProjectBranchHead('main')).rejects.toThrow();
+    });
+  });
+
   describe('getBaseURLs', () => {
     test('returns correct URLs for repository with branch', () => {
       const repoURL = 'https://gitlab.com/owner/repo';
@@ -85,6 +124,14 @@ describe('GitLab repository service', () => {
         blobBaseURL: `${repoURL}/-/blob/${branch}`,
         commitBaseURL: `${repoURL}/-/commit`,
       });
+    });
+
+    test('encodes a branch name with a character that ends a URL path', () => {
+      const repoURL = 'https://gitlab.com/owner/repo';
+      const result = getBaseURLs(repoURL, 'cms/posts/c#');
+
+      expect(result.treeBaseURL).toBe(`${repoURL}/-/tree/cms/posts/c%23`);
+      expect(result.blobBaseURL).toBe(`${repoURL}/-/blob/cms/posts/c%23`);
     });
 
     test('handles undefined branch', () => {
@@ -113,18 +160,24 @@ describe('GitLab repository service', () => {
       expect(fetchGraphQL).toHaveBeenCalledWith(expect.stringContaining('pushCode'));
     });
 
-    test('throws error when the user has a role lower than Developer', async () => {
+    test('says write access is missing when the user has a role lower than Developer', async () => {
       vi.mocked(fetchGraphQL).mockResolvedValue({
         project: { userPermissions: { pushCode: false } },
       });
 
-      await expect(checkRepositoryAccess()).rejects.toThrow('Not a collaborator of the repository');
+      await expect(checkRepositoryAccess()).rejects.toMatchObject({
+        message: 'Not a collaborator of the repository',
+        cause: { message: 'repository_no_write_access:{"repo":"test-repo"}' },
+      });
     });
 
-    test('throws error when the project is not visible to the user', async () => {
+    test('says there is no access when the project is not visible to the user', async () => {
       vi.mocked(fetchGraphQL).mockResolvedValue({ project: null });
 
-      await expect(checkRepositoryAccess()).rejects.toThrow('Not a collaborator of the repository');
+      await expect(checkRepositoryAccess()).rejects.toMatchObject({
+        message: 'Not a collaborator of the repository',
+        cause: { message: 'repository_no_access:{"repo":"test-repo"}' },
+      });
     });
 
     test('reports a failed check rather than a raw error when the request fails', async () => {
@@ -159,6 +212,44 @@ describe('GitLab repository service', () => {
       );
 
       await expect(checkRepositoryAccess()).rejects.toThrow('Not a collaborator of the repository');
+    });
+  });
+
+  describe('fetchProjectPermissions', () => {
+    beforeEach(() => {
+      Object.assign(repository, { owner: 'test-owner', repo: 'test-repo' });
+    });
+
+    test('tells whether the project is visible and whether the user can push to it', async () => {
+      vi.mocked(fetchGraphQL).mockResolvedValue({
+        project: { userPermissions: { pushCode: true } },
+      });
+      await expect(fetchProjectPermissions()).resolves.toEqual({ found: true, canPush: true });
+
+      vi.mocked(fetchGraphQL).mockResolvedValue({ project: null });
+      await expect(fetchProjectPermissions()).resolves.toEqual({ found: false, canPush: false });
+    });
+
+    test.each([401, 403])('treats a %s as no access', async (status) => {
+      // Open Authoring reads the permissions with this as well, so an expired token sends the user
+      // back to the sign-in form there too
+      vi.mocked(fetchGraphQL).mockRejectedValue(
+        new Error('Server responded with an error', { cause: { status } }),
+      );
+
+      await expect(fetchProjectPermissions()).rejects.toThrow(
+        'Not a collaborator of the repository',
+      );
+    });
+
+    test('reports a failed check on a rate limit', async () => {
+      vi.mocked(fetchGraphQL).mockRejectedValue(
+        new Error('Too Many Requests', { cause: { status: 429 } }),
+      );
+
+      await expect(fetchProjectPermissions()).rejects.toThrow(
+        'Failed to check the repository permission.',
+      );
     });
   });
 

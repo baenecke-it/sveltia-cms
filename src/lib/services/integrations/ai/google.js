@@ -3,11 +3,10 @@
  * @see https://ai.google.dev/api/generate-content
  */
 
-import { isObject } from '@sveltia/utils/object';
-
 import {
   createTruncationError,
   DEFAULT_MAX_TOKENS,
+  joinTextParts,
   postJSON,
 } from '$lib/services/integrations/ai/api';
 
@@ -15,12 +14,16 @@ import {
  * @import { AiCompletionOptions } from '$lib/types/private';
  */
 
+export const serviceId = 'google-ai';
+export const serviceLabel = 'Google Gemini';
 export const apiLabel = 'Gemini API';
 export const developerURL = 'https://ai.google.dev/gemini-api/docs';
 export const apiKeyURL = 'https://aistudio.google.com/api-keys';
 // Anchored, so a key for another service entered while this one is selected isn’t accepted and sent
-// to the wrong API
-export const apiKeyPattern = /^AIza[a-zA-Z0-9_-]{35}$/;
+// to the wrong API. Google AI Studio now issues `AQ.` authentication keys alongside the legacy
+// `AIza` ones.
+// @see https://discuss.ai.google.dev/t/gemini-api-key-start-from-aq/171575
+export const apiKeyPattern = /^(?:AIza[a-zA-Z0-9_-]{35}|AQ\.[a-zA-Z0-9._-]{20,})$/;
 
 /**
  * Send a message to the Google Gemini API and return the response text.
@@ -62,19 +65,5 @@ export const complete = async ({
   }
 
   // The answer can be split into several parts, and a thinking model can add a thought summary
-  /** @type {string[]} */
-  const texts = Array.isArray(candidate?.content?.parts)
-    ? candidate.content.parts
-        .filter(
-          (/** @type {unknown} */ part) =>
-            isObject(part) && !part.thought && typeof part.text === 'string',
-        )
-        .map((/** @type {{ text: string }} */ { text }) => text)
-    : [];
-
-  if (!texts.length) {
-    throw new Error('Invalid response format from Gemini API.');
-  }
-
-  return texts.join('').trim();
+  return joinTextParts(candidate?.content?.parts, (part) => !part.thought, 'Gemini');
 };

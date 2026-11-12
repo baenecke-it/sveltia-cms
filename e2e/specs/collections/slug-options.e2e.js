@@ -1,5 +1,13 @@
+import { readFile } from 'fs/promises';
+
 import { expect, test } from '../../fixtures/test.js';
-import { getEditor, getEntryList, getEntryRows, openCollection } from '../../fixtures/ui.js';
+import {
+  getEditor,
+  getEntryList,
+  getEntryRows,
+  openCollection,
+  saveEntry,
+} from '../../fixtures/ui.js';
 
 /**
  * @import { Page } from '@playwright/test';
@@ -41,8 +49,7 @@ const createPost = async (page, title) => {
   const editor = getEditor(page);
 
   await editor.getByRole('textbox', { name: 'Title', exact: true }).fill(title);
-  await editor.getByRole('button', { name: 'Save' }).click();
-  await expect(editor).toBeHidden();
+  await saveEntry(editor);
 };
 
 /**
@@ -79,21 +86,6 @@ const reopenPost = async (page, title) => {
  */
 const MIXED_TITLE = '  Café: 日本語のタイトル 🎉 -- Hello, World!  ';
 
-/**
- * Open the CMS, seed the repository with the given files and sign in.
- * @param {CMS} cms CMS fixture.
- * @param {Record<string, string>} [files] Files to seed.
- */
-const start = async (cms, files) => {
-  await cms.open();
-
-  if (files) {
-    await cms.seed(files);
-  }
-
-  await cms.signIn();
-};
-
 test.describe('default options', () => {
   test.use({ config: makeConfig() });
 
@@ -101,14 +93,14 @@ test.describe('default options', () => {
     cms,
     page,
   }) => {
-    await start(cms);
+    await cms.start();
     await createPost(page, MIXED_TITLE);
     await expectPosts(cms, ['café-日本語のタイトル-🎉-hello-world.md']);
     await reopenPost(page, MIXED_TITLE.trim());
   });
 
   test('adds a number to the slug of a post with the same title', async ({ cms, page }) => {
-    await start(cms, { 'content/posts/hello-world.md': '---\ntitle: Hello World\n---\n' });
+    await cms.start({ 'content/posts/hello-world.md': '---\ntitle: Hello World\n---\n' });
     await createPost(page, 'Hello World');
     await expectPosts(cms, ['hello-world-1.md', 'hello-world.md']);
     await createPost(page, 'Hello, World!');
@@ -126,12 +118,33 @@ test.describe('default options', () => {
   });
 
   test('adds a number to the end of a duplicate slug containing a dot', async ({ cms, page }) => {
-    await start(cms);
+    await cms.start();
     await createPost(page, 'Node.js Tips');
     await expectPosts(cms, ['node.js-tips.md']);
     await createPost(page, 'Node.js Tips');
     // The part after the dot isn’t a file extension
     await expectPosts(cms, ['node.js-tips-1.md', 'node.js-tips.md']);
+  });
+
+  test('drops the dots at the end, which a branch name can’t end with', async ({ cms, page }) => {
+    await cms.start();
+    await createPost(page, 'Wait for it...');
+    await expectPosts(cms, ['wait-for-it.md']);
+    // The hyphen a space before the dot leaves goes as well
+    await createPost(page, 'The end .');
+    await expectPosts(cms, ['the-end.md', 'wait-for-it.md']);
+    await reopenPost(page, 'Wait for it...');
+  });
+
+  test('caps a long slug at 200 bytes without breaking a character apart', async ({
+    cms,
+    page,
+  }) => {
+    await cms.start();
+    await createPost(page, 'a'.repeat(250));
+    // A Japanese character takes 3 bytes, so 66 of them fit
+    await createPost(page, 'あ'.repeat(80));
+    await expectPosts(cms, [`${'a'.repeat(200)}.md`, `${'あ'.repeat(66)}.md`]);
   });
 });
 
@@ -139,7 +152,7 @@ test.describe('`encoding: ascii`', () => {
   test.use({ config: makeConfig({ encoding: 'ascii' }) });
 
   test('drops non-ASCII characters and punctuation', async ({ cms, page }) => {
-    await start(cms);
+    await cms.start();
     await createPost(page, MIXED_TITLE);
     // The hyphens are safe characters, which are collapsed with the replacements around them
     await expectPosts(cms, ['caf-hello-world.md']);
@@ -147,20 +160,40 @@ test.describe('`encoding: ascii`', () => {
   });
 
   test('keeps underscores and tildes, and drops dots', async ({ cms, page }) => {
-    await start(cms);
+    await cms.start();
     await createPost(page, 'snake_case ~tilde~ v1.2');
     await expectPosts(cms, ['snake_case-~tilde~-v1-2.md']);
   });
 });
 
+/**
+ * Serve the installed transliterate library in place of the CDN copy the CMS loads for the
+ * `clean_accents` option, so the tests don’t depend on the network.
+ * @param {{ page: Page }} fixtures Fixtures.
+ * @returns {Promise<void>}
+ */
+const serveTransliterator = ({ page }) =>
+  page.route('https://unpkg.com/@sindresorhus/transliterate@*/*.js', async (route) => {
+    const fileName = new URL(route.request().url()).pathname.split('/').pop();
+
+    await route.fulfill({
+      contentType: 'text/javascript',
+      headers: { 'Access-Control-Allow-Origin': '*' },
+      body: await readFile(
+        new URL(`../../../node_modules/@sindresorhus/transliterate/${fileName}`, import.meta.url),
+      ),
+    });
+  });
+
 test.describe('`clean_accents: true`', () => {
   test.use({ config: makeConfig({ clean_accents: true }) });
+  test.beforeEach(serveTransliterator);
 
   test('transliterates accented letters and punctuation, and keeps other Unicode characters', async ({
     cms,
     page,
   }) => {
-    await start(cms);
+    await cms.start();
     // The umlaut is spelled out as in German, and the em dash becomes a hyphen
     await createPost(page, 'Crème brûlée à Zürich — 日本語');
     await expectPosts(cms, ['creme-brulee-a-zuerich-日本語.md']);
@@ -170,12 +203,13 @@ test.describe('`clean_accents: true`', () => {
 
 test.describe('`clean_accents: true` with `encoding: ascii`', () => {
   test.use({ config: makeConfig({ encoding: 'ascii', clean_accents: true }) });
+  test.beforeEach(serveTransliterator);
 
   test('transliterates accented letters before dropping non-ASCII characters', async ({
     cms,
     page,
   }) => {
-    await start(cms);
+    await cms.start();
     await createPost(page, MIXED_TITLE);
     await expectPosts(cms, ['cafe-hello-world.md']);
     await reopenPost(page, MIXED_TITLE.trim());
@@ -186,14 +220,14 @@ test.describe('`sanitize_replacement`', () => {
   test.use({ config: makeConfig({ sanitize_replacement: '_' }) });
 
   test('joins the words with the replacement, collapsed and trimmed', async ({ cms, page }) => {
-    await start(cms);
+    await cms.start();
     await createPost(page, '_ Hello, World! _ Again _');
     await expectPosts(cms, ['hello_world_again.md']);
     await reopenPost(page, '_ Hello, World! _ Again _');
   });
 
   test('adds a number to a duplicate slug with a hyphen', async ({ cms, page }) => {
-    await start(cms);
+    await cms.start();
     await createPost(page, 'Hello World');
     await createPost(page, 'Hello World');
     await expectPosts(cms, ['hello_world-1.md', 'hello_world.md']);
@@ -204,7 +238,7 @@ test.describe('`trim: false`', () => {
   test.use({ config: makeConfig({ trim: false }) });
 
   test('keeps the replacement at either end, collapsed', async ({ cms, page }) => {
-    await start(cms);
+    await cms.start();
     await createPost(page, '--Hello World--');
     await expectPosts(cms, ['-hello-world-.md']);
     await reopenPost(page, '--Hello World--');
@@ -214,7 +248,7 @@ test.describe('`trim: false`', () => {
     cms,
     page,
   }) => {
-    await start(cms);
+    await cms.start();
     await createPost(page, '!Hello World?');
     await expectPosts(cms, ['hello-world.md']);
   });
@@ -224,7 +258,7 @@ test.describe('`trim: false` with `maxlength`', () => {
   test.use({ config: makeConfig({ trim: false, maxlength: 50 }) });
 
   test('keeps the replacement at either end of a slug that isn’t cut', async ({ cms, page }) => {
-    await start(cms);
+    await cms.start();
     await createPost(page, '--Hello World--');
     await expectPosts(cms, ['-hello-world-.md']);
   });
@@ -236,7 +270,7 @@ test.describe('`maxlength`', () => {
   test('cuts a long slug and the replacement left at the end', async ({ cms, page }) => {
     const title = `The quick brown fox jumps over the lazy dog ${'again and '.repeat(20)}`.trim();
 
-    await start(cms);
+    await cms.start();
     // The 20th character is a hyphen
     await createPost(page, title);
     await expectPosts(cms, ['the-quick-brown-fox.md']);
@@ -244,13 +278,13 @@ test.describe('`maxlength`', () => {
   });
 
   test('counts characters, not bytes, in a non-Latin slug', async ({ cms, page }) => {
-    await start(cms);
+    await cms.start();
     await createPost(page, '日本語のとても長いタイトルです。最後まで読んでください 🎉🎉🎉');
     await expectPosts(cms, ['日本語のとても長いタイトルです。最後まで.md']);
   });
 
   test('cuts the slug before a number is added to a duplicate', async ({ cms, page }) => {
-    await start(cms);
+    await cms.start();
     await createPost(page, 'The quick brown fox jumps over the lazy dog');
     await createPost(page, 'The quick brown fox jumps over the lazy cat');
     await expectPosts(cms, ['the-quick-brown-fox-1.md', 'the-quick-brown-fox.md']);
@@ -275,7 +309,7 @@ test.describe('collection `slug_length`', () => {
   });
 
   test('takes precedence over the global `maxlength`', async ({ cms, page }) => {
-    await start(cms);
+    await cms.start();
     await createPost(page, 'The quick brown fox jumps over the lazy dog');
     await expectPosts(cms, ['the-quick.md']);
 
@@ -306,7 +340,7 @@ test.describe('`lowercase: false`', () => {
   });
 
   test('keeps the case of the title and of a transformed field', async ({ cms, page }) => {
-    await start(cms);
+    await cms.start();
     await page.getByRole('button', { name: 'Create New Entry' }).first().click();
 
     const editor = getEditor(page);
@@ -337,7 +371,7 @@ test.describe('slug template', () => {
   }) => {
     // The date tags come from the time of saving, in UTC by default
     await page.clock.setFixedTime(new Date('2026-05-10T07:08:00Z'));
-    await start(cms);
+    await cms.start();
 
     const editor = getEditor(page);
 
@@ -369,8 +403,58 @@ test.describe('`timezone: local`', () => {
   test('fills the date tags with the local date', async ({ cms, page }) => {
     // It’s already the next day in Tokyo
     await page.clock.install({ time: new Date('2026-05-10T20:00:00Z') });
-    await start(cms);
+    await cms.start();
     await createPost(page, 'Late Night');
     await expectPosts(cms, ['2026-05-11-late-night.md']);
+  });
+});
+
+test.describe('entry date', () => {
+  test.use({
+    config: makeConfig(undefined, {
+      slug: '{{year}}-{{month}}-{{day}}-{{title}}',
+      path: '{{year}}/{{slug}}',
+      fields: [
+        { name: 'title', label: 'Title' },
+        {
+          name: 'publish_date',
+          label: 'Publish Date',
+          widget: 'datetime',
+          input_timezone: 'Asia/Tokyo',
+          required: false,
+        },
+      ],
+    }),
+  });
+
+  test('fills the date tags with the post’s date in UTC, once', async ({ cms, page }) => {
+    await page.clock.setFixedTime(new Date('2026-05-10T07:08:00Z'));
+    await cms.start();
+
+    const editor = getEditor(page);
+
+    // A backdated post is named after its date, which is still the previous day in UTC
+    await page.getByRole('button', { name: 'Create New Entry' }).first().click();
+    await editor.getByRole('textbox', { name: 'Title', exact: true }).fill('Old News');
+    await editor
+      .getByRole('textbox', { name: 'Publish Date', exact: true })
+      .fill('2020-01-02T08:30');
+    await editor.getByRole('button', { name: 'Save' }).click();
+    await expectPosts(cms, ['2020/2020-01-01-old-news.md']);
+
+    // Without a date, the time of saving is used
+    await createPost(page, 'Fresh');
+    await expectPosts(cms, ['2020/2020-01-01-old-news.md', '2026/2026-05-10-fresh.md']);
+
+    // Changing the date later doesn’t rename the file
+    await reopenPost(page, 'Old News');
+    await editor
+      .getByRole('textbox', { name: 'Publish Date', exact: true })
+      .fill('2021-06-07T08:30');
+    await editor.getByRole('button', { name: 'Save' }).click();
+    await expect
+      .poll(async () => (await cms.readRepo())['content/posts/2020/2020-01-01-old-news.md'])
+      .toContain('publish_date: 2021-06-07T08:30:00+09:00');
+    await expectPosts(cms, ['2020/2020-01-01-old-news.md', '2026/2026-05-10-fresh.md']);
   });
 });

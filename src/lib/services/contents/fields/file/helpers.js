@@ -2,6 +2,7 @@ import { isURL } from '@sveltia/utils/string';
 import equal from 'fast-deep-equal';
 
 import { fillInternalPathTemplate } from '$lib/services/assets';
+import { getExistingEntryAssetFolderPath } from '$lib/services/assets/entry-folder';
 import { formatFileName } from '$lib/services/assets/file-name';
 import { allAssetFolders, getAssetFolder, globalAssetFolder } from '$lib/services/assets/folders';
 import { getPendingFileName } from '$lib/services/assets/name';
@@ -10,7 +11,6 @@ import { TEMPLATE_TAG_REPLACE_REGEX } from '$lib/services/common/template/consta
 import { hasTemplateTags } from '$lib/services/common/template/tags';
 import { createPublicURL, getAssetFolderPaths } from '$lib/services/contents/draft/save/assets';
 import { getSlugs } from '$lib/services/contents/draft/slugs';
-import { getEntryFolderPath } from '$lib/services/contents/entry/paths';
 import { isAcceptedFile } from '$lib/services/integrations/media-libraries/default';
 import { getOrCreate } from '$lib/services/utils/cache';
 import { createPath, getDirName } from '$lib/services/utils/file';
@@ -115,6 +115,15 @@ export const getDefaultAssetFolder = (folderMap) =>
   /** @type {AssetFolderInfo} */ (Object.values(folderMap).find(({ enabled }) => enabled)?.folder);
 
 /**
+ * Get the folder the field editor puts a newly picked file in, i.e. The default asset library
+ * folder of a File/Image field, so a copy of a file ends up in the same place.
+ * @param {Parameters<typeof getAssetLibraryFolderMap>[0]} args Arguments. See
+ * {@link getAssetLibraryFolderMap}.
+ * @returns {AssetFolderInfo} Folder.
+ */
+export const getFieldAssetFolder = (args) => getDefaultAssetFolder(getAssetLibraryFolderMap(args));
+
+/**
  * Get the target folder path for a File/Image field.
  * @param {object} args Arguments.
  * @param {Entry | undefined} args.entry Original entry.
@@ -145,8 +154,14 @@ export const getTargetFolderPath = ({ entry, folder, locale }) => {
   // not assets from sibling field folders (e.g. `images2`).
   const subPath = internalSubPath || undefined;
 
+  // The folder the entry’s relative assets are saved to, which is the folder the entry occupies if
+  // it has one of its own, e.g. `content/posts/2025/06/hello` for `content/posts/2025/06/hello.md`
+  // with a `{{year}}/{{month}}/{{slug}}` path option
   if (entry) {
-    return createPath([getEntryFolderPath(entry, locale), subPath]);
+    return createPath([
+      getExistingEntryAssetFolderPath({ entry, locale, collectionName }),
+      subPath,
+    ]);
   }
 
   // Append a placeholder because the complete path is not determined until the entry is saved

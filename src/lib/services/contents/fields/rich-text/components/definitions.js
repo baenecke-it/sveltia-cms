@@ -2,6 +2,11 @@ import { _ } from '@sveltia/i18n';
 
 import { customComponentRegistry } from '$lib/services/api/registries';
 import {
+  isInlinePatternComponent,
+  resolveInlinePatternComponent,
+} from '$lib/services/contents/fields/rich-text/components/inline-pattern';
+import {
+  escapeAlt,
   escapeTitle,
   unescapeTitle,
 } from '$lib/services/contents/fields/rich-text/components/utils';
@@ -12,6 +17,7 @@ import {
 import { escapeAttr } from '$lib/services/utils/string';
 
 /**
+ * @import { ResolvedEditorComponentDefinition } from '$lib/types/private';
  * @import { EditorComponentDefinition } from '$lib/types/public';
  */
 
@@ -51,6 +57,22 @@ const createImageElement = ({ src = '', alt = '', title = '' }) => {
 };
 
 /**
+ * Create the Markdown image syntax from the image field values.
+ * @param {Record<string, any>} props Field values.
+ * @returns {string} Markdown, or an empty string if the source is not set.
+ */
+const toImageMarkdown = ({ src = '', alt = '', title = '' }) =>
+  src ? `![${escapeAlt(alt)}](${src}${title ? ` "${escapeTitle(title)}"` : ''})` : '';
+
+/**
+ * Create the HTML of an image preview from the image field values.
+ * @param {Record<string, any>} props Field values.
+ * @returns {string} HTML.
+ */
+const toImagePreview = ({ src = '', alt = '', title = '' }) =>
+  `<img src="${escapeAttr(src)}" alt="${escapeAttr(alt)}" title="${escapeAttr(title)}">`;
+
+/**
  * Built-in image component definition. The labels are localized in `getBuiltInComponentDefs()`.
  * @type {EditorComponentDefinition}
  * @see https://decapcms.org/docs/widgets/#Markdown
@@ -67,20 +89,12 @@ export const IMAGE_COMPONENT = {
   ],
   pattern: IMAGE_REGEX,
   fromBlock: (match) => {
-    const { src, alt, title } = match.groups ?? {};
+    const { src, alt, title = match.groups?.singleQuotedTitle } = match.groups ?? {};
 
-    return { src, alt, title: title && unescapeTitle(title) };
+    return { src, alt: alt && unescapeTitle(alt), title: title && unescapeTitle(title) };
   },
-  toBlock: (props) => {
-    const { src = '', alt = '', title = '' } = props;
-
-    return src ? `![${alt}](${src}${title ? ` "${escapeTitle(title)}"` : ''})` : '';
-  },
-  toPreview: (props) => {
-    const { src = '', alt = '', title = '' } = props;
-
-    return `<img src="${escapeAttr(src)}" alt="${escapeAttr(alt)}" title="${escapeAttr(title)}">`;
-  },
+  toBlock: toImageMarkdown,
+  toPreview: toImagePreview,
   htmlSelector: 'img',
   fromBlockHTML: getImageProps,
   toBlockHTML: createImageElement,
@@ -99,25 +113,25 @@ export const LINKED_IMAGE_COMPONENT = {
   fields: [...IMAGE_COMPONENT.fields, { name: 'link', label: 'Link', required: false }],
   pattern: IMAGE_OR_LINKED_IMAGE_REGEX,
   fromBlock: (match) => {
-    const { src, alt, title, src2, alt2, title2, link } = match.groups ?? {};
+    const { src, alt, title, singleQuotedTitle, src2, alt2, title2, singleQuotedTitle2, link } =
+      match.groups ?? {};
 
     return {
       src: (src || src2 || '').trim(),
-      alt: (alt || alt2 || '').trim(),
-      title: unescapeTitle(title || title2 || '').trim(),
+      alt: unescapeTitle(alt || alt2 || '').trim(),
+      title: unescapeTitle(title || singleQuotedTitle || title2 || singleQuotedTitle2 || '').trim(),
       link: (link || '').trim(),
     };
   },
   toBlock: (props) => {
-    const { src = '', alt = '', title = '', link = '' } = props;
-    const img = src ? `![${alt}](${src}${title ? ` "${escapeTitle(title)}"` : ''})` : '';
+    const { link = '' } = props;
+    const img = toImageMarkdown(props);
 
     return img && link ? `[${img}](${link})` : img;
   },
   toPreview: (props) => {
-    const { src = '', alt = '', title = '', link = '' } = props;
-    // eslint-disable-next-line @stylistic/max-len
-    const img = `<img src="${escapeAttr(src)}" alt="${escapeAttr(alt)}" title="${escapeAttr(title)}">`;
+    const { link = '' } = props;
+    const img = toImagePreview(props);
 
     return link ? `<a href="${escapeAttr(link)}">${img}</a>` : img;
   },
@@ -228,18 +242,21 @@ export const getCustomComponentName = (name) => {
  * Get a component definition.
  * @param {string} name Component name. For a custom component, this can be either the name
  * registered with the API or the prefixed ID of its definition. See {@link getCustomComponentName}.
- * @returns {EditorComponentDefinition | undefined} Definition.
+ * @returns {ResolvedEditorComponentDefinition | undefined} Definition. A pattern-based inline
+ * component is converted to the shape of a field-based one with `resolveInlinePatternComponent()`.
  */
 export const getComponentDef = (name) => {
   const customComponentName = getCustomComponentName(name);
 
   if (customComponentName) {
+    const registeredDef = customComponentRegistry.get(customComponentName);
+
+    const customComponentDef = isInlinePatternComponent(registeredDef)
+      ? resolveInlinePatternComponent(registeredDef)
+      : /** @type {EditorComponentDefinition} */ (registeredDef);
+
     // Add a prefix to the component ID to avoid conflicts with built-in components and Lexical’s
     // built-in node types, such as `code`.
-    const customComponentDef = /** @type {EditorComponentDefinition} */ (
-      customComponentRegistry.get(customComponentName)
-    );
-
     return {
       ...customComponentDef,
       id: `x-${customComponentName}`,

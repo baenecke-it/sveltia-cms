@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { isAutoDuplicationEnabled } from '$lib/services/contents/draft';
 import { getField } from '$lib/services/contents/entry/fields';
 import { useActualDraftFieldArgs } from '$lib/test/fields';
 
@@ -40,6 +41,8 @@ describe('draft/update/revert', () => {
       fileName: undefined,
       isIndexFile: false,
       fields: [],
+      originalLocales: { en: true, ja: true },
+      currentLocales: { en: true, ja: true },
       currentValues: {
         en: {
           title: 'Modified Title',
@@ -93,8 +96,8 @@ describe('draft/update/revert', () => {
     });
 
     it('restores the slugs', () => {
-      // A slug edited with the slug editor names the file, or the folder in a nested collection, so
-      // a full revert undoes the rename too
+      // A slug edited with the slug editor names the file, or the folder in a collection with
+      // nested entries, so a full revert undoes the rename too
       mockEntryDraft.originalSlugs = { en: 'company', ja: 'kaisha' };
       mockEntryDraft.currentSlugs = { en: 'company', ja: 'kigyou' };
 
@@ -105,6 +108,29 @@ describe('draft/update/revert', () => {
       expect(currentSlugs).toEqual({ en: 'company', ja: 'kaisha' });
       // A copy, so that editing the slug again doesn’t alter the original
       expect(currentSlugs).not.toBe(mockEntryDraft.originalSlugs);
+    });
+
+    it('restores the locales the entry is output in', () => {
+      // A locale disabled with the locale switcher would otherwise stay disabled, and saving would
+      // delete its file
+      mockEntryDraft.currentLocales = { en: true, ja: false };
+
+      revertChanges();
+
+      const { currentLocales } = mockEntryDraft;
+
+      expect(currentLocales).toEqual({ en: true, ja: true });
+      // A copy, so that toggling a locale again doesn’t alter the original
+      expect(currentLocales).not.toBe(mockEntryDraft.originalLocales);
+    });
+
+    it('leaves the locales alone when only one locale or field is reverted', () => {
+      mockEntryDraft.currentLocales = { en: true, ja: false };
+
+      revertChanges({ locale: 'en' });
+      revertChanges({ keyPath: 'title' });
+
+      expect(mockEntryDraft.currentLocales).toEqual({ en: true, ja: false });
     });
 
     it('leaves the slugs alone when only one locale is reverted', () => {
@@ -198,6 +224,42 @@ describe('draft/update/revert', () => {
       expect(currentValues.en['tag.0']).toBe('Original Item');
       expect(currentValues.en.tags).toBe('Modified Tags');
       expect(currentValues.en.tagline).toBe('Modified Tagline');
+    });
+
+    it('should revert every locale to its own values when reverting everything', () => {
+      // https://github.com/sveltia/sveltia-cms/issues/1128
+      const getFieldImpl = vi.mocked(getField).getMockImplementation();
+      /** @type {boolean[]} */
+      const autoDuplication = [];
+
+      vi.mocked(getField).mockImplementation((args) => {
+        autoDuplication.push(isAutoDuplicationEnabled());
+
+        return args.keyPath === 'tag'
+          ? { name: 'tag', widget: 'string', i18n: 'sync' }
+          : getFieldImpl?.(args);
+      });
+
+      // The locales’ original values differ, e.g. as the files were edited elsewhere
+      mockEntryDraft.currentValues.en.tag = 'Edited';
+      mockEntryDraft.currentValues.ja.tag = 'Edited';
+      mockEntryDraft.originalValues.en.tag = 'Tag';
+      mockEntryDraft.originalValues.ja.tag = 'Étiquette';
+
+      revertChanges();
+
+      expect(mockEntryDraft.currentValues.en.tag).toBe('Tag');
+      expect(mockEntryDraft.currentValues.ja.tag).toBe('Étiquette');
+      // Nothing is copied from one locale to another meanwhile
+      expect(autoDuplication).not.toContain(true);
+
+      // Reverting one locale reverts the field there, and the value proxy copies it to the others
+      mockEntryDraft.currentValues.ja.tag = 'Edited';
+      autoDuplication.length = 0;
+      revertChanges({ locale: 'ja' });
+
+      expect(mockEntryDraft.currentValues.ja.tag).toBe('Étiquette');
+      expect(autoDuplication).not.toContain(false);
     });
 
     it('should only revert translatable fields in non-default locale', () => {
@@ -308,6 +370,39 @@ describe('draft/update/revert', () => {
 
         expect(mockEntryDraft.currentValues).toEqual(mockEntryDraft.originalValues);
       });
+    });
+
+    it('should revert the values without a field of their own in another locale', () => {
+      // An item of a List field without subfields, the code of a Code field and a KeyValue pair
+      // aren’t described by a field configuration, so they’re governed by the field owning them
+      /** @type {Record<string, any>} */
+      const fields = {
+        tags: { name: 'tags', widget: 'list', i18n: true },
+        snippet: { name: 'snippet', widget: 'code', i18n: true },
+        links: { name: 'links', widget: 'keyvalue', i18n: 'sync' },
+      };
+
+      vi.mocked(getField).mockImplementation(({ keyPath }) => fields[keyPath]);
+
+      const original = {
+        'tags.0': 'タグ',
+        'snippet.code': 'a',
+        'snippet.lang': 'js',
+        'links.home': '/ja',
+      };
+
+      mockEntryDraft.originalValues.ja = { ...original };
+      mockEntryDraft.currentValues.ja = {
+        'tags.0': 'タグ 2',
+        'tags.1': 'タグ 3',
+        'snippet.code': 'b',
+        'snippet.lang': 'py',
+        'links.home': '/ja/',
+      };
+
+      revertChanges({ locale: 'ja' });
+
+      expect(mockEntryDraft.currentValues.ja).toEqual(original);
     });
     // https://github.com/sveltia/sveltia-cms/issues/1065
     describe('with a paired List field', () => {
@@ -422,6 +517,29 @@ describe('draft/update/revert', () => {
         revertChanges({ locale: 'en', keyPath: 'unknown' });
 
         expect(mockEntryDraft.currentValues.ja['details.residences.1.name']).toBeUndefined();
+      });
+
+      it('should revert the items in the other locales to their own values', () => {
+        // A subfield using the `sync` strategy would otherwise be copied from each locale reverted
+        // to the others, including the default locale, so the last one would win, e.g. where the
+        // locales’ original values differ as the files were edited elsewhere
+        const getFieldImpl = vi.mocked(getField).getMockImplementation();
+        /** @type {boolean[]} */
+        const autoDuplication = [];
+
+        vi.mocked(getField).mockImplementation((args) => {
+          // The original values are looked up while they’re restored
+          if (args.valueMap === mockEntryDraft.originalValues.ja) {
+            autoDuplication.push(isAutoDuplicationEnabled());
+          }
+
+          return getFieldImpl?.(args);
+        });
+
+        revertChanges({ locale: 'en', keyPath: 'details.residences' });
+
+        expect(autoDuplication).not.toHaveLength(0);
+        expect(autoDuplication).not.toContain(true);
       });
 
       it('should skip a locale without content', () => {
@@ -561,6 +679,40 @@ describe('draft/update/revert', () => {
 
       expect(currentValues.ja.title).toBe('Original Japanese Title');
       expect(currentValues.ja.date).toBe('Modified Date');
+    });
+
+    it('should revert a synced field in non-default locale', () => {
+      // https://github.com/sveltia/sveltia-cms/issues/1128
+      const currentValues = {
+        ja: { date: 'Modified Date', 'links.0.url': 'Modified URL' },
+      };
+
+      /** @type {Record<string, any>} */
+      const fields = {
+        date: { name: 'date', widget: 'datetime', i18n: 'sync' },
+        links: { name: 'links', widget: 'list', i18n: 'sync' },
+        // Synced along with the List field
+        'links.0.url': { name: 'url', widget: 'string' },
+      };
+
+      vi.mocked(getField).mockImplementation(({ keyPath }) => fields[keyPath]);
+
+      revertFields({
+        locale: 'ja',
+        isDefaultLocale: false,
+        keyPath: '',
+        getFieldArgs: {
+          valueMap: { date: 'Original Date', 'links.0.url': 'Original URL' },
+          collectionName: 'posts',
+          fileName: undefined,
+          keyPath: '',
+          isIndexFile: false,
+        },
+        currentValues,
+        reset: false,
+      });
+
+      expect(currentValues.ja).toEqual({ date: 'Original Date', 'links.0.url': 'Original URL' });
     });
 
     it('should revert all fields in default locale', () => {
@@ -967,9 +1119,62 @@ describe('draft/update/revert', () => {
         originalPrefix: 'sections.0.items.0',
       });
     });
+
+    it('should resolve the items of an outer and a nested list that have both moved', () => {
+      // Item A moved from `sections.0` to `sections.1`, then its nested list was changed, which
+      // tagged its nested items with their key paths at that time
+      const valueMap = {
+        'sections.0.__sc_item_original_key_path': 'sections.1',
+        'sections.1.__sc_item_original_key_path': 'sections.0',
+        'sections.1.items.0.__sc_item_original_key_path': 'sections.1.items.1',
+        'sections.1.items.1.__sc_item_original_key_path': 'sections.1.items.0',
+      };
+
+      expect(resolveOriginalKeyPath(valueMap, 'sections.1.items.0.title')).toEqual({
+        originalKeyPath: 'sections.0.items.1.title',
+        currentPrefix: 'sections.1.items.0',
+        originalPrefix: 'sections.0.items.1',
+      });
+
+      // The nested items were tagged before A moved
+      valueMap['sections.1.items.0.__sc_item_original_key_path'] = 'sections.0.items.1';
+
+      expect(resolveOriginalKeyPath(valueMap, 'sections.1.items.0.title')).toEqual({
+        originalKeyPath: 'sections.0.items.1.title',
+        currentPrefix: 'sections.1.items.0',
+        originalPrefix: 'sections.0.items.1',
+      });
+    });
   });
 
   describe('isFieldChanged', () => {
+    it('should compare a nested item of a moved item with its own original value', () => {
+      const originalValueMap = {
+        'sections.0.items.0.title': 'A1',
+        'sections.0.items.1.title': 'A2',
+        'sections.1.items.0.title': 'B1',
+      };
+
+      // Item A moved to `sections.1`, then a new item was added to the top of its nested list
+      const currentValueMap = {
+        'sections.0.__sc_item_original_key_path': 'sections.1',
+        'sections.0.items.0.title': 'B1',
+        'sections.1.__sc_item_original_key_path': 'sections.0',
+        'sections.1.items.0.title': 'New',
+        'sections.1.items.1.__sc_item_original_key_path': 'sections.1.items.0',
+        'sections.1.items.1.title': 'A1',
+        'sections.1.items.2.__sc_item_original_key_path': 'sections.1.items.1',
+        'sections.1.items.2.title': 'A2',
+      };
+
+      expect(
+        isFieldChanged({ currentValueMap, originalValueMap, keyPath: 'sections.1.items.1.title' }),
+      ).toBe(false);
+      expect(
+        isFieldChanged({ currentValueMap, originalValueMap, keyPath: 'sections.1.items.2.title' }),
+      ).toBe(false);
+    });
+
     it('should compare the value of a simple field', () => {
       expect(
         isFieldChanged({

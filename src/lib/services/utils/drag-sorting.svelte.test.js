@@ -133,6 +133,26 @@ describe('createDragSorter()', () => {
     expect(sorter.grabbedIndex).toBeUndefined();
   });
 
+  test('gives the reorder controls of an item handlers bound to it', async () => {
+    const { onGrab, onRelease, onMove: moveItem } = sorter.reorderControlProps(2);
+
+    onGrab();
+    expect(sorter.grabbedIndex).toBe(2);
+
+    onRelease();
+    expect(sorter.grabbedIndex).toBeUndefined();
+
+    await moveItem(0, 'move-up');
+    expect(onMove).toHaveBeenCalledWith(2, 0);
+  });
+
+  test('gives the list element its capture-phase drag handlers', () => {
+    expect(sorter.listProps).toEqual({
+      ondragovercapture: sorter.onDragOver,
+      ondropcapture: sorter.onDrop,
+    });
+  });
+
   test('starts a drag with auto-scroll and drag data', () => {
     const event = createEvent();
 
@@ -237,6 +257,37 @@ describe('createDragSorter()', () => {
     // The rendered order follows the preview; the sorter still refers to the original index
     expect(sorter.dragIndex).toBe(0);
     expect(onMove).not.toHaveBeenCalled();
+  });
+
+  test('measures the item with the given function', () => {
+    // The item under the pointer holds more than the item itself, which only takes its lower half
+    const getItemRect = vi.fn(() => /** @type {DOMRect} */ ({ top: 60, height: 20, bottom: 80 }));
+
+    const rectSorter = createDragSorter({
+      /**
+       * Get the item count.
+       * @returns {number} Count.
+       */
+      getItemCount: () => itemCount.current,
+      /**
+       * Get the list element.
+       * @returns {HTMLElement} Element.
+       */
+      getListElement: () => list.listElement,
+      onMove,
+      getItemRect,
+    });
+
+    rectSorter.onDragStart(0);
+    // The lower half of the whole element, but the upper half of the item itself
+    rectSorter.onDragOver(createEvent({ target: list.items[1], clientY: 65 }));
+    expect(getItemRect).toHaveBeenCalledWith(list.items[1]);
+    expect(rectSorter.displayOrder).toEqual([0, 1, 2]);
+
+    // The default measurement would move the item
+    sorter.onDragStart(0);
+    sorter.onDragOver(createEvent({ target: list.items[1], clientY: 65 }));
+    expect(sorter.displayOrder).toEqual([1, 0, 2]);
   });
 
   test('keeps the preview while the pointer is over a gap between items', () => {

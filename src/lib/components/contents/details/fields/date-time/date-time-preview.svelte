@@ -23,13 +23,7 @@
    */
 
   /** @type {FieldPreviewProps & Props} */
-  let {
-    /* eslint-disable prefer-const */
-    locale,
-    fieldConfig,
-    currentValue,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { locale, fieldConfig, currentValue } = $props();
 
   const { utc, singleCustomTimeZone } = $derived(parseDateTimeConfig(fieldConfig));
   const displayValue = $derived(
@@ -41,7 +35,7 @@
   <p lang={getCanonicalLocale(locale)} dir={getDirection(locale)}>
     {displayValue}
     {#if singleCustomTimeZone}
-      — {getTimeZoneLabel(singleCustomTimeZone, getDate(currentValue, fieldConfig))}
+      — {getTimeZoneLabel(singleCustomTimeZone, getDate(currentValue, fieldConfig, locale))}
     {:else if utc}
       — UTC
     {/if}

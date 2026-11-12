@@ -1,11 +1,11 @@
 import { MONOLINGUAL_CONFIG, MONOLINGUAL_FILES } from '../../fixtures/configs/monolingual.js';
 import { createPNG } from '../../fixtures/files.js';
-import { selectText } from '../../fixtures/rich-text.js';
+import { moveCaretToEnd, selectText } from '../../fixtures/rich-text.js';
 import { expect, test } from '../../fixtures/test.js';
 import { getEditor } from '../../fixtures/ui.js';
 
 /**
- * @import { Locator, Page } from '@playwright/test';
+ * @import { Page } from '@playwright/test';
  */
 
 test.use({ config: MONOLINGUAL_CONFIG });
@@ -68,19 +68,6 @@ const CANONICAL_BODY = [
 ].join('\n');
 
 const RICH_POST_PATH = 'content/posts/2026-04-rich-post.md';
-
-/**
- * Move the caret to the end of a rich text editor. The End key does that on Linux and Windows but
- * not on macOS, so set the selection directly, which the editor picks up.
- * @param {Locator} textbox Editor.
- */
-const moveCaretToEnd = async (textbox) => {
-  await textbox.evaluate((element) => {
-    /** @type {HTMLElement} */ (element).focus();
-    window.getSelection()?.selectAllChildren(element);
-    window.getSelection()?.collapseToEnd();
-  });
-};
 
 /**
  * Open the First Light post and wait for its body in the rich text editor.
@@ -273,10 +260,7 @@ test.describe('editor components in a table', () => {
 
     // Place the caret at the end of a cell
     await body.getByRole('cell', { name: 'Here' }).click();
-    await body.getByRole('cell', { name: 'Here' }).evaluate((cell) => {
-      window.getSelection()?.selectAllChildren(cell);
-      window.getSelection()?.collapseToEnd();
-    });
+    await moveCaretToEnd(body.getByRole('cell', { name: 'Here' }));
     // The image component is inline, so it’s offered in a cell
     await field.getByRole('button', { name: 'Image', exact: true }).click();
 
@@ -329,6 +313,111 @@ test.describe('editor components in a table', () => {
     await expect
       .poll(async () => (await cms.readRepo())[RICH_POST_PATH])
       .toBe(`${FRONT_MATTER.replace('Rich Post', 'Rich Post, Revised')}${markdown}\n`);
+  });
+});
+
+test.describe('editor component history and clipboard', () => {
+  // The fields of a component are only rendered once it’s scrolled into view
+  test.use({ viewport: { width: 1280, height: 4000 } });
+
+  test.beforeEach(async ({ cms, page }) => {
+    await cms.open();
+    await cms.seed({
+      ...MONOLINGUAL_FILES,
+      [RICH_POST_PATH]: `${FRONT_MATTER}Intro text.\n\n![Old alt](/uploads/dome.png)\n\nOutro.\n`,
+    });
+    await cms.signIn();
+    await page.getByRole('row', { name: /Rich Post/ }).click();
+  });
+
+  test('undoes and redoes an edit to a component field', async ({ cms, page }) => {
+    const editor = getEditor(page);
+    const body = editor.getByRole('textbox', { name: 'Body' });
+
+    const alt = body.getByRole('group', { name: 'Image', exact: true }).getByRole('textbox', {
+      name: 'Alt Text',
+    });
+
+    await expect(alt).toHaveValue('Old alt');
+    await alt.fill('New alt');
+    await expect(editor.getByRole('button', { name: 'Save' })).toBeEnabled();
+
+    await body.getByText('Intro text.').click();
+    await page.keyboard.press('ControlOrMeta+z');
+
+    // The field shows the data of the component the undo brought back
+    await expect(alt).toHaveValue('Old alt');
+
+    await page.keyboard.press('ControlOrMeta+Shift+z');
+    await expect(alt).toHaveValue('New alt');
+
+    await page.keyboard.press('ControlOrMeta+z');
+    await expect(alt).toHaveValue('Old alt');
+
+    // The field and the text agree, so typing in the field doesn’t bring the undone edit back
+    await alt.fill('Old alter');
+    await editor.getByRole('button', { name: 'Save' }).click();
+
+    await expect
+      .poll(async () => (await cms.readRepo())[RICH_POST_PATH])
+      .toContain('\n![Old alter](/uploads/dome.png)\n');
+  });
+
+  test('keeps the data of a copied and pasted component', async ({ cms, page }) => {
+    const editor = getEditor(page);
+    const body = editor.getByRole('textbox', { name: 'Body' });
+
+    const alts = body.getByRole('group', { name: 'Image', exact: true }).getByRole('textbox', {
+      name: 'Alt Text',
+    });
+
+    await expect(alts).toHaveValue('Old alt');
+    await body.getByText('Intro text.').click();
+    await page.keyboard.press('ControlOrMeta+a');
+
+    /**
+     * Copy the selection the way the browser does, getting the clipboard data Lexical writes.
+     * @returns {Promise<Record<string, string>>} Data by type.
+     */
+    const copy = () =>
+      body.evaluate((element) => {
+        const data = new DataTransfer();
+
+        element.dispatchEvent(new ClipboardEvent('copy', { clipboardData: data, bubbles: true }));
+
+        return Object.fromEntries(data.types.map((type) => [type, data.getData(type)]));
+      });
+
+    // Lexical picks the selection up a moment after the key press
+    await expect
+      .poll(async () => (await copy())['application/x-lexical-editor'] ?? '')
+      .toContain('Old alt');
+
+    const clipboardData = await copy();
+
+    await moveCaretToEnd(body);
+    await body.evaluate((element, data) => {
+      const transfer = new DataTransfer();
+
+      Object.entries(data).forEach(([type, value]) => transfer.setData(type, value));
+      element.dispatchEvent(
+        new ClipboardEvent('paste', { clipboardData: transfer, bubbles: true }),
+      );
+    }, clipboardData);
+
+    // The pasted component keeps its data
+    await expect(alts).toHaveCount(2);
+    await expect(alts.nth(0)).toHaveValue('Old alt');
+    await expect(alts.nth(1)).toHaveValue('Old alt');
+    await editor.getByRole('button', { name: 'Save' }).click();
+
+    await expect
+      .poll(
+        async () =>
+          (await cms.readRepo())[RICH_POST_PATH]?.match(/!\[Old alt\]\(\/uploads\/dome\.png\)/g)
+            ?.length,
+      )
+      .toBe(2);
   });
 });
 

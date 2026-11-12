@@ -46,7 +46,6 @@
 
   /** @type {Props} */
   let {
-    /* eslint-disable prefer-const */
     entry,
     locale,
     collection,
@@ -56,7 +55,6 @@
     variant = 'ghost',
     size = 'medium',
     iconic = false,
-    /* eslint-enable prefer-const */
   } = $props();
 
   // `pageLiveness.current` is deliberately left out of this derivation. The effect below watches
@@ -119,13 +117,15 @@
   };
 
   $effect(() => {
-    // Neither of these reads the liveness store this effect writes, so the check can’t retrigger
-    // itself however the URL is composed
+    // None of these reads the liveness store this effect writes, so the check can’t retrigger
+    // itself however the URL is composed. The build state reported by the provider is read, so a
+    // page found missing while it was building is checked again once the build has finished
     const canPing = pingable;
     const pageURL = url;
+    const buildFinished = link?.state === 'ready';
 
     if (canPing && pageURL) {
-      pingURL(pageURL);
+      pingURL(pageURL, { recheckPending: buildFinished });
     }
 
     return undefined;

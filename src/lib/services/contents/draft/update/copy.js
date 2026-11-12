@@ -3,26 +3,36 @@ import { SvelteSet } from 'svelte/reactivity';
 
 import { createLazyModule } from '$lib/services/api/lazy-module';
 import { loadModule } from '$lib/services/app/dependencies';
+import { getListItemMatcher } from '$lib/services/contents/draft/create/proxy.svelte';
 import { copyFromLocaleToast, translatorApiKeyDialogState } from '$lib/services/contents/editor';
 import { getDraftFieldArgs, getField } from '$lib/services/contents/entry/fields';
 import { isKeyPathWithin } from '$lib/services/contents/entry/key-paths';
 import { RICH_TEXT_FIELD_TYPES, TEXT_FIELD_TYPES } from '$lib/services/contents/fields';
 import { getListFieldInfo } from '$lib/services/contents/fields/list/helpers';
 import { getValueFormat } from '$lib/services/contents/fields/rich-text';
+import { isDuplicateIfEmptyField } from '$lib/services/contents/i18n/duplicate-if-empty';
 import { isFieldTranslatable } from '$lib/services/contents/i18n/fields';
 import { translator } from '$lib/services/integrations/translators';
 import { prefs } from '$lib/services/user/prefs.svelte';
+import { isNumeric } from '$lib/services/utils/number';
 import { escapeHTML } from '$lib/services/utils/string';
 
 /**
  * @import { EntryDraftState } from '$lib/services/contents/draft/state.svelte';
  * @import {
  * EntryDraft,
+ * FlattenedEntryContent,
  * GetFieldArgs,
  * InternalLocaleCode,
  * LocaleContentMap,
  * } from '$lib/types/private';
  * @import { Field, FieldKeyPath, ListField, RichTextField } from '$lib/types/public';
+ */
+
+/**
+ * @typedef {object} OwnerField
+ * @property {FieldKeyPath} keyPath Key path of the field.
+ * @property {Field} field Field configuration.
  */
 
 /**
@@ -133,36 +143,127 @@ const decodeHTMLEntities = (text) =>
   });
 
 /**
+ * @typedef {object} ListItemState
+ * @property {boolean} exists Whether the item exists.
+ * @property {string | undefined} id ID given to the item once it’s added, moved or removed: its
+ * `__sc_item_id` property.
+ * @property {string | undefined} originalKeyPath Key path the item had before the items of its list
+ * were first shifted: its `__sc_item_original_key_path` property.
+ */
+
+/**
+ * Get the state of each list item the given key path is in, from the outermost one, so that it can
+ * be told later whether the key path still points to the same items.
+ * @param {FlattenedEntryContent} content Content of a locale.
+ * @param {FieldKeyPath} keyPath Key path of a value, e.g. `faq.1.question`.
+ * @returns {ListItemState[]} Item states. Empty if the key path is not in a list.
+ */
+export const getListItemStates = (content, keyPath) => {
+  const segments = keyPath.split('.');
+
+  return segments.flatMap((segment, index) => {
+    if (index === 0 || !isNumeric(segment)) {
+      return [];
+    }
+
+    const itemKeyPath = segments.slice(0, index + 1).join('.');
+
+    return [
+      {
+        exists:
+          keyPath in content ||
+          itemKeyPath in content ||
+          Object.keys(content).some((_keyPath) => _keyPath.startsWith(`${itemKeyPath}.`)),
+        id: content[`${itemKeyPath}.__sc_item_id`],
+        originalKeyPath: content[`${itemKeyPath}.__sc_item_original_key_path`],
+      },
+    ];
+  });
+};
+
+/**
+ * Check if the list items a key path is in are still the same ones: none of them has been removed,
+ * or replaced with another item by a removal, insertion or move. An item is tagged with an
+ * ID and its original key path just before its list is first changed by the user, so an item
+ * untagged before may have been tagged since: it’s still the same item if its original key path is
+ * the one it had then. A new item gets an ID but no original key path.
+ * @param {ListItemState[]} before Item states taken before, with {@link getListItemStates}.
+ * @param {ListItemState[]} after Item states taken now, for the same key path.
+ * @param {FieldKeyPath} keyPath Key path of the value.
+ * @returns {boolean} Result.
+ */
+export const isSameListItems = (before, after, keyPath) => {
+  const segments = keyPath.split('.');
+
+  const itemKeyPaths = segments
+    .map((segment, index) => segments.slice(0, index + 1).join('.'))
+    .filter((_keyPath, index) => index > 0 && isNumeric(segments[index]));
+
+  return before.every((state, index) => {
+    const { exists, id, originalKeyPath } = after[index];
+    const itemKeyPath = itemKeyPaths[index];
+
+    if (exists !== state.exists) {
+      return false;
+    }
+
+    if (state.id !== undefined) {
+      return id === state.id;
+    }
+
+    return (
+      (id === undefined || originalKeyPath !== undefined) &&
+      (originalKeyPath ?? itemKeyPath) === (state.originalKeyPath ?? itemKeyPath)
+    );
+  });
+};
+
+/**
  * Regular expression matching the key path of a list item, capturing the key path of the list.
  */
 const LIST_ITEM_KEY_PATH_REGEX = /^(.+)\.\d+$/;
 
 /**
- * Get the `i18n` option that decides whether a field can be copied or translated from another
- * locale. Like the editor (`getFieldLocaleAccess()`), the validator and the default values, it’s
- * the field’s own option, so a subfield without one isn’t written in a locale where the editor
- * hides it, even if the List or Object field it belongs to is translatable. An item of a List field
- * without subfields has no configuration of its own, so it takes the option of the List field,
- * which the editor shows as a whole.
+ * Get the field that owns the value at the given key path. It’s the field configured for the key
+ * path, except for an item of a List field without subfields, which has no configuration of its own
+ * and goes along with the List field, which the editor shows as a whole.
  * @param {object} args Arguments.
  * @param {Field | undefined} args.field Field configuration, if the key path has one.
  * @param {GetFieldArgs} args.getFieldArgs Arguments for the `getField` function, including the key
- * path of the field.
- * @returns {Field['i18n']} Option.
+ * path of the value.
+ * @returns {OwnerField | undefined} Key path and configuration of the owner field, or `undefined`
+ * if the value has none.
  */
-const getCopyI18nOption = ({ field, getFieldArgs }) => {
+const getOwnerField = ({ field, getFieldArgs }) => {
+  const { keyPath } = getFieldArgs;
+
   if (field) {
-    return field.i18n;
+    return { keyPath, field };
   }
 
-  const [, listKeyPath] = getFieldArgs.keyPath.match(LIST_ITEM_KEY_PATH_REGEX) ?? [];
+  const [, listKeyPath] = keyPath.match(LIST_ITEM_KEY_PATH_REGEX) ?? [];
   const listField = listKeyPath ? getField({ ...getFieldArgs, keyPath: listKeyPath }) : undefined;
 
   return listField?.widget === 'list' &&
     !getListFieldInfo(/** @type {ListField} */ (listField)).hasSubFields
-    ? listField.i18n
+    ? { keyPath: listKeyPath, field: listField }
     : undefined;
 };
+
+/**
+ * Check if the value owned by the given field can be written into the target locale’s content. A
+ * value inside the items of a translatable List field is only written where the target locale has
+ * the same item, of the same type, so that no stray item is created there or a value written into
+ * an unrelated item. An item of a List field without subfields is owned by the List field, so only
+ * the items the List field belongs to have to exist. See {@link getListItemMatcher}.
+ * @param {object} args Arguments.
+ * @param {OwnerField} args.owner Owner field of the value, as returned by {@link getOwnerField}.
+ * @param {Omit<GetFieldArgs, 'keyPath'>} args.getFieldArgs Arguments for the `getField` function.
+ * @param {Record<FieldKeyPath, any>} args.content Content of the target locale.
+ * @returns {boolean} Result.
+ */
+const canWriteInLocale = ({ owner: { keyPath, field }, getFieldArgs, content }) =>
+  getListItemMatcher({ fieldConfig: field, getFieldArgs: { ...getFieldArgs, keyPath } })(content);
 
 /**
  * Get a list of fields to be copied or translated from the source locale to the target locale.
@@ -180,18 +281,27 @@ export const getCopyingFieldMap = ({ draft, options }) => {
   return Object.fromEntries(
     Object.entries(valueMap)
       .map(([_keyPath, value]) => {
+        if (keyPath && !isKeyPathWithin(_keyPath, keyPath)) {
+          return null;
+        }
+
         const targetLocaleValue = currentValues[targetLanguage][_keyPath];
         const field = getField({ ...getFieldArgs, keyPath: _keyPath });
         const fieldType = field?.widget ?? 'string';
 
+        const owner = getOwnerField({
+          field,
+          getFieldArgs: { ...getFieldArgs, keyPath: _keyPath },
+        });
+
         if (
-          (keyPath && !isKeyPathWithin(_keyPath, keyPath)) ||
           // Only a translatable field has a value of its own in each locale: a field that isn’t
           // localized is only saved in the default locale, and a duplicated one can’t be edited
-          // in the other locales
-          !isFieldTranslatable(
-            getCopyI18nOption({ field, getFieldArgs: { ...getFieldArgs, keyPath: _keyPath } }),
-          ) ||
+          // in the other locales. Like the editor (`getFieldLocaleAccess()`), the validator and the
+          // default values, it’s the owner field’s own `i18n` option, so a subfield without one
+          // isn’t written in a locale where the editor hides it, even if the List or Object field
+          // it belongs to is translatable
+          !isFieldTranslatable(owner?.field.i18n) ||
           typeof value !== 'string' ||
           !value ||
           ![...TEXT_FIELD_TYPES, 'list'].includes(fieldType) ||
@@ -199,8 +309,19 @@ export const getCopyingFieldMap = ({ draft, options }) => {
           (fieldType === 'list' &&
           getListFieldInfo(/** @type {ListField} */ (field)).hasSubFields) ||
           (!translate && value === targetLocaleValue) ||
-          // Skip populated fields when translating all the fields
-          (!keyPath && translate && !!targetLocaleValue)
+          // Skip populated fields when translating all the fields, except for a field using the
+          // `duplicate_if_empty` strategy that still holds the source locale’s value, which hasn’t
+          // been translated yet
+          (!keyPath &&
+            translate &&
+            !!targetLocaleValue &&
+            !(!!field && isDuplicateIfEmptyField(field) && value === targetLocaleValue)) ||
+          // The owner field is there, as a value without one isn’t translatable
+          !canWriteInLocale({
+            owner: /** @type {OwnerField} */ (owner),
+            getFieldArgs,
+            content: currentValues[targetLanguage],
+          })
         ) {
           return null;
         }
@@ -263,11 +384,24 @@ export const translateFields = async ({
     ]),
   );
 
+  // The list items the fields belong to, as they were when the fields were picked, so that a value
+  // isn’t written into an item that the user has removed or moved while the request is in flight,
+  // which would bring back a removed item or overwrite another one
+  const listItemStates = Object.fromEntries(
+    Object.keys(copingFieldMap).map((_keyPath) => [
+      _keyPath,
+      getListItemStates(currentValues[targetLanguage], _keyPath),
+    ]),
+  );
+
   let apiKey = prefs.apiKeys?.[serviceId];
 
   if (!apiKey) {
     const { promise, resolve } = Promise.withResolvers();
 
+    // An earlier request still waiting for a key, e.g. one whose dialog is closing, is settled
+    // without one, as the dialog now answers this request only
+    translatorApiKeyDialogState.current.resolve?.();
     translatorApiKeyDialogState.current = { show: true, multiple: count > 1, resolve };
 
     // The promise will be resolved once the user enters an API key on the dialog
@@ -286,9 +420,8 @@ export const translateFields = async ({
 
   try {
     // A translator without Markdown support takes HTML, e.g. Google Translate with the `html`
-    // format and DeepL with HTML tag handling. A Markdown value is converted to HTML for it, a
-    // plain text value is escaped, so that its special characters are read as text, and an HTML
-    // value is passed as is
+    // format. A Markdown value is converted to HTML for it, a plain text value is escaped, so that
+    // its special characters are read as text, and an HTML value is passed as is
     const translatedValues = await translate(
       Object.entries(copingFieldMap).map(([, { value, format }]) =>
         markdownSupported || format === 'html'
@@ -316,7 +449,14 @@ export const translateFields = async ({
     Object.entries(copingFieldMap).forEach(([_keyPath, { format }], index) => {
       const value = translatedValues[index];
 
-      if (!keyPath && currentValues[targetLanguage][_keyPath] !== targetValues[_keyPath]) {
+      if (
+        (!keyPath && currentValues[targetLanguage][_keyPath] !== targetValues[_keyPath]) ||
+        !isSameListItems(
+          listItemStates[_keyPath],
+          getListItemStates(currentValues[targetLanguage], _keyPath),
+          _keyPath,
+        )
+      ) {
         return;
       }
 

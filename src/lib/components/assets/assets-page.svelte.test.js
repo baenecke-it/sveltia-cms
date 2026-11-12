@@ -207,6 +207,27 @@ describe('AssetsPage', () => {
     expect(focusedAsset.current).toBeUndefined();
   });
 
+  test('opens an asset outside any folder with the info pane shown', async () => {
+    window.location.hash = '#/assets/-/all';
+    currentView.current = { type: 'grid', showInfo: true };
+
+    const { container } = await render(AssetsPage);
+    const sidebar = page.getByRole('group', { name: 'Asset Info' });
+
+    await expect.element(sidebar).toMatchTextContent('Folder All Assets');
+
+    // An asset in a folder that isn’t configured, e.g. one in an entry folder, opened from search
+    // results, leaves no folder to show the info of
+    window.location.hash = '#/assets/content/posts/hello/cover.png';
+
+    await expect.poll(() => selectedAssetFolder.current).toBeUndefined();
+    await expect.element(page.getByText('File not found.')).toBeInTheDocument();
+    // The page is inert under the overlay, hence the query by ID
+    expect(container.querySelector('#asset-info')).toHaveTextContent(
+      'Select an asset to show its info.',
+    );
+  });
+
   test('selects all the assets while the index is being redirected', async () => {
     /** @type {HashChangeEvent[]} */
     const heldEvents = [];
@@ -343,6 +364,10 @@ describe('AssetsPage', () => {
       )
       .toBeInTheDocument();
     await expect.poll(() => announcedPageStatus.current).toBe('Asset folder not found.');
+    // The folder list keeps controlling the main area
+    await expect
+      .element(page.getByRole('main', { name: 'Asset Library' }))
+      .toHaveAttribute('id', 'assets-container');
   });
 
   test('shows the files linked from entries', async () => {

@@ -8,6 +8,8 @@ import {
   getFieldAlignedScrollTop,
   getProportionalScrollTop,
   getRevealingScrollTop,
+  getStickyToolbarBottom,
+  scrollToAddedListItem,
 } from '$lib/services/contents/editor/scroll';
 
 /**
@@ -62,34 +64,36 @@ describe('getProportionalScrollTop()', () => {
 
 describe('getFieldAlignedScrollTop()', () => {
   test('aligns the matching field at the same relative position', () => {
-    // The top of the content area is a quarter of the way through the field
+    // The top of the content area is a quarter of the way through the field, so the other pane is
+    // scrolled a quarter of the way through the matching field, wherever the panes are on the
+    // screen
     expect(
       getFieldAlignedScrollTop({
         y: 100,
         top: 50,
         height: 200,
-        targetOffsetTop: 600,
+        targetTop: 600,
+        targetHeight: 400,
+      }),
+    ).toBe(700);
+    expect(
+      getFieldAlignedScrollTop({
+        y: 100,
+        top: 100,
+        height: 200,
+        targetTop: 600,
         targetHeight: 400,
       }),
     ).toBe(600);
     expect(
       getFieldAlignedScrollTop({
         y: 100,
-        top: 100,
-        height: 200,
-        targetOffsetTop: 600,
-        targetHeight: 400,
-      }),
-    ).toBe(500);
-    expect(
-      getFieldAlignedScrollTop({
-        y: 100,
         top: -100,
         height: 200,
-        targetOffsetTop: 600,
+        targetTop: 600,
         targetHeight: 400,
       }),
-    ).toBe(900);
+    ).toBe(1000);
   });
 
   test('gives up when the top of the content area is outside the field', () => {
@@ -98,7 +102,7 @@ describe('getFieldAlignedScrollTop()', () => {
         y: 100,
         top: 150,
         height: 200,
-        targetOffsetTop: 600,
+        targetTop: 600,
         targetHeight: 400,
       }),
     ).toBeUndefined();
@@ -107,7 +111,7 @@ describe('getFieldAlignedScrollTop()', () => {
         y: 100,
         top: -150,
         height: 200,
-        targetOffsetTop: 600,
+        targetTop: 600,
         targetHeight: 400,
       }),
     ).toBeUndefined();
@@ -505,5 +509,120 @@ describe('getRevealingScrollTop()', () => {
     expect(getRevealingScrollTop({ ...view, top: 600, height: 1000 })).toBe(1500);
     expect(getRevealingScrollTop({ ...view, top: -1000, height: 1000 })).toBe(0);
     expect(getRevealingScrollTop({ ...view, top: -800, height: 600 })).toBe(100);
+  });
+});
+
+describe('getStickyToolbarBottom()', () => {
+  test('is 0 without a toolbar', () => {
+    expect(getStickyToolbarBottom(undefined)).toBe(0);
+  });
+
+  test('adds the height of the toolbar to the offset it sticks at', () => {
+    const toolbar = document.createElement('div');
+
+    toolbar.style.top = '48px';
+    vi.spyOn(toolbar, 'getBoundingClientRect').mockReturnValue(
+      /** @type {DOMRect} */ ({ height: 36 }),
+    );
+    document.body.append(toolbar);
+
+    expect(getStickyToolbarBottom(toolbar)).toBe(84);
+  });
+});
+
+describe('scrollToAddedListItem()', () => {
+  /**
+   * Create a list item, whose offset in the list is read twice per scroll: right after it, and once
+   * the fields that came into view have rendered.
+   * @param {object} args Arguments.
+   * @param {(read: number) => number} args.getOffset Function returning the offset of the item for
+   * the given read, counted from 1.
+   * @param {number} [args.headerBottom] Bottom of the item’s header in the viewport.
+   * @returns {{ item: HTMLElement, list: HTMLElement }} Item and list.
+   */
+  const createItem = ({ getOffset, headerBottom = 5040 }) => {
+    const list = render('<div class="item"><div class="header"></div></div>');
+    const item = /** @type {HTMLElement} */ (list.firstElementChild);
+    let read = 0;
+
+    item.scrollIntoView = vi.fn();
+    item.getBoundingClientRect = vi.fn(() => {
+      read += 1;
+
+      return /** @type {DOMRect} */ ({ top: getOffset(read) });
+    });
+    list.getBoundingClientRect = vi.fn(() => /** @type {DOMRect} */ ({ top: 0 }));
+    /** @type {HTMLElement} */ (item.firstElementChild).getBoundingClientRect = vi.fn(
+      () => /** @type {DOMRect} */ ({ bottom: headerBottom }),
+    );
+
+    return { item, list };
+  };
+
+  /**
+   * Get the offset of an item staying in place.
+   * @returns {number} Offset.
+   */
+  const inPlace = () => 100;
+  /**
+   * Get the offset of an item pushed far down after every scroll.
+   * @param {number} read Read count.
+   * @returns {number} Offset.
+   */
+  const pushedDown = (read) => (read % 2 === 0 ? 5000 : 0);
+  /**
+   * Get the offset of an item pushed far down after the first two scrolls only.
+   * @param {number} read Read count.
+   * @returns {number} Offset.
+   */
+  const pushedDownTwice = (read) => (read <= 4 ? pushedDown(read) : 0);
+  /**
+   * Tell that another item has been added since.
+   * @returns {boolean} Result.
+   */
+  const outdated = () => true;
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  test('scrolls to the item once if it stays in place', async () => {
+    const { item, list } = createItem({ getOffset: inPlace });
+
+    await scrollToAddedListItem({ item, list, interval: 0 });
+
+    expect(item.scrollIntoView).toHaveBeenCalledTimes(1);
+  });
+
+  test('follows the item while the items above push it out of view', async () => {
+    const { item, list } = createItem({ getOffset: pushedDownTwice });
+
+    await scrollToAddedListItem({ item, list, interval: 0 });
+
+    expect(item.scrollIntoView).toHaveBeenCalledTimes(3);
+  });
+
+  test('stops following the item if its header stays in view', async () => {
+    const { item, list } = createItem({ getOffset: pushedDown, headerBottom: 90 });
+
+    await scrollToAddedListItem({ item, list, interval: 0 });
+
+    expect(item.scrollIntoView).toHaveBeenCalledTimes(1);
+  });
+
+  test('stops following the item once another one is added', async () => {
+    const { item, list } = createItem({ getOffset: pushedDown });
+
+    await scrollToAddedListItem({ item, list, isOutdated: outdated, interval: 0 });
+
+    expect(item.scrollIntoView).toHaveBeenCalledTimes(1);
+  });
+
+  test('gives up after the maximum number of attempts', async () => {
+    const { item, list } = createItem({ getOffset: pushedDown });
+
+    await scrollToAddedListItem({ item, list, maxAttempts: 3, interval: 0 });
+
+    expect(item.scrollIntoView).toHaveBeenCalledTimes(3);
   });
 });

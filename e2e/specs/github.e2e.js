@@ -124,6 +124,15 @@ test('refuses a user who can only read the repository', async ({ cms, github, pa
 
   await cms.open();
   await expect(page.getByRole('alert')).toContainText(
+    /You don’t have write access to the .*e2e-site.* repository/,
+  );
+});
+
+test('refuses a user who can’t see the repository', async ({ cms, github, page }) => {
+  github.canRead = false;
+
+  await cms.open();
+  await expect(page.getByRole('alert')).toContainText(
     /You don’t have access to the .*e2e-site.* repository/,
   );
 });

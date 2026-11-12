@@ -5,10 +5,11 @@ import { getField, isFieldMultiple } from '$lib/services/contents/entry/fields';
 import { getKeysByPrefix, getListItemKeys } from '$lib/services/contents/entry/key-paths';
 import { RICH_TEXT_FIELD_TYPES } from '$lib/services/contents/fields';
 import { getDateTimeFieldDisplayValue } from '$lib/services/contents/fields/date-time/display';
-import { getNumberFormatter } from '$lib/services/contents/fields/number/helpers';
+import { getNumberFormatter, storesNumber } from '$lib/services/contents/fields/number/helpers';
 import { getReferencedOptionLabel } from '$lib/services/contents/fields/relation/helpers';
 import { getOptionLabel } from '$lib/services/contents/fields/select/helpers';
 import { getCanonicalLocale, getListFormatter } from '$lib/services/contents/i18n';
+import { getCommitAuthorName } from '$lib/services/utils/commit-author';
 import { stripMarkdown } from '$lib/services/utils/markdown';
 import { isNonEmptyString } from '$lib/services/utils/string';
 
@@ -18,8 +19,8 @@ import { isNonEmptyString } from '$lib/services/utils/string';
  * FlattenedEntryContent,
  * GetFieldArgs,
  * InternalLocaleCode,
- * PendingEntry,
  * StringTransformation,
+ * UnlistedEntry,
  * } from '$lib/types/private';
  * @import {
  * DateTimeField,
@@ -28,7 +29,6 @@ import { isNonEmptyString } from '$lib/services/utils/string';
  * ListFieldWithSubField,
  * ListFieldWithSubFields,
  * ListFieldWithTypes,
- * NumberField,
  * RelationField,
  * SelectField,
  * } from '$lib/types/public';
@@ -56,8 +56,8 @@ const isRichTextField = (fieldConfig) =>
  * @param {StringTransformation[]} [args.transformations] String transformations.
  * @param {boolean} [args.isIndexFile] Whether the corresponding entry is the collection’s special
  * index file used specifically in Hugo.
- * @param {PendingEntry[]} [args.pendingEntries] Entries created from a Relation field of the draft
- * being edited, which a Relation field value can refer to before they are saved.
+ * @param {UnlistedEntry[]} [args.pendingEntries] Entries not yet among the saved ones, which a
+ * Relation field value can refer to.
  * @param {boolean} [args.plainText] Whether to remove the Markdown syntax and HTML tags from a Rich
  * Text field value, e.g. for a summary.
  * @returns {string} Resolved display value.
@@ -87,9 +87,10 @@ export const getFieldDisplayValue = ({
   // member when the entry lacks the field
   let value = Object.hasOwn(valueMap, keyPath) ? valueMap[keyPath] : undefined;
 
-  // If the field doesn’t exist in `valueMap` and transformations are applied, return empty string
+  // If the field doesn’t exist in `valueMap` and transformations are applied, apply them to an
+  // empty string, like an entry summary does, so that `default()` can fill in the missing value
   if (value === undefined && transformations?.length) {
-    return '';
+    return String(applyTransformations({ fieldConfig, value: '', transformations, locale }));
   }
 
   if (fieldConfig?.widget === 'datetime') {
@@ -130,37 +131,48 @@ export const getFieldDisplayValue = ({
     if (fields || types) {
       // Ignore
     } else {
-      const stripItems = plainText && isRichTextField(field);
+      const itemKeys = getListItemKeys(valueMap, keyPath);
 
-      // Concat values of single field list or simple list
+      // Concat values of single field list or simple list. An item of the former is resolved like
+      // its subfield, which can hold a number, a boolean or the value of a Select option, while the
+      // latter holds strings
       value = getListFormatter(locale).format(
-        getListItemKeys(valueMap, keyPath)
-          .map((key) => valueMap[key])
-          .filter((val) => typeof val === 'string')
-          .map((val) => (stripItems ? stripMarkdown(val) : val))
-          .filter((val) => !!val),
+        (field
+          ? itemKeys.map((key) =>
+              getFieldDisplayValue({
+                collectionName,
+                fileName,
+                componentName,
+                valueMap,
+                keyPath: key,
+                locale,
+                isIndexFile,
+                pendingEntries,
+                plainText,
+              }),
+            )
+          : itemKeys.map((key) => valueMap[key]).filter((val) => typeof val === 'string')
+        ).filter((val) => !!val),
       );
     }
   }
 
-  if (fieldConfig?.widget === 'number') {
-    const { value_type: valueType = 'int' } = /** @type {NumberField} */ (fieldConfig);
+  // A number stored by a Number field or a Compute field is formatted for display. An empty field,
+  // stored as `null` or an empty string, or missing, is left empty rather than formatted as `0` or
+  // `NaN`
+  if (
+    fieldConfig &&
+    storesNumber(fieldConfig) &&
+    value !== null &&
+    value !== undefined &&
+    value !== ''
+  ) {
+    const number = Number(value);
 
-    // An empty field, stored as `null` or an empty string, or missing, is left empty rather than
-    // formatted as `0` or `NaN`
-    if (
-      (valueType === 'int' || valueType === 'float') &&
-      value !== null &&
-      value !== undefined &&
-      value !== ''
-    ) {
-      const number = Number(value);
-
-      // Text that isn’t a number, which the editor stores so it can be reported as invalid, is
-      // shown as is rather than as `NaN`
-      if (!Number.isNaN(number)) {
-        value = getNumberFormatter(getCanonicalLocale(locale)).format(number);
-      }
+    // Text that isn’t a number, which the editor stores so it can be reported as invalid, is shown
+    // as is rather than as `NaN`
+    if (!Number.isNaN(number)) {
+      value = getNumberFormatter(getCanonicalLocale(locale)).format(number);
     }
   }
 
@@ -251,14 +263,14 @@ export const getVisibleFieldDisplayValue = ({
  * own key path.
  */
 export const getPropertyValue = ({ entry, locale, collectionName, key, resolveRef = true }) => {
-  const { slug, locales, commitAuthor: { name, login, email } = {}, commitDate } = entry;
+  const { slug, locales, commitAuthor, commitDate } = entry;
 
   if (key === 'slug') {
     return slug;
   }
 
   if (key === 'commit_author') {
-    return name || login || email;
+    return getCommitAuthorName(commitAuthor);
   }
 
   if (key === 'commit_date') {

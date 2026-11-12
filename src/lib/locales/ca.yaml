@@ -1091,7 +1091,7 @@ edit_slug_error:
   invalid: El slug no pot contenir caràcters especials, incloses les barres i els espais.
   duplicate: Aquest slug ja s’usa per a una altra entrada.
 
-# Entry path editing in a nested collection
+# Entry path editing for nested entries
 # Heading for the parent folder picker shown when the `meta.path` option is enabled
 entry_parent_folder: Carpeta superior
 new_parent_folder: Carpeta nova
@@ -1488,6 +1488,10 @@ cloud_storage:
       requested: S’està iniciant la sessió…
       error: El nom d’usuari o la contrasenya no són correctes. Comproveu-los i torneu-ho a provar.
 
+  # Shared by the S3-compatible services, unless overridden below
+  s3:
+    auth_key_label: Secret Access Key
+
   # Service-specific configurations
   cloudinary:
     iframe_title: Biblioteca multimèdia de Cloudinary
@@ -1499,15 +1503,6 @@ cloud_storage:
 
   uploadcare:
     auth_key_label: API Secret Key
-
-  aws_s3:
-    auth_key_label: Secret Access Key
-
-  cloudflare_r2:
-    auth_key_label: Secret Access Key
-
-  digitalocean_spaces:
-    auth_key_label: Secret Access Key
 
 # ==============================================================================
 # Configuration Validation

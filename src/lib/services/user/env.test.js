@@ -61,6 +61,7 @@ describe('env service', () => {
     it('should export env with correct default values', () => {
       expect(env.isLocalHost).toBe(false);
       expect(env.isLocalBackendSupported).toBe(false);
+      expect(env.isTestBackendSupported).toBe(true);
       expect(env.isBrave).toBe(false);
       expect(env.isMacOS).toBe(false);
       expect(env.isSmallScreen).toBe(false);
@@ -126,6 +127,14 @@ describe('env service', () => {
       expect(env.isLocalHost).toBe(true);
     });
 
+    it('should detect the IPv6 loopback address and set isLocalHost', () => {
+      vi.stubGlobal('location', { hostname: '[::1]' });
+
+      initUserEnvDetection();
+
+      expect(env.isLocalHost).toBe(true);
+    });
+
     it('should detect subdomain localhost and set isLocalHost', () => {
       vi.stubGlobal('location', { hostname: 'example.localhost' });
 
@@ -157,6 +166,31 @@ describe('env service', () => {
       initUserEnvDetection();
 
       expect(env.isLocalBackendSupported).toBe(false);
+    });
+
+    it('should set isTestBackendSupported when files in the OPFS can be written', () => {
+      vi.stubGlobal('FileSystemFileHandle', { prototype: { createWritable: vi.fn() } });
+
+      initUserEnvDetection();
+
+      expect(env.isTestBackendSupported).toBe(true);
+    });
+
+    it('should set isTestBackendSupported to false when files in the OPFS can’t be written', () => {
+      // Safari before version 26
+      vi.stubGlobal('FileSystemFileHandle', { prototype: {} });
+
+      initUserEnvDetection();
+
+      expect(env.isTestBackendSupported).toBe(false);
+    });
+
+    it('should set isTestBackendSupported when the OPFS is not available', () => {
+      vi.stubGlobal('FileSystemFileHandle', undefined);
+
+      initUserEnvDetection();
+
+      expect(env.isTestBackendSupported).toBe(true);
     });
 
     it('should detect Brave browser and set isBrave', () => {

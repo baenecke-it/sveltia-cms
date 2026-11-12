@@ -8,7 +8,18 @@ import { getSnapshot } from '$lib/services/utils/state.svelte';
  * GetFieldArgs,
  * PendingEntry,
  * } from '$lib/types/private';
+ * @import { Field, RelationField } from '$lib/types/public';
  */
+
+/**
+ * Check whether the given field is a Relation field referring to the given collection’s entries.
+ * @param {Field | undefined} field Field configuration.
+ * @param {string} collectionName Collection name.
+ * @returns {field is RelationField} Result.
+ */
+export const isRelationFieldOf = (field, collectionName) =>
+  field?.widget === 'relation' &&
+  /** @type {RelationField} */ (field).collection === collectionName;
 
 /**
  * A set of values a pending entry can be referenced from.
@@ -19,6 +30,25 @@ import { getSnapshot } from '$lib/services/utils/state.svelte';
  * the values of rich text editor components, whose fields can’t be looked up by key path; any
  * matching value counts there.
  */
+
+/**
+ * Get the pending entries of the given draft that belong to the given collection.
+ * @param {EntryDraft} draft Draft being edited.
+ * @param {string} collectionName Collection name.
+ * @returns {PendingEntry[]} Pending entries.
+ */
+export const getPendingEntriesByCollection = (draft, collectionName) =>
+  draft.pendingEntries.filter((pendingEntry) => pendingEntry.collectionName === collectionName);
+
+/**
+ * Get the pending entries of the given draft that are new to the given collection, leaving out the
+ * existing entries edited from a Relation field, which already take up a slot, a slug and a number.
+ * @param {EntryDraft} draft Draft being edited.
+ * @param {string} collectionName Collection name.
+ * @returns {PendingEntry[]} Pending entries.
+ */
+export const getNewPendingEntriesByCollection = (draft, collectionName) =>
+  getPendingEntriesByCollection(draft, collectionName).filter(({ baseEntry }) => !baseEntry);
 
 /**
  * Get the values the entry being edited holds: the field values in every locale, and the values of
@@ -74,25 +104,17 @@ const isReferencedIn = (sources, { collectionName, values }) =>
       const field = getField({ ...fieldArgs, valueMap, keyPath });
 
       // A value in a field that can’t be looked up is given the benefit of the doubt
-      return !field || (field.widget === 'relation' && field.collection === collectionName);
+      return !field || isRelationFieldOf(field, collectionName);
     }),
   );
 
 /**
- * Get the pending entries of the given draft that are still referenced, so they can be saved along
- * with the entry. An entry was created from a Relation field and selected there right away, so it’s
- * only wanted as long as one of the values it goes by is still held by a field in one of the
- * locales, including a field of a rich text editor component. A deselected entry is left out of
- * the save rather than created for nothing. A pending entry can also be referenced by another
- * pending entry rather than by the entry being edited, when it was created from a Relation field of
- * that entry’s quick-add dialog, so the referenced set is grown until no more entries are reached,
- * and one referenced only by a deselected entry is left out along with it.
- * @param {EntryDraft} draft Draft to save.
- * @returns {PendingEntry[]} Pending entries, in the order they were added, detached from the
- * reactive draft: they go into the entry and asset stores, whose consumers may clone them, which a
- * `$state` proxy can’t be.
+ * Get the pending entries of the given draft that are still referenced, as they are on the draft.
+ * See {@link getReferencedPendingEntries}, which detaches them for saving.
+ * @param {EntryDraft} draft Draft.
+ * @returns {Set<PendingEntry>} Referenced pending entries.
  */
-export const getReferencedPendingEntries = (draft) => {
+export const getReferencedPendingEntrySet = (draft) => {
   const sources = getDraftValueSources(draft);
   /** @type {Set<PendingEntry>} */
   const referenced = new Set();
@@ -117,6 +139,38 @@ export const getReferencedPendingEntries = (draft) => {
   while (grow()) {
     // Keep going until no more entries are reached
   }
+
+  return referenced;
+};
+
+/**
+ * Get the existing entries edited from a Relation field that the given draft still refers to, as
+ * they are on the draft. The cheap check comes first, as this runs on every change: nothing is
+ * looked up unless the draft has such an entry at all.
+ * @param {EntryDraft} draft Draft.
+ * @returns {PendingEntry[]} Edited pending entries.
+ */
+export const getReferencedEditedEntries = (draft) =>
+  draft.pendingEntries?.some(({ baseEntry }) => !!baseEntry)
+    ? [...getReferencedPendingEntrySet(draft)].filter(({ baseEntry }) => !!baseEntry)
+    : [];
+
+/**
+ * Get the pending entries of the given draft that are still referenced, so they can be saved along
+ * with the entry. An entry was created from a Relation field and selected there right away, so it’s
+ * only wanted as long as one of the values it goes by is still held by a field in one of the
+ * locales, including a field of a rich text editor component. A deselected entry is left out of
+ * the save rather than created for nothing. A pending entry can also be referenced by another
+ * pending entry rather than by the entry being edited, when it was created from a Relation field of
+ * that entry’s quick-add dialog, so the referenced set is grown until no more entries are reached,
+ * and one referenced only by a deselected entry is left out along with it.
+ * @param {EntryDraft} draft Draft to save.
+ * @returns {PendingEntry[]} Pending entries, in the order they were added, detached from the
+ * reactive draft: they go into the entry and asset stores, whose consumers may clone them, which a
+ * `$state` proxy can’t be.
+ */
+export const getReferencedPendingEntries = (draft) => {
+  const referenced = getReferencedPendingEntrySet(draft);
 
   return draft.pendingEntries
     .filter((pendingEntry) => referenced.has(pendingEntry))

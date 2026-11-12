@@ -1,12 +1,13 @@
 import { recordBranchAccess } from '$lib/services/backends/branch-access';
 import { fetchAPI, fetchGraphQL, graphqlVars } from '$lib/services/backends/git/shared/api';
 import {
-  createLocalizedError,
-  NOT_COLLABORATOR_ERROR_MESSAGE,
+  createPermissionError,
   toRepositoryAccessError,
 } from '$lib/services/backends/git/shared/errors';
 import {
   applyDefaultBranch,
+  createBaseURLsGetter,
+  getRepositoryPath,
   REPOSITORY_INFO_PLACEHOLDER,
 } from '$lib/services/backends/git/shared/repository';
 
@@ -28,10 +29,10 @@ export const repository = { ...REPOSITORY_INFO_PLACEHOLDER };
  * @returns {RepositoryBaseURLs} An object containing the tree base URL for browsing files, and the
  * blob base URL for accessing file contents.
  */
-export const getBaseURLs = (repoURL, branch) => ({
-  treeBaseURL: branch ? `${repoURL}/tree/${branch}` : repoURL,
-  blobBaseURL: branch ? `${repoURL}/blob/${branch}` : '',
-  commitBaseURL: `${repoURL}/commit`,
+export const getBaseURLs = createBaseURLsGetter({
+  tree: '/tree',
+  blob: '/blob',
+  commit: '/commit',
 });
 
 /**
@@ -48,39 +49,68 @@ export const isRateLimited = ({ status, headers }) =>
   headers.get('x-ratelimit-remaining') === '0';
 
 /**
- * Check if the user has write access to the current repository, which takes the write, maintain or
- * admin role, like Netlify/Decap CMS requires. The repository reports the authenticated user’s own
- * permissions, however they’re granted, including through an organization team. Asking the
- * collaborator endpoint instead would let a read-only collaborator in.
- * @throws {Error} If the user can’t push to the repository, or the access couldn’t be checked.
+ * Fetch the signed-in user’s access to the configured repository, and whether it can be forked at
+ * all. The repository reports the authenticated user’s own permissions, however they’re granted,
+ * including through an organization team. Asking the collaborator endpoint instead would let a
+ * read-only collaborator in, and would need administrator access to answer, so a maintainer who
+ * merely has write access would be turned away as though they had none.
+ * @param {(response: Response) => Promise<Error>} [getRefusalError] Function to create the error
+ * to throw when the request is refused with a 403 or 404, in place of the plain “no access” one.
+ * @returns {Promise<{ canRead: boolean, canWrite: boolean, allowForking: boolean,
+ * isPersonalPrivate: boolean }>} Repository access. `canWrite` takes the write, maintain or admin
+ * role. `isPersonalPrivate` is whether the repository is private and owned by a personal account.
+ * @throws {Error} When the user has no access to the repository, or the answer couldn’t be
+ * determined — which is not the same thing.
  * @see https://docs.github.com/en/rest/repos/repos#get-a-repository
  */
-export const checkRepositoryAccess = async () => {
-  const { owner, repo } = repository;
-
+export const fetchRepositoryAccess = async (getRefusalError) => {
   const response = /** @type {Response} */ (
-    await fetchAPI(`/repos/${owner}/${repo}`, {
+    await fetchAPI(getRepositoryPath(repository), {
       headers: { Accept: 'application/json' },
       responseType: 'raw',
     })
   );
 
-  // A rate limit shares the 403 status with a refusal, so it’s reported as a failed check rather
-  // than as no access. A `raw` response skips the token refresh, so an expired token (401) still
-  // counts as no access, sending the user back to the sign-in form
   if (!response.ok) {
-    throw toRepositoryAccessError(
-      repository,
-      isRateLimited(response) ? undefined : response.status,
-    );
+    // A rate limit shares the 403 status with a refusal, so it’s reported as a failed check rather
+    // than as no access, as reading it as “no write access” would send a maintainer down the fork
+    // path over something passing. A `raw` response skips the token refresh, so an expired token
+    // (401) still counts as no access, sending the user back to the sign-in form
+    const status = isRateLimited(response) ? undefined : response.status;
+
+    if (getRefusalError && (status === 403 || status === 404)) {
+      throw await getRefusalError(response);
+    }
+
+    throw toRepositoryAccessError(repository, status);
   }
 
-  const { permissions } = /** @type {{ permissions?: { push?: boolean } }} */ (
-    await response.json()
-  );
+  const {
+    permissions,
+    private: isPrivate,
+    owner,
+    allow_forking: allowForking,
+  } = await response.json();
 
-  if (!permissions?.push) {
-    throw createLocalizedError(NOT_COLLABORATOR_ERROR_MESSAGE, 'repository_no_access', { repo });
+  return {
+    // A response without the user’s permissions doesn’t say they can read the repository
+    canRead: !!permissions?.pull,
+    canWrite: !!permissions?.push,
+    allowForking: allowForking !== false,
+    isPersonalPrivate: !!isPrivate && owner?.type === 'User',
+  };
+};
+
+/**
+ * Check if the user has write access to the current repository, like Netlify/Decap CMS requires.
+ * @throws {Error} If the user can’t push to the repository, or the access couldn’t be checked.
+ */
+export const checkRepositoryAccess = async () => {
+  const { canRead, canWrite } = await fetchRepositoryAccess();
+
+  if (!canWrite) {
+    // A read or triage collaborator can read the repository
+    throw createPermissionError(repository.repo, canRead);
   }
 };
 

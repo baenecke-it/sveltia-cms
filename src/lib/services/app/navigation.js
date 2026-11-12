@@ -4,6 +4,7 @@ import { flushSync } from 'svelte';
 import { showAssetOverlay } from '$lib/services/assets/view';
 import { cmsConfig } from '$lib/services/config';
 import { showContentOverlay } from '$lib/services/contents/editor';
+import { getEntryEditorPath } from '$lib/services/contents/editor/route';
 import { createDerivedState, createRawState } from '$lib/services/utils/state.svelte';
 import { decodeURIComponentSafely, encodePathSegments } from '$lib/services/utils/url';
 import { openNewTab } from '$lib/services/utils/window';
@@ -65,18 +66,19 @@ export const overlayTitle = createRawState('');
  */
 export const parseLocation = (href = window.location.href) => {
   const hashPath = new URL(href).hash.substring(1);
-
-  // Parse the hash as the path of a URL of its own. It’s given a leading slash if it lacks one,
-  // e.g. a link with the slashes percent-encoded, as the URL would be invalid otherwise. A fixed
-  // origin is used as the page’s may be `null`, e.g. on a `file:` URL
-  const { pathname, searchParams } = new URL(
-    `http://localhost${hashPath.startsWith('/') ? '' : '/'}${hashPath}`,
-  );
+  // Split the hash into a path and a query string by hand rather than parsing it as a URL of its
+  // own, which would resolve any `.` or `..` segment, even a percent-encoded one, so that searching
+  // for `..` would lead to the root path. A second `#` ends both
+  const [pathname, ...query] = hashPath.split('#')[0].split('?');
+  const searchParams = new URLSearchParams(query.join('?'));
 
   return {
+    // Give the path a leading slash if it lacks one, e.g. a link with the slashes percent-encoded.
     // Drop any trailing slash before decoding, so a hand-typed `#/collections/` resolves the same
     // way as `#/collections` rather than matching no route at all. The root path is left as is
-    path: decodeURIComponentSafely(pathname.replace(/(?!^)\/+$/, '')),
+    path: decodeURIComponentSafely(
+      `${pathname.startsWith('/') ? '' : '/'}${pathname}`.replace(/(?!^)\/+$/, ''),
+    ),
     params: Object.fromEntries(
       // Merge multiple values of the same key with a comma, e.g. `?a=1&a=2` becomes `{ a: '1,2' }`.
       // This is to support both `?tags=tag1,tag2` and `?tags=tag1&tags=tag2` formats for dynamic
@@ -307,7 +309,7 @@ export const updateContentFromHashChange = (event, updateContent, routeRegex) =>
   const { isTrusted, oldURL, newURL } = event;
 
   // If `isTrusted` is `true`, it’s the browser’s back/forward navigation, so we need to start
-  // transitioning. If `false`, the event is trigged by the `goto` method below and transition has
+  // transitioning. If `false`, the event is triggered by the `goto` method below and transition has
   // already started; in that case, just finish updating the content.
   if (!isTrusted) {
     updateContent();
@@ -396,12 +398,9 @@ export const redirectLegacyEntryLink = () => {
   // Carry any query string over, so the editor locale and dynamic default values survive
   const query = new URLSearchParams(params).toString();
 
-  goto(
-    `${encodePathSegments(`/collections/${collectionName}/entries/${subPath}`)}${query ? `?${query}` : ''}`,
-    {
-      replaceState: true,
-    },
-  );
+  goto(`${getEntryEditorPath(collectionName, subPath)}${query ? `?${query}` : ''}`, {
+    replaceState: true,
+  });
 
   return true;
 };
@@ -497,11 +496,11 @@ export const goBack = (path, { returnTo, ...options } = {}) => {
 
 /**
  * Get the path the entry editor goes back to: the collections list for a singleton file, or the
- * collection entries list otherwise — the folder being browsed for a nested collection, so the user
- * lands where they opened the entry from.
+ * collection entries list otherwise — the folder being browsed for a collection with nested
+ * entries, so the user lands where they opened the entry from.
  * @param {object} args Arguments.
  * @param {string | undefined} args.collectionName Name of the entry’s collection.
- * @param {string} [args.dirPath] Folder being browsed in a nested collection, if any.
+ * @param {string} [args.dirPath] Folder being browsed in a collection with nested entries, if any.
  * @returns {string} Route path.
  */
 export const getEntryEditorBackPath = ({ collectionName, dirPath = '' }) => {

@@ -5,11 +5,6 @@ import { createMockAssetFolder } from '$lib/test/factories';
 import { createFileList, saveAssets, updateStores } from './create.js';
 
 // Mock dependencies
-vi.mock('$lib/services/assets', () => ({
-  getAssetByInternalPath: vi.fn(),
-  getAssetsByDirName: vi.fn(),
-}));
-
 vi.mock('$lib/services/assets/state', () => ({
   allAssets: { current: undefined },
   focusedAsset: { set: vi.fn() },
@@ -60,25 +55,37 @@ vi.mock('$lib/services/contents/collection/data', () => ({
   },
 }));
 
-vi.mock('$lib/services/backends/git/shared/integration', () => ({
-  skipCIConfigured: {
-    current: false,
-  },
-  skipCIEnabled: {
-    current: false,
-  },
-}));
+vi.mock('$lib/services/backends/git/shared/integration', async () => {
+  const { isDeployingCommit } = await import('$lib/services/backends/git/shared/commits');
+  const configured = { current: false };
+
+  return {
+    skipCIConfigured: configured,
+    // Mirror the real helper so the tests can drive it through the configuration
+    isPublishingCommit: vi.fn(
+      (/** @type {any} */ options) => configured.current && isDeployingCommit(options),
+    ),
+  };
+});
 
 // Mock dependencies
-vi.mock('$lib/services/assets', () => ({
-  allAssets: {
-    current: [],
-  },
-  focusedAsset: { current: undefined },
-  overlaidAsset: { current: undefined },
-  getAssetByInternalPath: vi.fn(),
-  getAssetsByDirName: vi.fn().mockReturnValue([]),
-}));
+vi.mock('$lib/services/assets', () => {
+  const getAssetsByDirName = vi.fn().mockReturnValue([]);
+
+  return {
+    allAssets: {
+      current: [],
+    },
+    focusedAsset: { current: undefined },
+    overlaidAsset: { current: undefined },
+    getAssetByInternalPath: vi.fn(),
+    getAssetsByDirName,
+    // Like the real one, the names of the assets, along with those of any other files and folders
+    getTakenNamesInDir: vi.fn((/** @type {string} */ dirPath) =>
+      (getAssetsByDirName(dirPath) ?? []).map((/** @type {any} */ a) => a.name.normalize()),
+    ),
+  };
+});
 
 vi.mock('$lib/services/assets/data', async (importOriginal) => ({
   .../** @type {Record<string, any>} */ (await importOriginal()),
@@ -184,6 +191,25 @@ describe('assets/data/create', () => {
 
       expect(getAssetsByDirName).toHaveBeenCalledWith('');
       expect(result[0].path).toBe('test.jpg');
+    });
+
+    it('should not take the name of another file or a folder in the folder', async () => {
+      const { getTakenNamesInDir } = await import('$lib/services/assets');
+      const { formatFileName } = await import('$lib/services/assets/file-name');
+      const mockFile = new File(['content'], 'index.md', { type: 'text/markdown' });
+
+      vi.mocked(getTakenNamesInDir).mockReturnValueOnce(['index.md', 'images']);
+
+      createFileList({
+        files: [mockFile],
+        folder: createMockAssetFolder({ internalPath: 'content/posts/hello', publicPath: '' }),
+      });
+
+      expect(getTakenNamesInDir).toHaveBeenCalledWith('content/posts/hello');
+      expect(formatFileName).toHaveBeenCalledWith('index.md', {
+        slugificationEnabled: false,
+        assetNamesInSameFolder: ['index.md', 'images'],
+      });
     });
 
     it('should call getAssetsByDirName when folder has internalPath', async () => {
@@ -646,7 +672,7 @@ describe('assets/data/create', () => {
 
       /** @type {any} */ (skipCIConfigured).current = false;
 
-      updateStores({ count: 3 });
+      updateStores({ count: 3, options: { commitType: 'uploadMedia' } });
 
       expect(assetUpdatesToast.current).toEqual({
         saved: true,
@@ -658,14 +684,13 @@ describe('assets/data/create', () => {
 
     it('should set published to true when skipCIConfigured is true and skipCI is disabled', async () => {
       const { assetUpdatesToast } = await import('$lib/services/assets/data');
-
-      const { skipCIConfigured, skipCIEnabled } =
-        await import('$lib/services/backends/git/shared/integration');
+      const { skipCIConfigured } = await import('$lib/services/backends/git/shared/integration');
+      const { cmsConfig } = await import('$lib/services/config');
 
       /** @type {any} */ (skipCIConfigured).current = true;
-      /** @type {any} */ (skipCIEnabled).current = false;
+      /** @type {any} */ (cmsConfig).current = { backend: { skip_ci: false } };
 
-      updateStores({ count: 1 });
+      updateStores({ count: 1, options: { commitType: 'uploadMedia' } });
 
       expect(assetUpdatesToast.current).toEqual(
         expect.objectContaining({ saved: true, published: true, count: 1 }),
@@ -674,18 +699,36 @@ describe('assets/data/create', () => {
 
     it('should set published to false when skipCI is enabled', async () => {
       const { assetUpdatesToast } = await import('$lib/services/assets/data');
-
-      const { skipCIConfigured, skipCIEnabled } =
-        await import('$lib/services/backends/git/shared/integration');
+      const { skipCIConfigured } = await import('$lib/services/backends/git/shared/integration');
+      const { cmsConfig } = await import('$lib/services/config');
 
       /** @type {any} */ (skipCIConfigured).current = true;
-      /** @type {any} */ (skipCIEnabled).current = true;
+      /** @type {any} */ (cmsConfig).current = { backend: { skip_ci: true } };
 
-      updateStores({ count: 1 });
+      updateStores({ count: 1, options: { commitType: 'uploadMedia' } });
 
       expect(assetUpdatesToast.current).toEqual(
         expect.objectContaining({ saved: true, published: false, count: 1 }),
       );
+    });
+
+    it('should follow the commit’s own skipCI option over the configuration', async () => {
+      const { assetUpdatesToast } = await import('$lib/services/assets/data');
+      const { skipCIConfigured } = await import('$lib/services/backends/git/shared/integration');
+      const { cmsConfig } = await import('$lib/services/config');
+
+      /** @type {any} */ (skipCIConfigured).current = true;
+      /** @type {any} */ (cmsConfig).current = { backend: { skip_ci: false } };
+
+      updateStores({ count: 1, options: { commitType: 'uploadMedia', skipCI: true } });
+
+      expect(assetUpdatesToast.current).toEqual(expect.objectContaining({ published: false }));
+
+      /** @type {any} */ (cmsConfig).current = { backend: { skip_ci: true } };
+
+      updateStores({ count: 1, options: { commitType: 'uploadMedia', skipCI: false } });
+
+      expect(assetUpdatesToast.current).toEqual(expect.objectContaining({ published: true }));
     });
 
     it('should update focusedAsset when it exists', async () => {
@@ -709,7 +752,7 @@ describe('assets/data/create', () => {
       focusedAsset.current = /** @type {any} */ (oldAsset);
       vi.mocked(getAssetByInternalPath).mockReturnValue(/** @type {any} */ (newAsset));
 
-      updateStores({ count: 1 });
+      updateStores({ count: 1, options: { commitType: 'uploadMedia' } });
 
       expect(getAssetByInternalPath).toHaveBeenCalledWith('/images/old.jpg');
       expect(focusedAsset.current).toEqual(newAsset);
@@ -736,7 +779,7 @@ describe('assets/data/create', () => {
       overlaidAsset.current = /** @type {any} */ (oldAsset);
       vi.mocked(getAssetByInternalPath).mockReturnValue(/** @type {any} */ (newAsset));
 
-      updateStores({ count: 1 });
+      updateStores({ count: 1, options: { commitType: 'uploadMedia' } });
 
       expect(getAssetByInternalPath).toHaveBeenCalledWith('/images/old.jpg');
       expect(overlaidAsset.current).toEqual(newAsset);
@@ -774,7 +817,7 @@ describe('assets/data/create', () => {
         (path) => /** @type {any} */ (path === '/images/focused.jpg' ? newFocused : newOverlaid),
       );
 
-      updateStores({ count: 2 });
+      updateStores({ count: 2, options: { commitType: 'uploadMedia' } });
 
       expect(getAssetByInternalPath).toHaveBeenCalledWith('/images/focused.jpg');
       expect(getAssetByInternalPath).toHaveBeenCalledWith('/images/overlaid.jpg');

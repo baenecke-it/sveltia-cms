@@ -1,9 +1,9 @@
-import { getAssetPublicURL } from '$lib/services/assets/info';
-import { getMediaFieldSource } from '$lib/services/assets/media-field';
+import { getAssetReferenceTarget } from '$lib/services/assets/reference-target';
 import {
+  createMediaSourceResolver,
   getAssetReferences,
   getComparableAssetURL,
-  MARKDOWN_IMAGE_REGEX,
+  matchAssetURL,
 } from '$lib/services/assets/references';
 import { allAssets } from '$lib/services/assets/state';
 import { cmsConfig } from '$lib/services/config';
@@ -13,11 +13,21 @@ import {
   compactList,
   dedupeBlockers,
   getFieldBlockers,
-  ITEM_INDEX_SUFFIX_REGEX,
 } from '$lib/services/contents/entry/cascade';
 import { createSyntheticDraft } from '$lib/services/contents/entry/changes';
 import { isFieldMultiple } from '$lib/services/contents/entry/fields';
+import { ITEM_INDEX_SUFFIX_REGEX } from '$lib/services/contents/entry/key-paths';
 import { MEDIA_FIELD_TYPES } from '$lib/services/contents/fields';
+import { getValueFormat } from '$lib/services/contents/fields/rich-text';
+import { LINKED_IMAGE_REGEX } from '$lib/services/contents/fields/rich-text/constants';
+import {
+  MARKDOWN_MEDIA_REGEX,
+  parseMediaSource,
+  rewriteMediaStartTag,
+  updateMediaElementURLs,
+} from '$lib/services/contents/fields/rich-text/previews/media-sources';
+import { getMediaElements } from '$lib/services/contents/fields/rich-text/previews/media-urls';
+import { parseHTMLFragment, serializeStartTag } from '$lib/services/utils/html';
 
 /**
  * @import {
@@ -30,15 +40,20 @@ import { MEDIA_FIELD_TYPES } from '$lib/services/contents/fields';
  * FlattenedEntryContent,
  * InternalLocaleCode,
  * } from '$lib/types/private';
- * @import { Field, FieldKeyPath } from '$lib/types/public';
+ * @import {
+ * Field,
+ * FieldKeyPath,
+ * MarkdownField,
+ * RichTextField,
+ * RichTextValueFormat,
+ * } from '$lib/types/public';
  * @import { AssetReferenceTarget } from '$lib/services/assets/references';
+ * @import { MediaSource } from '$lib/services/contents/fields/rich-text/previews/media-sources';
  */
 
 /**
- * Get what the references to the given assets are matched by: the public path of an asset that has
- * one, in the form it’s stored in a field value — without the site’s base URL — or else the asset
- * itself, as in an entry-relative folder, which a value refers to when it resolves to the asset.
- * The asset is matched without being loaded, unlike by its blob URL.
+ * Get what the references to the given assets are matched by, see {@link getAssetReferenceTarget},
+ * with the URLs in the form they’re stored in a field value — without the site’s base URL.
  * @param {Asset[]} assets Assets.
  * @returns {AssetReferenceTarget[]} Targets, without duplicate URLs.
  */
@@ -49,14 +64,10 @@ export const getReferenceTargets = (assets) => {
   const urls = new Set();
 
   assets.forEach((asset) => {
-    // A path relative to the entry, like `images/photo.jpg`, refers to a different file in each
-    // entry’s folder, so it can’t be compared as text across entries
-    const url = asset.folder.entryRelative
-      ? undefined
-      : getAssetPublicURL(asset, { allowSpecial: true, pathOnly: true });
+    const { url, asset: target } = getAssetReferenceTarget(asset);
 
     if (url === undefined) {
-      targets.push({ asset });
+      targets.push({ asset: /** @type {Asset} */ (target) });
 
       return;
     }
@@ -114,32 +125,230 @@ const cutMarkup = (text, index, length) => {
 };
 
 /**
- * Remove the images pointing at the deleted assets from a Markdown string.
+ * Elements that are removed along with the media element they hold, once nothing else is left in
+ * them, so no empty paragraph, figure or link is left behind.
+ */
+const MEDIA_WRAPPER_TAG_NAMES = ['a', 'div', 'figure', 'p', 'picture', 'span'];
+
+/**
+ * Check if a media element has nothing left to display once its URLs pointing at the deleted assets
+ * have been removed: an image or a `<source>` without a `src` or `srcset`, or a video or audio
+ * without a `src` or a `<source>`. A video keeps playing without its `poster`.
+ * @param {Element} element Media element.
+ * @returns {boolean} Result.
+ */
+const isMediaElementEmpty = (element) =>
+  ['img', 'source'].includes(element.localName)
+    ? !element.hasAttribute('src') && !element.hasAttribute('srcset')
+    : !element.hasAttribute('src') && !element.querySelector(':scope > source');
+
+/**
+ * Remove a media element left with nothing to display from the parsed HTML, along with any wrapper
+ * left empty. An image in a `<picture>` takes the picture with it, as its `<source>` elements
+ * display nothing without one.
+ * @param {Element} element Media element.
+ */
+const removeMediaElement = (element) => {
+  /** @type {Element | null} */
+  let target = element;
+
+  if (element.localName === 'img' && element.parentElement?.localName === 'picture') {
+    target = element.parentElement;
+  }
+
+  for (;;) {
+    const parent = /** @type {Element | null} */ (target.parentElement);
+
+    target.remove();
+
+    if (
+      !parent ||
+      !MEDIA_WRAPPER_TAG_NAMES.includes(parent.localName) ||
+      parent.childElementCount ||
+      /** @type {string} */ (parent.textContent).trim()
+    ) {
+      break;
+    }
+
+    target = parent;
+  }
+};
+
+/**
+ * Remove the media pointing at the deleted assets from an HTML string. A URL pointing at a deleted
+ * asset is removed from its element, e.g. a `srcset` candidate or a video `poster`, and an element
+ * left with nothing to display goes, along with any wrapper left empty.
+ * @param {string} value HTML.
+ * @param {(source: MediaSource) => boolean} isStale Function checking whether a URL, as parsed by
+ * `parseMediaSource()`, points at a deleted asset.
+ * @returns {string} HTML without the media, or the original one if nothing is removed.
+ */
+const removeHTMLMedia = (value, isStale) => {
+  const template = parseHTMLFragment(value);
+  const elements = getMediaElements(template);
+
+  const affected = new Set(
+    elements.filter((element) =>
+      updateMediaElementURLs(element, (_src, source) => (isStale(source) ? null : undefined)),
+    ),
+  );
+
+  if (!affected.size) {
+    return value;
+  }
+
+  // A `<source>` comes after its video or audio, so go backwards to have it removed first, then
+  // see if the video or audio has anything left. An element that had nothing to display in the
+  // first place is the author’s, and left as is
+  elements.reverse().forEach((element) => {
+    if (!affected.has(element) || !isMediaElementEmpty(element)) {
+      return;
+    }
+
+    const { parentElement: parent } = element;
+
+    if (element.localName === 'source' && parent && ['audio', 'video'].includes(parent.localName)) {
+      affected.add(parent);
+    }
+
+    removeMediaElement(element);
+  });
+
+  return template.innerHTML;
+};
+
+/**
+ * Sticky version of `LINKED_IMAGE_REGEX`, to tell whether a Markdown image is the content of a
+ * link.
+ */
+const STICKY_LINKED_IMAGE_REGEX = new RegExp(LINKED_IMAGE_REGEX.source, 'y');
+
+/**
+ * Get the length of the linked image starting right before the given Markdown image, e.g.
+ * `[![a](a.png)](a.png)`, if the image is the content of a link.
+ * @param {string} value Markdown.
+ * @param {number} index Position of the image.
+ * @param {string} markup Image.
+ * @returns {number | undefined} Length of the linked image, if any.
+ */
+const getLinkedImageLength = (value, index, markup) => {
+  if (value[index - 1] !== '[') {
+    return undefined;
+  }
+
+  STICKY_LINKED_IMAGE_REGEX.lastIndex = index - 1;
+
+  const [linkedImage] = STICKY_LINKED_IMAGE_REGEX.exec(value) ?? [];
+
+  return linkedImage?.startsWith(`[${markup}](`) ? linkedImage.length : undefined;
+};
+
+/**
+ * Remove the media pointing at the deleted assets from a Markdown string: a Markdown image is cut
+ * out, along with the link it’s the content of, if any, as the link has nothing left to display,
+ * and so is an image or a `<source>` written as raw HTML once it has nothing left to display.
+ * The start tag of a video or audio written as raw HTML only loses its URLs pointing at the deleted
+ * assets, as its content and end tag aren’t matched along with it.
+ * @param {string} value Markdown.
+ * @param {(source: MediaSource) => boolean} isStale Function checking whether a URL, as parsed by
+ * `parseMediaSource()`, points at a deleted asset.
+ * @returns {string} Markdown without the media.
+ */
+const removeMarkdownMedia = (value, isStale) =>
+  // Cut from the end, so the positions of the earlier matches stay valid
+  [...value.matchAll(MARKDOWN_MEDIA_REGEX)].reduceRight((text, match) => {
+    const { index, 0: markup, groups: { src = '', tag = undefined } = {} } = match;
+
+    if (tag === undefined) {
+      if (!isStale(parseMediaSource(src, 'markdown'))) {
+        return text;
+      }
+
+      const linkedImageLength = getLinkedImageLength(value, index, markup);
+
+      return linkedImageLength === undefined
+        ? cutMarkup(text, index, markup.length)
+        : cutMarkup(text, index - 1, linkedImageLength);
+    }
+
+    const element = rewriteMediaStartTag({
+      value,
+      tag,
+      index,
+      /**
+       * Remove a URL pointing at a deleted asset.
+       * @param {string} _url URL.
+       * @param {MediaSource} source URL, as parsed by `parseMediaSource()`.
+       * @returns {null | undefined} `null` to remove the URL, or `undefined` to leave it as is.
+       */
+      callback: (_url, source) => (isStale(source) ? null : undefined),
+    });
+
+    if (!element) {
+      return text;
+    }
+
+    if (['img', 'source'].includes(element.localName) && isMediaElementEmpty(element)) {
+      return cutMarkup(text, index, markup.length);
+    }
+
+    return text.slice(0, index) + serializeStartTag(element) + text.slice(index + markup.length);
+  }, value);
+
+/**
+ * Remove the media pointing at the deleted assets from a Markdown or RichText field value.
  * @param {object} args Arguments.
- * @param {string} args.value Markdown.
+ * @param {string} args.value Field value.
+ * @param {RichTextValueFormat} args.format Value format, as returned by `getValueFormat()`.
  * @param {Set<string>} args.urls URLs of the deleted assets.
  * @param {Set<string>} [args.paths] Paths of the deleted assets without a URL, as in an
- * entry-relative folder, which an image points at when its source resolves to the asset.
+ * entry-relative folder, which a media URL points at when it resolves to the asset.
  * @param {Entry} args.entry Entry holding the field.
  * @param {string} args.collectionName Collection name.
  * @param {string} [args.fileName] Collection file name.
- * @param {InternalLocaleCode} [args.locale] Locale the field is in, which an entry-relative image
- * source is relative to.
- * @returns {string} Markdown without the images.
+ * @param {InternalLocaleCode} [args.locale] Locale the field is in, which an entry-relative media
+ * URL is relative to.
+ * @param {FieldKeyPath} args.keyPath Key path of the field.
+ * @param {FlattenedEntryContent} args.valueMap Content holding the field.
+ * @param {boolean} [args.isIndexFile] Whether the entry is the collection’s special index file.
+ * @param {MarkdownField | RichTextField} args.fieldConfig Field config, whose own `media_folder`
+ * and those of its editor components a relative media URL may be resolved against.
+ * @returns {string} Value without the media.
  */
-export const removeMarkdownImages = ({
+export const removeEmbeddedMedia = ({
   value,
+  format,
   urls,
   paths = new Set(),
   entry,
   collectionName,
   fileName,
   locale,
+  keyPath,
+  valueMap,
+  isIndexFile,
+  fieldConfig,
 }) => {
-  const matches = [...value.matchAll(MARKDOWN_IMAGE_REGEX)];
+  const resolve = createMediaSourceResolver({
+    entry,
+    collectionName,
+    fileName,
+    locale,
+    keyPath,
+    valueMap,
+    isIndexFile,
+    fieldConfig,
+  });
 
-  const stale = matches.map(([, src]) => {
-    if (urls.has(src)) {
+  /**
+   * Check whether a media URL points at a deleted asset.
+   * @param {MediaSource} source URL, as parsed by `parseMediaSource()`.
+   * @returns {boolean} Result.
+   */
+  const isStale = (source) => {
+    // Matched the same way as the references are found, see `getAssetReferences()`, e.g. with a
+    // space encoded as `%20`, as the CMS writes it in a body, or with a fragment
+    if (matchAssetURL(source, (url) => urls.has(url))) {
       return true;
     }
 
@@ -147,24 +356,19 @@ export const removeMarkdownImages = ({
       return false;
     }
 
-    // Resolve the image’s path the way the editor does to display it, without loading the asset
-    const path = getMediaFieldSource({ entry, collectionName, fileName, locale, value: src })?.asset
-      ?.path;
+    // Resolve the path the way the editor does to display it, without loading the asset
+    const path = resolve(source.url)?.asset?.path;
 
     return path !== undefined && paths.has(path);
-  });
+  };
 
-  // Cut from the end, so the positions of the earlier matches stay valid
-  return matches.reduceRight(
-    (text, { index, 0: markup }, i) => (stale[i] ? cutMarkup(text, index, markup.length) : text),
-    value,
-  );
+  return format === 'html' ? removeHTMLMedia(value, isStale) : removeMarkdownMedia(value, isStale);
 };
 
 /**
  * Remove the references to the deleted assets from a copy of the given content map: an Image or
  * File field is left empty, or loses the items in question and has its remaining items renumbered
- * if it holds several files, and a Markdown or rich text field loses the images.
+ * if it holds several files, and a Markdown or rich text field loses the images and other media.
  * @param {object} args Arguments.
  * @param {FlattenedEntryContent} args.content Flattened entry content. Not modified.
  * @param {AssetReference[]} args.references References to remove, all in this content.
@@ -185,15 +389,22 @@ export const removeAssetReferences = ({ content, references, urls, paths = new S
     const { widget: fieldType = 'string' } = fieldConfig;
 
     if (!MEDIA_FIELD_TYPES.includes(fieldType)) {
-      // The reference is an image embedded in a Markdown or rich text field
-      updatedContent[keyPath] = removeMarkdownImages({
+      // The reference is an image or other media embedded in a Markdown or rich text field
+      const richTextField = /** @type {MarkdownField | RichTextField} */ (fieldConfig);
+
+      updatedContent[keyPath] = removeEmbeddedMedia({
         value: content[keyPath],
+        format: getValueFormat(richTextField),
         urls,
         paths,
         entry,
         collectionName: collection.name,
         fileName: collectionFile?.name,
         locale,
+        keyPath,
+        valueMap: content,
+        isIndexFile: isCollectionIndexFile(collection, entry),
+        fieldConfig: richTextField,
       });
 
       fields.set(keyPath, fieldConfig);

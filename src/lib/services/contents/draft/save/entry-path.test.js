@@ -24,6 +24,11 @@ vi.mock('$lib/services/contents/collection/entries', () => ({
   getEntriesByCollection: vi.fn(() => []),
 }));
 
+vi.mock('$lib/services/contents/draft/slugs', async (importOriginal) => ({
+  ...(await importOriginal()),
+  getEntryDateTimeParts: vi.fn(() => ({ year: '2020' })),
+}));
+
 vi.mock('$lib/services/workflow', () => ({
   mergeUnpublishedEntries: vi.fn((entries) => entries),
   unpublishedEntries: { current: [] },
@@ -591,9 +596,47 @@ describe('contents/draft/save/entry-path', () => {
           collection: draft.collection,
           locale: 'en',
           currentSlug: 'my-post',
+          dateTimeParts: { year: '2020' },
         }),
       );
       expect(result).toBe('posts/2024/my-post.md');
+    });
+
+    it('should fill the subPath with the random values shared by every call and locale', async () => {
+      const { getRandomValues } = await import('$lib/services/contents/draft/slugs');
+
+      const draft = {
+        collection: {
+          _type: 'entry',
+          _i18n: {
+            defaultLocale: 'en',
+            structure: 'multiple_files',
+            omitDefaultLocaleFromFilePath: false,
+            omitDefaultLocaleFromPreviewPath: false,
+          },
+          _file: {
+            basePath: 'posts',
+            subPath: '{{uuid_short}}/index',
+            extension: 'md',
+          },
+        },
+        collectionFile: undefined,
+        originalEntry: undefined,
+        currentValues: { en: {}, fr: {} },
+        isIndexFile: false,
+      };
+
+      createEntryPath({ draft, locale: 'en', slug: 'my-post' });
+      createEntryPath({ draft, locale: 'fr', slug: 'my-post' });
+
+      const [[, enOptions], [, frOptions]] = mockFillTemplate.mock.calls;
+
+      // The non-default locale is filled as the default locale, whose values are used, so that the
+      // random values are looked up with the same keys
+      expect(enOptions.locale).toBe('en');
+      expect(frOptions.locale).toBe('en');
+      expect(enOptions.randomValues).toBe(getRandomValues(draft));
+      expect(frOptions.randomValues).toBe(getRandomValues(draft));
     });
 
     it('should handle index file', async () => {
@@ -1148,7 +1191,7 @@ describe('contents/draft/save/entry-path', () => {
     // @see https://github.com/sveltia/sveltia-cms/issues/962
 
     /**
-     * Create a nested collection with localized slugs and the path editor enabled.
+     * Create a collection of nested entries with localized slugs and the path editor enabled.
      * @param {object} [overrides] Property overrides.
      * @returns {any} Collection.
      */

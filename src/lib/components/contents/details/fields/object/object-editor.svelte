@@ -7,15 +7,21 @@
 <script>
   import { _ } from '@sveltia/i18n';
   import { Checkbox } from '@sveltia/ui';
-  import { getContext, onMount, tick } from 'svelte';
+  import { onMount, tick } from 'svelte';
 
   import RemoveButton from '$lib/components/common/remove-button.svelte';
   import AddItemButton from '$lib/components/contents/details/fields/object/add-item-button.svelte';
   import ObjectBody from '$lib/components/contents/details/fields/object/object-body.svelte';
   import ObjectHeader from '$lib/components/contents/details/fields/object/object-header.svelte';
+  import RemovedItemNotice from '$lib/components/contents/details/fields/object/removed-item-notice.svelte';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
-  import { addObjectFields, removeObjectFields } from '$lib/services/contents/draft/update/object';
+  import {
+    addObjectFields,
+    removeObjectFields,
+    restoreObjectFields,
+  } from '$lib/services/contents/draft/update/object';
   import { getFieldValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
+  import { getFieldEditorContext } from '$lib/services/contents/editor/field-context';
   import {
     getInitialExpanderState,
     isExpanded,
@@ -29,13 +35,15 @@
     warnUnknownType,
   } from '$lib/services/contents/fields/object/helpers';
   import { getDraftObjectThumbnail } from '$lib/services/contents/fields/object/thumbnail';
+  import { getFieldLabel } from '$lib/services/contents/i18n/options';
 
   /**
    * @import {
    * EntryDraft,
-   * FieldEditorContext,
    * FieldEditorProps,
+   * InternalLocaleCode,
    * MediaFieldSource,
+   * RemovedObjectValues,
    * } from '$lib/types/private';
    * @import {
    * ObjectField,
@@ -52,19 +60,17 @@
 
   const entryDraft = getEntryDraftContext();
 
-  /** @type {FieldEditorContext} */
   const {
     fieldContext,
     valueStoreKey = 'currentValues',
     parentComponentNames = [],
-  } = getContext('field-editor') ?? {};
+  } = getFieldEditorContext();
   const componentName = parentComponentNames.at(-1);
   // Hide the header/expander if in a single subfield list field because it’s redundant
   const hideHeader = fieldContext === 'single-subfield-list-field';
 
   /** @type {FieldEditorProps & Props} */
   let {
-    /* eslint-disable prefer-const */
     locale,
     keyPath,
     typedKeyPath,
@@ -74,15 +80,18 @@
     // `FieldEditor` only renders the editor in a locale where the field is shown, and makes it
     // read-only in a locale whose values follow the default locale
     readonly = false,
-    /* eslint-enable prefer-const */
   } = $props();
 
   const fieldId = $props.id();
 
   /** @type {HTMLElement | undefined} */
   let wrapper = $state();
-  /** @type {AddItemButton | undefined} */
-  let addItemButton = $state();
+  /**
+   * Values removed with the Remove button or the checkbox, along with the locale they were removed
+   * in, which can be restored while the object is gone.
+   * @type {{ locale: InternalLocaleCode, values: RemovedObjectValues } | undefined}
+   */
+  let removed = $state.raw();
 
   const {
     name: fieldName,
@@ -112,12 +121,17 @@
   const parentExpanded = $derived(isExpanded(entryDraft.current, parentExpandedKeyPath));
   const hasVariableTypes = $derived(Array.isArray(types));
   const typeKeyPath = $derived(`${keyPath}.${typeKey}`);
+  // The editor isn’t created again for another locale, so the removed values are only offered in
+  // the locale they were removed in
+  const canRestore = $derived(!hasValues && removed?.locale === locale);
   /* v8 ignore start -- only read for an object with variable types */
   const type = $derived(hasVariableTypes ? valueMap[typeKeyPath] : undefined);
   /* v8 ignore stop */
   const { typeConfig, unknownType, subFields, summaryTemplate } = $derived(
     resolveVariableType({ types: hasVariableTypes ? types : undefined, fields, summary, type }),
   );
+  // An unknown type is labelled with its name
+  const typeLabel = $derived(typeConfig ? getFieldLabel({ config: typeConfig, locale }) : type);
 
   /**
    * Initialize the expander state.
@@ -152,45 +166,74 @@
     }
 
     addObjectFields({ draft, valueStoreKey, locale, keyPath, fieldConfig, type: _type });
+    removed = undefined;
   };
 
   /**
    * Remove the object’s subfields from the entry draft.
    */
   const removeFields = () => {
-    removeObjectFields({
-      // The Remove button is only offered while the draft is there
-      draft: /** @type {EntryDraft} */ (entryDraft.current),
-      valueStoreKey,
+    removed = {
       locale,
-      keyPath,
-      fieldConfig,
-    });
+      values: removeObjectFields({
+        // The Remove button is only offered while the draft is there
+        draft: /** @type {EntryDraft} */ (entryDraft.current),
+        valueStoreKey,
+        locale,
+        keyPath,
+        fieldConfig,
+      }),
+    };
   };
 
   /**
-   * Add the subfields of the type picked from the Add menu. The menu button is gone along with the
-   * menu once the object takes its place, so move the focus to the object’s expander button. The
-   * header is hidden within a single-subfield list, whose item has an expander of its own.
-   * @param {object} args Arguments.
-   * @param {string} [args.type] Variable type name.
+   * Move the focus to the object’s expander button. The header is hidden within a single-subfield
+   * list, whose item has an expander of its own.
    */
-  const addTypedFields = async ({ type: _type }) => {
-    addFields({ type: _type });
-    await tick();
+  const focusExpander = () => {
     /** @type {HTMLElement | null} */ (
       /** @type {HTMLElement} */ (wrapper).querySelector(':scope > .header button')
     )?.focus();
   };
 
   /**
+   * Put back the removed values. The Restore button is gone along with the notice once the object
+   * takes its place, so move the focus to the object’s expander button.
+   */
+  const restoreFields = async () => {
+    restoreObjectFields({
+      // The Restore button is only offered while the draft is there, with the removed values
+      draft: /** @type {EntryDraft} */ (entryDraft.current),
+      valueStoreKey,
+      keyPath,
+      removedValues: /** @type {{ values: RemovedObjectValues }} */ (removed).values,
+    });
+    removed = undefined;
+    await tick();
+    focusExpander();
+  };
+
+  /**
+   * Add the subfields of the type picked from the Add menu. The menu button is gone along with the
+   * menu once the object takes its place, so move the focus to the object’s expander button.
+   * @param {object} args Arguments.
+   * @param {string} [args.type] Variable type name.
+   */
+  const addTypedFields = async ({ type: _type }) => {
+    addFields({ type: _type });
+    await tick();
+    focusExpander();
+  };
+
+  /**
    * Remove the subfields of an object with variable types. The focused Remove button is gone along
-   * with them, so move the focus to the Add button that takes the object’s place.
+   * with them, so move the focus to the Restore button shown in the object’s place, so it can be
+   * restored right away.
    */
   const removeTypedFields = async () => {
     removeFields();
     await tick();
-    /** @type {AddItemButton} */ (addItemButton).focus();
+    document.getElementById(`object-${fieldId}-restore`)?.focus();
   };
 
   /**
@@ -251,11 +294,21 @@
 
 {#if hasVariableTypes && !hasValues}
   <AddItemButton
-    bind:this={addItemButton}
     disabled={readonly}
     {fieldConfig}
+    {locale}
     addItem={(args) => addTypedFields(/** @type {{ type: string }} */ (args))}
   />
+{/if}
+
+{#if canRestore}
+  <div role="none" class="removed-item">
+    <RemovedItemNotice
+      id="object-{fieldId}-restore"
+      disabled={readonly}
+      onRestore={restoreFields}
+    />
+  </div>
 {/if}
 
 {#if !(!required || hasVariableTypes) || hasValues}
@@ -263,22 +316,21 @@
     bind:this={wrapper}
     role="group"
     class="wrapper"
-    class:unknown-type={unknownType}
+    class:object-unknown-type={unknownType}
     class:expanded={parentExpanded}
     aria-labelledby={labelledBy}
   >
     {#if !hideHeader}
       <ObjectHeader
-        label={hasVariableTypes ? typeConfig?.label || type : ''}
+        label={hasVariableTypes ? typeLabel : ''}
         controlId="object-{fieldId}-item-list"
         expanded={parentExpanded}
-        toggleExpanded={subFields.length
-          ? () =>
-              syncExpanderStates({
-                draft: /** @type {EntryDraft} */ (entryDraft.current),
-                stateMap: { [parentExpandedKeyPath]: !parentExpanded },
-              })
-          : undefined}
+        expandable={subFields.length > 0}
+        toggleExpanded={() =>
+          syncExpanderStates({
+            draft: /** @type {EntryDraft} */ (entryDraft.current),
+            stateMap: { [parentExpandedKeyPath]: !parentExpanded },
+          })}
       >
         {#snippet endContent()}
           {#if hasVariableTypes}
@@ -302,6 +354,8 @@
         })}
         expanded={parentExpanded}
         {unknownType}
+        {typeConfig}
+        {readonly}
         getSummary={() => summaryText}
         getThumbnail={() => thumbnailSource}
         {summaryId}
@@ -320,15 +374,10 @@
     &:has(:global(.summary)) {
       border-bottom-width: 2px;
     }
+  }
 
-    &.unknown-type {
-      overflow: hidden;
-
-      :global(.alert) {
-        border-width: 0;
-        border-radius: 0;
-      }
-    }
+  .removed-item {
+    margin-top: 8px;
   }
 
   :global(.sui.checkbox) + .wrapper {

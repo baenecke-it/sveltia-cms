@@ -1,6 +1,7 @@
 import { customFileFormatRegistry } from '$lib/services/api/registries';
 import { addMessage } from '$lib/services/config/parser/utils/validator';
 import { isFieldMultiple } from '$lib/services/contents/entry/fields';
+import { storesNumber } from '$lib/services/contents/fields/number/helpers';
 import { detectFileExtension, detectFileFormat } from '$lib/services/contents/file/config';
 import { EXTENSION_FORMAT_MAP, MARKDOWN_EXTENSIONS } from '$lib/services/contents/file/constants';
 
@@ -113,6 +114,11 @@ const isNonTextField = (field) => {
   if (widget === 'number') {
     // prettier-ignore
     return !(/** @type {NumberField} */ (field).value_type ?? '').endsWith('/string');
+  }
+
+  // A Compute field holds a number with the `int` and `float` value types, and a string otherwise
+  if (widget === 'compute') {
+    return storesNumber(field);
   }
 
   return NON_TEXT_FIELD_TYPES.includes(widget) || isFieldMultiple(field);

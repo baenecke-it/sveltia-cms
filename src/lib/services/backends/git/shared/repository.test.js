@@ -3,9 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   applyDefaultBranch,
+  createBaseURLsGetter,
   getInstanceURL,
+  getPullRequestPath,
+  getRepositoryPath,
   getRepoURL,
+  getRestBranchPath,
   initRepositoryInfo,
+  isSameRepository,
   REPOSITORY_INFO_PLACEHOLDER,
 } from './repository';
 
@@ -78,6 +83,73 @@ describe('git/shared/repository', () => {
       ['https://example.com/gitea/api/v1', 'https://example.com/gitea'],
     ])('should get the web interface URL from %s', (restApiRoot, expected) => {
       expect(getInstanceURL(restApiRoot)).toBe(expected);
+    });
+  });
+
+  describe('createBaseURLsGetter', () => {
+    const getBaseURLs = createBaseURLsGetter({ tree: '/-/tree', blob: '/-/blob', commit: '/c' });
+
+    it('should append the path segments and the encoded branch to the repository URL', () => {
+      expect(getBaseURLs('https://example.com/owner/repo', 'cms/posts/c#')).toEqual({
+        treeBaseURL: 'https://example.com/owner/repo/-/tree/cms/posts/c%23',
+        blobBaseURL: 'https://example.com/owner/repo/-/blob/cms/posts/c%23',
+        commitBaseURL: 'https://example.com/owner/repo/c',
+      });
+    });
+
+    it('should point at the repository itself without a branch', () => {
+      expect(getBaseURLs('https://example.com/owner/repo')).toEqual({
+        treeBaseURL: 'https://example.com/owner/repo',
+        blobBaseURL: '',
+        commitBaseURL: 'https://example.com/owner/repo/c',
+      });
+    });
+  });
+
+  describe('getRepositoryPath', () => {
+    it('should return the REST API path of the repository', () => {
+      expect(getRepositoryPath({ owner: 'owner', repo: 'my.repo' })).toBe('/repos/owner/my.repo');
+    });
+
+    it('should encode the owner and repository names', () => {
+      expect(getRepositoryPath({ owner: 'a b', repo: 'c/d' })).toBe('/repos/a%20b/c%2Fd');
+    });
+  });
+
+  describe('getRestBranchPath', () => {
+    it('should return the REST API path of the branch, keeping its slashes', () => {
+      expect(getRestBranchPath({ owner: 'owner', repo: 'repo' }, 'feature/a b')).toBe(
+        '/repos/owner/repo/branches/feature/a%20b',
+      );
+    });
+  });
+
+  describe('isSameRepository', () => {
+    const repository = { owner: 'Owner', repo: 'Repo' };
+
+    it('should match the full name regardless of case', () => {
+      expect(isSameRepository('owner/repo', repository)).toBe(true);
+      expect(isSameRepository('OWNER/REPO', repository)).toBe(true);
+    });
+
+    it('should not match another repository or a missing name', () => {
+      expect(isSameRepository('owner/other', repository)).toBe(false);
+      expect(isSameRepository('other/repo', repository)).toBe(false);
+      expect(isSameRepository(undefined, repository)).toBe(false);
+    });
+
+    it('should match a GitLab project in a subgroup', () => {
+      expect(isSameRepository('Group/Sub/Project', { owner: 'group/sub', repo: 'project' })).toBe(
+        true,
+      );
+    });
+  });
+
+  describe('getPullRequestPath', () => {
+    it('should return the REST API path of the pull request', () => {
+      expect(getPullRequestPath({ owner: 'owner', repo: 'repo' }, 42)).toBe(
+        '/repos/owner/repo/pulls/42',
+      );
     });
   });
 
@@ -252,6 +324,35 @@ describe('git/shared/repository', () => {
       // The token page belongs to the instance, not the repository
       expect(getTokenPageURL).toHaveBeenCalledWith('https://github.com');
       expect(getBaseURLs).toHaveBeenCalledWith('https://github.com/owner/repo', 'main');
+    });
+
+    it('should ignore a trailing slash in the REST API root URL', () => {
+      const github = initRepositoryInfo(
+        { ...REPOSITORY_INFO_PLACEHOLDER },
+        { ...args, restApiRoot: 'https://api.github.com/' },
+      );
+
+      expect(github).toMatchObject({
+        repoURL: 'https://github.com/owner/repo',
+        tokenPageURL: 'https://github.com/tokens',
+        isSelfHosted: false,
+      });
+
+      const gitlab = initRepositoryInfo(
+        { ...REPOSITORY_INFO_PLACEHOLDER },
+        {
+          ...args,
+          service: 'gitlab',
+          label: 'GitLab',
+          restApiRoot: 'https://gitlab.com/api/v4//',
+          defaultApiRoot: 'https://gitlab.com/api/v4',
+        },
+      );
+
+      expect(gitlab).toMatchObject({
+        repoURL: 'https://gitlab.com/owner/repo',
+        isSelfHosted: false,
+      });
     });
 
     it('should scope the database and the base URLs to the root directory', () => {

@@ -58,6 +58,10 @@ vi.mock('$lib/services/backends/git/services', () => ({
   },
 }));
 
+vi.mock('$lib/services/common/slug/transliterate', () => ({
+  loadTransliterator: vi.fn().mockResolvedValue(undefined),
+}));
+
 // Mock i18n
 vi.mock('@sveltia/i18n', async () =>
   (await import('$lib/test/i18n')).createI18nMock({ locale: 'en' }),
@@ -275,6 +279,59 @@ describe('config/init', () => {
       expect(config?.collections.map((/** @type {any} */ c) => c.name)).toEqual(['posts', 'pages']);
     });
 
+    it('should normalize the template tags without changing the raw config', async () => {
+      const { initCmsConfig } = await import('./init');
+      const { rawCmsConfig } = await import('$lib/services/config');
+      const { validateConfigSchema } = await import('$lib/services/config/schema');
+
+      fetchcmsConfigMock.mockResolvedValue({
+        backend: { name: 'github', repo: 'owner/repo' },
+        media_folder: 'uploads',
+        collections: [
+          {
+            name: 'posts',
+            folder: 'posts',
+            slug: '{{ year }}-{{ title|lower }}',
+            fields: [{ name: 'title', widget: 'string' }],
+          },
+        ],
+      });
+
+      await initCmsConfig();
+
+      const { config } = /** @type {any} */ (vi.mocked(validateConfigSchema).mock.calls[0][0]);
+
+      expect(config.collections[0].slug).toBe('{{year}}-{{title | lower}}');
+      expect(/** @type {any} */ (cmsConfig.current)?.collections[0].slug).toBe(
+        '{{year}}-{{title | lower}}',
+      );
+      expect(/** @type {any} */ (rawCmsConfig).collections[0].slug).toBe(
+        '{{ year }}-{{ title|lower }}',
+      );
+    });
+
+    it('should not let the file config set the prototype of the merged config', async () => {
+      const { initCmsConfig } = await import('./init');
+      const { validateConfigSchema } = await import('$lib/services/config/schema');
+
+      // `JSON.parse()` creates own `__proto__` keys, unlike an object literal
+      const fileConfig = JSON.parse(
+        '{"__proto__":{"polluted":true},"backend":{"__proto__":{"x":1},"name":"github"}}',
+      );
+
+      fetchcmsConfigMock.mockResolvedValue(fileConfig);
+
+      await initCmsConfig(/** @type {any} */ ({ media_folder: 'uploads' }));
+
+      const { config } = /** @type {any} */ (vi.mocked(validateConfigSchema).mock.calls[0][0]);
+
+      expect(Object.getPrototypeOf(config)).toBe(Object.prototype);
+      expect(Object.getPrototypeOf(config.backend)).toBe(Object.prototype);
+      expect(config.polluted).toBeUndefined();
+      expect(config.backend.x).toBeUndefined();
+      expect(config).toEqual({ backend: { name: 'github' }, media_folder: 'uploads' });
+    });
+
     it('should throw error when manual config is not an object', async () => {
       const { initCmsConfig } = await import('./init');
 
@@ -438,6 +495,36 @@ describe('config/init', () => {
       expect(config?.collections?.[2].folder).toBe('docs');
     });
 
+    it('should remove a leading `./` from a collection folder', async () => {
+      const { initCmsConfig } = await import('./init');
+
+      fetchcmsConfigMock.mockResolvedValue({
+        backend: { name: 'github', repo: 'owner/repo' },
+        media_folder: 'uploads',
+        collections: [
+          ...['./', './content/posts', '.hidden'].map((folder, index) => ({
+            name: `posts${index}`,
+            folder,
+            fields: [{ name: 'title', widget: 'string' }],
+          })),
+          {
+            name: 'settings',
+            files: [
+              { name: 'site', file: 'site.yml', fields: [{ name: 'title', widget: 'string' }] },
+            ],
+          },
+        ],
+      });
+
+      await initCmsConfig();
+
+      expect(
+        /** @type {any} */ (cmsConfig.current)?.collections?.map(
+          (/** @type {any} */ { folder }) => folder,
+        ),
+      ).toEqual(['', 'content/posts', '.hidden', undefined]);
+    });
+
     it('should refuse a config with a path outside the root directory', async () => {
       const { initCmsConfig } = await import('./init');
       const { checkRootDirPaths } = await import('$lib/services/config/parser/root-dir');
@@ -489,6 +576,28 @@ describe('config/init', () => {
       await initCmsConfig();
 
       expect(cmsConfigVersion.current).toBe('config-hash-123');
+      // The configuration is serialized as JSON
+      expect(JSON.parse(getHashMock.mock.lastCall?.[0])).toMatchObject(mockConfig);
+    });
+
+    it('should hash a configuration holding a big integer', async () => {
+      const { initCmsConfig } = await import('./init');
+
+      fetchcmsConfigMock.mockResolvedValue({
+        backend: { name: 'github', repo: 'owner/repo' },
+        media_folder: 'uploads',
+        collections: [
+          {
+            name: 'posts',
+            folder: 'posts',
+            fields: [{ name: 'count', widget: 'number', default: 9007199254740993n }],
+          },
+        ],
+      });
+
+      await initCmsConfig();
+
+      expect(getHashMock.mock.lastCall?.[0]).toContain('"default":"9007199254740993"');
     });
 
     it('should handle validation errors', async () => {
@@ -631,5 +740,35 @@ describe('config/init', () => {
 
       consoleSpy.mockRestore();
     });
+
+    it.each([
+      [true, 1],
+      [false, 0],
+    ])(
+      'loads the transliterator when `clean_accents` is %s: %i times',
+      async (cleanAccents, times) => {
+        const { initCmsConfig } = await import('./init');
+        const { loadTransliterator } = await import('$lib/services/common/slug/transliterate');
+
+        fetchcmsConfigMock.mockResolvedValue({
+          backend: { name: 'github', repo: 'owner/repo' },
+          media_folder: 'uploads',
+          slug: { clean_accents: cleanAccents },
+          collections: [
+            {
+              name: 'posts',
+              label: 'Posts',
+              folder: 'posts',
+              fields: [{ name: 'title', widget: 'string' }],
+            },
+          ],
+        });
+
+        await initCmsConfig();
+
+        expect(cmsConfig.current).toBeDefined();
+        expect(loadTransliterator).toHaveBeenCalledTimes(times);
+      },
+    );
   });
 });

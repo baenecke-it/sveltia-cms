@@ -3,7 +3,7 @@
   import { Alert, ConfirmationDialog, Toast } from '@sveltia/ui';
 
   import CascadeDeleteNote from '$lib/components/common/cascade-delete-note.svelte';
-  import { isCommitCancelled } from '$lib/services/backends/commit-prompt';
+  import { runCommit } from '$lib/services/backends/commit-prompt';
   import { getErrorMessage } from '$lib/services/backends/git/shared/errors';
   import { selectedCollection } from '$lib/services/contents/collection';
   import {
@@ -12,12 +12,12 @@
   } from '$lib/services/contents/collection/data';
   import { selectedEntries } from '$lib/services/contents/collection/entries';
   import { listedEntries, listedUnpublishedEntries } from '$lib/services/contents/collection/view';
-  import { getEntryRelativeAssets } from '$lib/services/contents/entry/assets';
+  import { getEntriesRelativeAssets } from '$lib/services/contents/entry/assets';
   import {
     EMPTY_CASCADE_DELETE_PLAN,
     planCascadeDelete,
   } from '$lib/services/contents/entry/relations/cascade/delete';
-  import { isWorkflowEnabled } from '$lib/services/workflow';
+  import { isDiscardableDraft, isWorkflowEnabled } from '$lib/services/workflow';
   import { deleteOrDiscardEntries } from '$lib/services/workflow/delete';
 
   /**
@@ -35,16 +35,27 @@
   let showErrorToast = $state(false);
   let errorMessage = $state('');
 
-  // Deleting an unpublished entry discards the draft instead of committing a deletion, so the two
-  // kinds of entries have to be handled separately
-  const draftEntries = $derived(
-    /** @type {UnpublishedEntry[]} */ (
-      selectedEntries.current.filter((entry) => 'workflow' in entry)
-    ),
-  );
-  const publishedEntries = $derived(
-    /** @type {Entry[]} */ (selectedEntries.current.filter((entry) => !('workflow' in entry))),
-  );
+  // Deleting an unpublished entry that has never been published discards the draft instead of
+  // committing a deletion, so the two kinds of entries have to be handled separately. An entry with
+  // pending changes to a published version, which the list shows in place of that version, is
+  // deleted like a published one, as the entry editor does: discarding its pull request would leave
+  // the published version on the site
+  const { draftEntries, publishedEntries } = $derived.by(() => {
+    /** @type {UnpublishedEntry[]} */
+    const drafts = [];
+    /** @type {Entry[]} */
+    const published = [];
+
+    selectedEntries.current.forEach((entry) => {
+      if (isDiscardableDraft(entry)) {
+        drafts.push(/** @type {UnpublishedEntry} */ (entry));
+      } else {
+        published.push(entry);
+      }
+    });
+
+    return { draftEntries: drafts, publishedEntries: published };
+  });
 
   // What the deletion means for the entries referencing the published ones through Relation fields.
   // Only worked out while the dialog is open: it scans every entry that could hold a reference,
@@ -60,12 +71,15 @@
   // Assets committed alongside an unpublished entry don’t exist on the configured branch yet, so
   // only look at the published entries here
   const publishedEntryAssets = $derived.by(() => {
-    const collectionName = selectedCollection.current?.name;
+    // Looked up for all the entries at once, as finding the assets other entries use as well takes
+    // a pass over the collection. Entries are only selected within a collection, and without one
+    // the helper finds no assets anyway
+    const assetLists = getEntriesRelativeAssets({
+      entries: publishedEntries,
+      collectionName: /** @type {string} */ (selectedCollection.current?.name),
+    });
 
-    return publishedEntries.map((entry) => ({
-      entry,
-      assets: collectionName ? getEntryRelativeAssets({ entry, collectionName }) : [],
-    }));
+    return publishedEntries.map((entry, index) => ({ entry, assets: assetLists[index] }));
   });
   const associatedAssets = $derived(publishedEntryAssets.flatMap(({ assets }) => assets));
 
@@ -74,29 +88,32 @@
    * for it.
    */
   const deleteSelectedEntries = async () => {
-    try {
-      const collection = selectedCollection.current;
+    const collection = selectedCollection.current;
 
-      const toastState = await deleteOrDiscardEntries({
+    const { ok, cancelled, result, error } = await runCommit(() =>
+      deleteOrDiscardEntries({
         drafts: draftEntries,
         items: publishedEntryAssets,
         collection,
-        useWorkflow: isWorkflowEnabled(collection),
-      });
+        // An entry with a pull request stays in it until it’s published or discarded, even if the
+        // collection has opted out of Editorial Workflow since, as in the entry editor
+        useWorkflow:
+          isWorkflowEnabled(collection) || publishedEntries.some((entry) => 'workflow' in entry),
+      }),
+    );
 
-      if (toastState) {
-        contentUpdatesToast.current = { ...UPDATE_TOAST_DEFAULT_STATE, ...toastState };
-      }
-    } catch (/** @type {any} */ ex) {
+    if (!ok) {
       // The user has cancelled the commit at the commit message prompt, which isn’t a failure
-      if (!isCommitCancelled(ex)) {
-        errorMessage = getErrorMessage(ex, 'deleting_entry_failed');
+      if (!cancelled) {
+        errorMessage = getErrorMessage(error, 'deleting_entry_failed');
         showErrorToast = true;
-        // eslint-disable-next-line no-console
-        console.error(ex);
       }
 
       return;
+    }
+
+    if (result) {
+      contentUpdatesToast.current = { ...UPDATE_TOAST_DEFAULT_STATE, ...result };
     }
 
     // Discarding a draft doesn’t change `listedEntries`, which is what normally resets the

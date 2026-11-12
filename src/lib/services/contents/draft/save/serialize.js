@@ -5,7 +5,6 @@ import { TomlDate } from 'smol-toml';
 import { cmsConfig } from '$lib/services/config';
 import { getOrderFieldKey } from '$lib/services/contents/collection/entries/reorder/config';
 import { INTERNAL_PROP_REGEX } from '$lib/services/contents/draft';
-import { getInheritedI18nOption } from '$lib/services/contents/draft/create/proxy.svelte';
 import { createKeyPathList } from '$lib/services/contents/draft/save/key-path';
 import { getAliasesKey, getAliasKeyPaths } from '$lib/services/contents/entry/aliases';
 import {
@@ -15,12 +14,19 @@ import {
   isFieldRequired,
 } from '$lib/services/contents/entry/fields';
 import { getWildcardKeyPathPattern } from '$lib/services/contents/entry/key-paths';
+import { getPermalinkKey } from '$lib/services/contents/entry/permalink';
 import { parseDateTimeConfig } from '$lib/services/contents/fields/date-time/config';
+import { convertMapLists, getMapKeyField } from '$lib/services/contents/fields/list/map';
 import { resolveFileConfig } from '$lib/services/contents/file/config';
 import { TOML_FORMATS } from '$lib/services/contents/file/constants';
-import { isFieldLocalized } from '$lib/services/contents/i18n/fields';
+import { isFieldInLocale } from '$lib/services/contents/i18n/shared-values';
 import { getOrCreate } from '$lib/services/utils/cache';
-import { hasIndexLikeChildKey, isValueEmpty, unflattenKeys } from '$lib/services/utils/object';
+import {
+  hasIndexLikeChildKey,
+  isPlainObject,
+  isValueEmpty,
+  unflattenKeys,
+} from '$lib/services/utils/object';
 
 /**
  * @import {
@@ -51,6 +57,54 @@ const getWildcardKeyPathRegex = (keyPath) =>
     keyPath,
     () => new RegExp(`^(${getWildcardKeyPathPattern(keyPath)})(?:\\.|$)`),
   );
+
+/**
+ * Regular expression matching a key path ending with a numeric segment, capturing the parent key
+ * path.
+ */
+const INDEXED_KEY_PATH_REGEX = /^(.+)\.\d+$/;
+
+/**
+ * Check if the given key path is an array item, e.g. the item of a List field, in the output. A
+ * numeric segment is unflattened into an array index, unless the parent is already an object in
+ * the sorted property map, like a KeyValue field or an Object field with a subfield named like an
+ * index.
+ * @param {string} key Key path.
+ * @param {FlattenedEntryContent} sortedMap Sorted property map.
+ * @returns {boolean} Result.
+ */
+const isArrayItemKeyPath = (key, sortedMap) => {
+  const [, parentKey] = key.match(INDEXED_KEY_PATH_REGEX) ?? [];
+
+  return parentKey !== undefined && !isPlainObject(sortedMap[parentKey]);
+};
+
+/**
+ * Keep the closest array item the given omitted key path belongs to, e.g. `links.0` for
+ * `links.0.label`, by adding an empty object for it unless it already has a value or another
+ * property. Otherwise an item whose subfields are all omitted would leave a hole in the array,
+ * which is written as `null` in JSON and YAML, and dropped in TOML, shifting the other items.
+ * @param {string} key Omitted key path.
+ * @param {FlattenedEntryContent} sortedMap Sorted property map.
+ */
+const keepArrayItem = (key, sortedMap) => {
+  const segments = key.split('.');
+
+  for (let index = segments.length - 1; index > 0; index -= 1) {
+    const itemKey = segments.slice(0, index).join('.');
+
+    if (isArrayItemKeyPath(itemKey, sortedMap)) {
+      if (
+        !Object.hasOwn(sortedMap, itemKey) &&
+        !Object.keys(sortedMap).some((_key) => _key.startsWith(`${itemKey}.`))
+      ) {
+        sortedMap[itemKey] = {};
+      }
+
+      return;
+    }
+  }
+};
 
 /**
  * Move a property name/value from a unsorted property map to a sorted property map.
@@ -105,11 +159,14 @@ export const copyProperty = ({
     }
   }
 
+  // The option omits the empty properties of an object, never the items of an array, which would
+  // leave holes in it
   if (
     omitEmptyOptionalFields &&
     field &&
     !isFieldRequired({ fieldConfig: field, locale }) &&
-    isValueEmpty(value)
+    isValueEmpty(value) &&
+    !isArrayItemKeyPath(key, sortedMap)
   ) {
     const childKeys = Object.keys(unsortedMap).filter((_key) => _key.startsWith(`${key}.`));
 
@@ -123,6 +180,8 @@ export const copyProperty = ({
       childKeys.forEach((_key) => {
         delete unsortedMap[_key];
       });
+
+      keepArrayItem(key, sortedMap);
     }
   } else {
     sortedMap[key] = value;
@@ -163,36 +222,6 @@ const isOpaqueField = (field) =>
  */
 
 /**
- * Check whether the field at the given key path belongs in the locale’s content. Every field does
- * in the default locale, but in another locale, only one that is localized along with all of its
- * ancestors, as the others are left out of that locale’s content.
- * @param {FinalizeContext} ctx Context.
- * @param {string} keyPath Concrete key path of the field.
- * @returns {boolean} Result.
- */
-const isFieldInLocale = ({ locale, defaultLocale, getFieldArgs }, keyPath) => {
-  if (locale === defaultLocale) {
-    return true;
-  }
-
-  const segments = keyPath.split('.');
-
-  // Skip the list item indexes, which aren’t fields of their own, e.g. `items.0` in `items.0.kv`
-  return segments.every((segment, index) => {
-    if (index < segments.length - 1 && /^\d+$/.test(segment)) {
-      return true;
-    }
-
-    const args = { ...getFieldArgs, keyPath: segments.slice(0, index + 1).join('.') };
-    const fieldConfig = getField(args);
-
-    return (
-      !!fieldConfig && isFieldLocalized(getInheritedI18nOption({ fieldConfig, getFieldArgs: args }))
-    );
-  });
-};
-
-/**
  * Copy a KeyValue field’s key-value pairs to the sorted property map.
  * @param {FinalizeContext} ctx Context.
  * @param {string} keyPath Concrete key path of the field.
@@ -227,7 +256,7 @@ const copyKeyValueField = (ctx, keyPath, field) => {
   if (!pairKeyPaths.length) {
     // A field that isn’t in the locale’s content, e.g. one that isn’t translatable in a locale
     // other than the default, doesn’t get the empty object either
-    if (Object.hasOwn(unsortedMap, keyPath) || isFieldInLocale(ctx, keyPath)) {
+    if (Object.hasOwn(unsortedMap, keyPath) || isFieldInLocale({ ...ctx, keyPath })) {
       // Any other value, such as a string where the file doesn’t hold an object, is left as is
       unsortedMap[keyPath] ??= {};
       copyProperty({ ...copyArgs, key: keyPath, field });
@@ -355,15 +384,17 @@ const copyWildcardField = (ctx, keyPath, field) => {
  * enabled.
  * @param {FlattenedEntryContent} args.valueMap Flattened entry content.
  * @param {string} [args.canonicalSlugKey] Property name of a canonical slug.
- * @param {string} [args.aliasesKey] Property name of the entry’s URL aliases. Placed right after
+ * @param {string} [args.permalinkKey] Property name of the entry’s permalink. Placed right after
  * the canonical slug, ahead of all configured fields, when present in the value map.
+ * @param {string} [args.aliasesKey] Property name of the entry’s URL aliases. Placed right after
+ * the permalink, ahead of all configured fields, when present in the value map.
  * @param {string} [args.orderKey] Property name of the entry order field. Placed right after the
  * aliases, ahead of all configured fields, when present in the value map.
  * @param {boolean} [args.isIndexFile] Whether the corresponding entry is the collection’s special
  * index file used specifically in Hugo.
  * @param {boolean} [args.isTomlOutput] Whether the output it TOML format.
  * @returns {RawEntryContent} Unflattened entry content sorted by fields. Output order is: canonical
- * slug → aliases → order → configured fields → remainder.
+ * slug → permalink → aliases → order → configured fields → remainder.
  */
 const finalizeContent = ({
   collectionName,
@@ -373,6 +404,7 @@ const finalizeContent = ({
   defaultLocale,
   valueMap,
   canonicalSlugKey,
+  permalinkKey,
   aliasesKey,
   orderKey,
   isIndexFile = false,
@@ -391,28 +423,21 @@ const finalizeContent = ({
   /** @type {FinalizeContext} */
   const ctx = { locale, defaultLocale, getFieldArgs, unsortedMap, sortedMap, copyArgs };
 
-  // Add the slug first
-  if (canonicalSlugKey && Object.hasOwn(unsortedMap, canonicalSlugKey)) {
-    copyProperty({ ...copyArgs, key: canonicalSlugKey });
-  }
-
-  // Add the URL aliases next so they appear at the top of the output, close to the slug they relate
-  // to. The property normally holds a list, which is flattened into indexed key paths, but copy the
-  // property itself too in case the user stores something else in it
-  if (aliasesKey) {
-    if (Object.hasOwn(unsortedMap, aliasesKey)) {
-      copyProperty({ ...copyArgs, key: aliasesKey });
+  // Add the properties managed by the CMS first, so they appear at the top of the output: the slug,
+  // the permalink and the URL aliases, which relate to it, then the order field. The aliases
+  // normally hold a list, which is flattened into indexed key paths, but the property itself is
+  // copied too in case the user stores something else in it
+  [
+    canonicalSlugKey,
+    permalinkKey,
+    aliasesKey,
+    ...(aliasesKey ? getAliasKeyPaths(unsortedMap, aliasesKey) : []),
+    orderKey,
+  ].forEach((key) => {
+    if (key && Object.hasOwn(unsortedMap, key)) {
+      copyProperty({ ...copyArgs, key });
     }
-
-    getAliasKeyPaths(unsortedMap, aliasesKey).forEach((keyPath) => {
-      copyProperty({ ...copyArgs, key: keyPath });
-    });
-  }
-
-  // Add the order field next so it appears at the top of the output
-  if (orderKey && Object.hasOwn(unsortedMap, orderKey)) {
-    copyProperty({ ...copyArgs, key: orderKey });
-  }
+  });
 
   // Move the listed properties to a new object
   createKeyPathList(fields).forEach((keyPath) => {
@@ -432,6 +457,31 @@ const finalizeContent = ({
     });
 
   return unflattenKeys(sortedMap);
+};
+
+/**
+ * Remove `null` and `undefined` from the given value for TOML output, as TOML has no null. An item
+ * of a list, e.g. an empty optional Number field in a simple list, is dropped, as smol-toml throws
+ * on it. An object property is dropped too: smol-toml skips it in a table but writes an invalid
+ * inline table, e.g. for an object in a nested list.
+ * @param {any} value Value.
+ * @returns {any} Value without `null` and `undefined`. Arrays and plain objects are copied.
+ */
+const removeTomlNulls = (value) => {
+  if (Array.isArray(value)) {
+    return value.filter((item) => item !== null && item !== undefined).map(removeTomlNulls);
+  }
+
+  // Leave class instances, such as a `TomlDate`, as they are
+  if (isPlainObject(value)) {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, val]) => val !== null && val !== undefined)
+        .map(([key, val]) => [key, removeTomlNulls(val)]),
+    );
+  }
+
+  return value;
 };
 
 /**
@@ -459,7 +509,7 @@ export const serializeContent = ({ draft, locale, valueMap, format }) => {
     format ?? resolveFileConfig({ collection, collectionFile, isIndexFile }).format,
   );
 
-  const content = finalizeContent({
+  const finalizedContent = finalizeContent({
     collectionName,
     fileName: collectionFile?.name,
     fields,
@@ -467,16 +517,25 @@ export const serializeContent = ({ draft, locale, valueMap, format }) => {
     defaultLocale,
     valueMap,
     canonicalSlugKey,
+    permalinkKey: getPermalinkKey({ collection, fields }),
     aliasesKey: getAliasesKey({ collection, fields }),
     orderKey: getOrderFieldKey(collection),
     isIndexFile,
     isTomlOutput,
   });
 
+  // Store the List fields with the `map_key_field` option as maps
+  const mappedContent = convertMapLists(finalizedContent, fields, false);
+  const content = isTomlOutput ? removeTomlNulls(mappedContent) : mappedContent;
+
   // Handle a special case: top-level List field. TOML doesn’t support top-level arrays, so we
-  // ignore the `root` option for such cases.
-  if (!isTomlOutput && hasRootField(fields, 'list')) {
-    return content[fields[0].name] ?? [];
+  // ignore the `root` option for such cases, unless the list is stored as a map
+  if (hasRootField(fields, 'list')) {
+    const isMap = !!getMapKeyField(fields[0]);
+
+    if (isMap || !isTomlOutput) {
+      return content[fields[0].name] ?? (isMap ? {} : []);
+    }
   }
 
   // Handle a special case: top-level KeyValue field

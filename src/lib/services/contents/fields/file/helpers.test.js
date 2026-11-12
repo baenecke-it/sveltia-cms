@@ -5,6 +5,7 @@ import { createMockAssetFolder } from '$lib/test/factories';
 import {
   getAssetLibraryFolderMap,
   getDefaultAssetFolder,
+  getFieldAssetFolder,
   getFileDisplayPath,
   getTargetFolderPath,
   getUnsavedFileDisplayPath,
@@ -37,6 +38,7 @@ vi.mock('$lib/services/assets/folders', () => ({
 vi.mock('$lib/services/assets/name', () => ({
   getPendingFileName: vi.fn(() => 'filled.png'),
 }));
+vi.mock('$lib/services/contents/collection', () => ({ getCollection: vi.fn() }));
 vi.mock('$lib/services/contents/draft/slugs', () => ({
   getSlugs: vi.fn(),
 }));
@@ -743,6 +745,29 @@ describe('contents/fields/file/helpers', () => {
     });
   });
 
+  describe('getFieldAssetFolder', () => {
+    it('should return the default folder of the library folder map for the field', () => {
+      const fieldFolder = createMockAssetFolder({
+        collectionName: 'posts',
+        internalPath: 'content/posts/images/banner',
+        publicPath: '/images/banner',
+      });
+
+      vi.mocked(getAssetFolder).mockImplementation((args) =>
+        'typedKeyPath' in args && 'isIndexFile' in args ? fieldFolder : undefined,
+      );
+
+      const result = getFieldAssetFolder({
+        collectionName: 'posts',
+        fileName: undefined,
+        typedKeyPath: 'banner',
+        isIndexFile: false,
+      });
+
+      expect(result).toBe(fieldFolder);
+    });
+  });
+
   describe('getTargetFolderPath', () => {
     describe('when folder is undefined', () => {
       it('should return undefined', () => {
@@ -901,6 +926,38 @@ describe('contents/fields/file/helpers', () => {
         });
 
         expect(result).toBe('content/posts/images');
+      });
+
+      it('should return the folder named after an entry in subfolders', async () => {
+        const { getCollection } = await import('$lib/services/contents/collection');
+
+        vi.mocked(getPathInfo).mockImplementation(
+          (path) => /** @type {any} */ ({ dirname: path.slice(0, path.lastIndexOf('/')) }),
+        );
+        // The `path` option puts the entry in subfolders, so its relative assets are saved to a
+        // folder named after it, next to the entry file
+        vi.mocked(getCollection).mockReturnValue(
+          /** @type {any} */ ({
+            name: 'posts',
+            _type: 'entry',
+            _file: { basePath: 'content/posts', subPath: '{{year}}/{{month}}/{{slug}}' },
+          }),
+        );
+
+        const result = getTargetFolderPath({
+          entry: /** @type {any} */ ({
+            locales: { _default: { path: 'content/posts/2025/06/my-post.md' } },
+          }),
+          folder: /** @type {any} */ ({
+            collectionName: 'posts',
+            entryRelative: true,
+            internalPath: 'content/posts',
+            internalSubPath: '',
+          }),
+        });
+
+        expect(result).toBe('content/posts/2025/06/my-post');
+        expect(getCollection).toHaveBeenCalledWith('posts');
       });
 
       it('should resolve against the repository root for an entry at the root', () => {

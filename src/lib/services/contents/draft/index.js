@@ -1,14 +1,16 @@
-import { isObject } from '@sveltia/utils/object';
+import { isObject, toRaw } from '@sveltia/utils/object';
 import { stripSlashes } from '@sveltia/utils/string';
 import equal from 'fast-deep-equal';
 
+import { getReferencedEditedEntries } from '$lib/services/contents/draft/pending-entries';
 import { getKeysByPrefix } from '$lib/services/contents/entry/key-paths';
+import { INTERNAL_PROP_PREFIX } from '$lib/services/contents/fields/internal-props';
 import { isPairOrderModified } from '$lib/services/contents/fields/key-value/order';
 
 /**
  * Regex to match internal properties added to list items, which should be excluded from output.
  */
-export const INTERNAL_PROP_REGEX = /\.__sc_\w+$/;
+export const INTERNAL_PROP_REGEX = new RegExp(`\\.${INTERNAL_PROP_PREFIX}\\w+$`);
 
 /**
  * Draft properties holding the collection configuration and the entry being edited, which are fixed
@@ -21,10 +23,14 @@ export const STATIC_DRAFT_KEYS = ['collection', 'collectionFile', 'fields', 'ori
 
 /**
  * @import {
+ * AssetFolderInfo,
  * EntryDraft,
+ * EntryDraftValues,
  * FlattenedEntryContent,
  * InternalLocaleCode,
  * LocaleContentMap,
+ * LocaleSlugMap,
+ * LocaleStateMap,
  * } from '$lib/types/private';
  * @import { FieldKeyPath } from '$lib/types/public';
  */
@@ -262,6 +268,53 @@ export const isDraftModified = (draft) => {
     // Internal properties are excluded from the value comparison
     areValuesModified(draft, locales) ||
     // Reordering the pairs of a KeyValue field changes no value, only the order they are saved in
-    isPairOrderModified({ draft, isRealKey, locales })
+    isPairOrderModified({ draft, isRealKey, locales }) ||
+    // An existing entry edited from a Relation field is saved along with the entry, which may
+    // otherwise be left as it was, as long as the entry still refers to it
+    getReferencedEditedEntries(draft).length > 0
   );
 };
+
+/**
+ * Copy the values of the given draft that a backup restores to a plain object. The draft is a
+ * `$state` proxy, which IndexedDB can’t clone, so every part has to be copied. `File` objects are
+ * cloneable as they are.
+ * @param {EntryDraft} draft Draft.
+ * @returns {EntryDraftValues} Values.
+ */
+export const getDraftValues = ({
+  currentLocales = {},
+  currentPath,
+  currentSlugs = {},
+  currentValues = {},
+  files,
+}) => ({
+  currentLocales: /** @type {LocaleStateMap} */ (toRaw(currentLocales)),
+  currentSlugs: /** @type {LocaleSlugMap} */ (toRaw(currentSlugs)),
+  // The folder chosen with the path editor, which only a collection with `meta.path` has
+  ...(currentPath !== undefined ? { currentPath } : {}),
+  currentValues: /** @type {LocaleContentMap} */ (toRaw(currentValues)),
+  files: Object.fromEntries(
+    Object.entries(files).map(
+      ([blobURL, { file, folder, replace, subfolderPath, nameTemplate }]) => [
+        blobURL,
+        {
+          file,
+          folder: folder ? /** @type {AssetFolderInfo} */ (toRaw(folder)) : folder,
+          replace,
+          subfolderPath,
+          // The random values are kept in a `Map`, which a JSON round trip would lose
+          ...(nameTemplate
+            ? {
+                nameTemplate: {
+                  ...nameTemplate,
+                  randomValues: new Map(nameTemplate.randomValues),
+                  dateTimeParts: { ...nameTemplate.dateTimeParts },
+                },
+              }
+            : {}),
+        },
+      ],
+    ),
+  ),
+});

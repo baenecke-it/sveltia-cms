@@ -3,6 +3,7 @@ import equal from 'fast-deep-equal';
 
 import { checkForRemoteChanges } from '$lib/services/backends/refresh';
 import { allEntries } from '$lib/services/contents';
+import { getCommitAuthorName } from '$lib/services/utils/commit-author';
 import { formatDate } from '$lib/services/utils/date';
 
 /**
@@ -23,13 +24,14 @@ import { formatDate } from '$lib/services/utils/date';
  */
 
 /**
- * Compare the draft’s original entry with the one in the store to tell whether the entry has been
- * changed since the draft was opened.
- * @param {Entry} originalEntry Entry the draft was made from.
+ * Compare the version of an entry that edits were started from with the entry as it is now to tell
+ * whether the entry has been changed since. The caller finds the current entry, as where it’s kept
+ * depends on the caller: the configured branch, a pull request or an earlier save of a host entry.
+ * @param {Entry} originalEntry Version the edits were started from.
+ * @param {Entry | undefined} current Entry as it is now, or `undefined` if it has been deleted.
  * @returns {EntryConflict | undefined} The conflict, if any.
  */
-export const compareWithStore = (originalEntry) => {
-  const current = allEntries.current.find(({ id }) => id === originalEntry.id);
+export const compareEntries = (originalEntry, current) => {
   const canOverwrite = originalEntry.arrayIndex === undefined;
 
   if (!current) {
@@ -37,13 +39,26 @@ export const compareWithStore = (originalEntry) => {
   }
 
   // The parsed content is compared rather than the file, so a commit that rewrote the file without
-  // changing what it says doesn’t count. A locale file added or removed does
+  // changing what it says doesn’t count, nor does one that only touched the entry’s assets. A
+  // locale file added or removed does
   if (!equal(current.locales, originalEntry.locales)) {
     return { type: 'modified', entry: current, canOverwrite };
   }
 
   return undefined;
 };
+
+/**
+ * Compare the draft’s original entry with the one on the configured branch to tell whether the
+ * entry has been changed since the draft was opened.
+ * @param {Entry} originalEntry Entry the draft was made from.
+ * @returns {EntryConflict | undefined} The conflict, if any.
+ */
+export const compareWithStore = (originalEntry) =>
+  compareEntries(
+    originalEntry,
+    allEntries.current.find(({ id }) => id === originalEntry.id),
+  );
 
 /**
  * Find out whether saving the draft would overwrite someone else’s change: the repository is
@@ -90,7 +105,7 @@ export const describeConflict = ({ type, entry, canOverwrite }, locale) => {
 
   // A modified entry always comes with its current version
   const { commitAuthor, commitDate } = /** @type {Entry} */ (entry);
-  const name = commitAuthor?.name || commitAuthor?.login || commitAuthor?.email;
+  const name = getCommitAuthorName(commitAuthor);
 
   return {
     // Not every backend reports who made a commit along with the file

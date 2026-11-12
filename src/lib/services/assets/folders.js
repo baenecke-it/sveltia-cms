@@ -3,8 +3,8 @@ import { escapeRegExp } from '@sveltia/utils/string';
 
 import { isInCmsFolder } from '$lib/services/assets/reserved';
 import { lockedBranch } from '$lib/services/backends/branch-access';
-import { ESCAPED_PLACEHOLDER_REGEX } from '$lib/services/common/template/constants';
 import { hasTemplateTags } from '$lib/services/common/template/tags';
+import { getTemplatePattern } from '$lib/services/common/template/utils';
 import { getCustomComponentName } from '$lib/services/contents/fields/rich-text/components/definitions';
 import {
   getLocaleFolderPattern,
@@ -131,10 +131,11 @@ const getEntryRelativePathRegEx = ({ internalPath, internalSubPath, localeFolder
   // A collection at the repository root, e.g. `folder: .`, has an empty folder path, below which
   // every file in the repository would count as its asset. Limit the folder to its media subfolder
   // instead, e.g. `images/` and the folders below it for `media_folder: images`. An entry in a
-  // subfolder of a nested collection keeps its own `images` folder there, which is left out, since
-  // any folder named like that would match. Media stored next to the entries (no subfolder), out of
-  // the repository (`../`) or in a folder named after each entry (a leading tag like `{{slug}}`)
-  // can’t be told apart from the other files in the repository, so the folder matches nothing then
+  // subfolder of a collection with nested entries keeps its own `images` folder there, which is
+  // left out, since any folder named like that would match. Media stored next to the entries (no
+  // subfolder), out of the repository (`../`) or in a folder named after each entry (a leading tag
+  // like `{{slug}}`) can’t be told apart from the other files in the repository, so the folder
+  // matches nothing then
   const subPath = /** @type {string} */ (internalSubPath);
   const [firstSegment] = subPath.split('/');
 
@@ -143,7 +144,7 @@ const getEntryRelativePathRegEx = ({ internalPath, internalSubPath, localeFolder
   }
 
   // A template tag further down matches one folder name, e.g. `images/{{slug}}`
-  const subPathPattern = escapeRegExp(subPath).replace(ESCAPED_PLACEHOLDER_REGEX, '[^/]+');
+  const subPathPattern = getTemplatePattern(subPath, '[^/]+');
 
   return new RegExp(`^${localeMatcher}${subPathPattern}\\/`);
 };
@@ -178,7 +179,7 @@ const getAssetFolderPathCache = memoizeOnSource(
       } else {
         // Pre-compile both regex variants so we don’t recreate them on every path lookup.
         // The internal path can contain template tags like `{{slug}}`, which we normalize to `.+?`.
-        const normalizedPath = escapeRegExp(internalPath).replace(ESCAPED_PLACEHOLDER_REGEX, '.+?');
+        const normalizedPath = getTemplatePattern(internalPath, '.+?');
 
         items.push({
           folder,
@@ -228,6 +229,37 @@ export const getAssetFoldersByPath = (path, { matchSubFolders = true } = {}) => 
     /** @type {string} */ (b.internalPath).localeCompare(/** @type {string} */ (a.internalPath)),
   );
 };
+
+/**
+ * Get a key that identifies an asset folder in a list. The All Assets folder has no internal path,
+ * while the Global Assets folder has an empty one when the global `media_folder` is the root
+ * folder, so the values are serialized as JSON, which tells `undefined` and `''` apart. Every
+ * property that can tell two folders apart is included, e.g. a custom editor component’s folder
+ * can share the internal path of the Global Assets folder with a different public path.
+ * @param {AssetFolderInfo} assetFolder Asset folder.
+ * @returns {string} Key.
+ * @see https://github.com/sveltia/sveltia-cms/issues/1078
+ */
+export const getAssetFolderKey = ({
+  collectionName,
+  fileName,
+  componentName,
+  typedKeyPath,
+  isIndexFile,
+  internalPath,
+  internalSubPath,
+  publicPath,
+}) =>
+  JSON.stringify([
+    collectionName,
+    fileName,
+    componentName,
+    typedKeyPath,
+    isIndexFile,
+    internalPath,
+    internalSubPath,
+    publicPath,
+  ]);
 
 /**
  * Check if asset creation is allowed in the folder. Can’t upload assets if collection assets are

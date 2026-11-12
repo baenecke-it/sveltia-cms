@@ -1,17 +1,16 @@
 <script>
   import { _ } from '@sveltia/i18n';
   import { Icon } from '@sveltia/ui';
-  import { removeVisibilityResolver, waitForVisibility } from '@sveltia/utils/element';
+  import { waitForVisibility } from '@sveltia/utils/element';
   import { onMount, untrack } from 'svelte';
 
-  import { holdViewTransition } from '$lib/services/app/navigation';
   import {
     getAssetBlobURL,
     getAssetThumbnailURL,
-    revokeAssetBlobURLIfNeeded,
     revokeBlobURLIfNeeded,
   } from '$lib/services/assets/info';
-  import { hasPDFThumbnail, THUMBNAIL_KINDS } from '$lib/services/assets/kinds';
+  import { isPDF, THUMBNAIL_KINDS } from '$lib/services/assets/kinds';
+  import { createPreviewLifecycle } from '$lib/services/assets/preview-lifecycle';
   import { requestFlushSync } from '$lib/services/utils/render';
   import { createLatestGuard } from '$lib/services/utils/scheduling';
   import { watchAsync } from '$lib/services/utils/state.svelte';
@@ -47,7 +46,6 @@
 
   /** @type {Props & Record<string, any>} */
   let {
-    /* eslint-disable prefer-const */
     kind,
     loading = 'lazy',
     asset = undefined,
@@ -62,7 +60,6 @@
     holdTransition = false,
     onError = () => undefined,
     ...rest
-    /* eslint-enable prefer-const */
   } = $props();
 
   /** @type {HTMLImageElement | HTMLMediaElement | undefined} */
@@ -111,7 +108,7 @@
   const isThumbnail = $derived(!!asset && !!variant && !controls);
   const isImage = $derived(
     kind === 'image' ||
-      (!!asset && hasPDFThumbnail(asset.name)) ||
+      (!!asset && isPDF(asset.name)) ||
       (isThumbnail && THUMBNAIL_KINDS.includes(kind)),
   );
 
@@ -120,76 +117,8 @@
    * result to that one, so that the latest asset wins when the focus moves quickly.
    */
   const srcRequestGuard = createLatestGuard();
-  /**
-   * The URL the last {@link updateSrc} call has looked up, to be released once it’s been replaced.
-   * Kept outside the reactive graph, as {@link resolvedSrc} is reset when the asset changes.
-   * @type {string | undefined}
-   */
-  let lookedUpSrc = undefined;
-  /**
-   * Object URLs created by this preview. Every `getAssetThumbnailURL()` call returns a URL of its
-   * own, so these have to be released here — `revokeAssetBlobURLIfNeeded()` only knows about the
-   * one URL shared on the asset itself. Kept outside the reactive graph so the cleanup below can
-   * read it after the component is destroyed.
-   * @type {string[]}
-   */
-  const ownedURLs = [];
-  /**
-   * The asset this preview last rendered, kept outside the reactive graph like {@link ownedURLs}.
-   *
-   * The cleanup below runs while the component is being destroyed, and reading the `asset` prop
-   * there would read whatever the parent passes it from — a `$derived` holding the thumbnail of a
-   * collapsed Object field or List item. Svelte answers a read made while an effect is being torn
-   * down by walking that derived’s dependency graph to see whether it has to be recomputed, and
-   * that walk doesn’t memoize: in a deeply nested entry editor, where every level multiplies the
-   * number of paths to the same derived, expanding one field froze the browser for tens of seconds.
-   * The cleanup reads this copy instead, so it touches nothing reactive.
-   * @type {Asset | undefined}
-   * @see https://github.com/sveltia/sveltia-cms/issues/1006
-   */
-  let currentAsset = undefined;
-  /**
-   * Whether the component has been destroyed. A URL lookup that finishes afterwards releases what
-   * it created, as the cleanup below has already run, and reads nothing reactive.
-   */
-  let destroyed = false;
-
-  /**
-   * Function to release the view transition held until the media is loaded, if any.
-   * @type {(() => void) | undefined}
-   */
-  let releaseTransition = undefined;
-
-  /**
-   * Release the view transition held until the media is loaded, if any.
-   */
-  const releaseHeldTransition = () => {
-    releaseTransition?.();
-    releaseTransition = undefined;
-  };
-
-  /**
-   * Remember an object URL this preview created, so that it can be released later.
-   * @param {string | undefined} url Object URL.
-   */
-  const ownURL = (url) => {
-    if (url && !ownedURLs.includes(url)) {
-      ownedURLs.push(url);
-    }
-  };
-
-  /**
-   * Release an object URL this preview created, once no element is displaying it any more.
-   * @param {string | undefined} url Object URL.
-   */
-  const releaseOwnedURL = (url) => {
-    const index = url ? ownedURLs.indexOf(url) : -1;
-
-    if (index > -1) {
-      ownedURLs.splice(index, 1);
-      revokeBlobURLIfNeeded(url);
-    }
-  };
+  /** The object URLs, view transition and waits of this preview, outside the reactive graph. */
+  const lifecycle = createPreviewLifecycle();
 
   /**
    * Update the {@link resolvedSrc} value.
@@ -206,7 +135,11 @@
     const thumbnail = isThumbnail;
 
     if (loading === 'lazy') {
-      await waitForVisibility(mediaElement);
+      if (thumbnail) {
+        await lifecycle.waitForThumbnail(mediaElement);
+      } else {
+        await waitForVisibility(mediaElement);
+      }
     }
 
     /** @type {string | undefined} */
@@ -223,7 +156,7 @@
 
     // The preview was removed while the URL was being looked up. Release it as the cleanup does,
     // which skips a URL another element is displaying
-    if (destroyed) {
+    if (lifecycle.destroyed) {
       revokeBlobURLIfNeeded(url);
 
       return;
@@ -245,18 +178,7 @@
       resolvedSrc = url;
     }
 
-    const previousSrc = lookedUpSrc;
-    const nextSrc = failed ? previousSrc : url;
-
-    lookedUpSrc = nextSrc;
-
-    if (thumbnail) {
-      ownURL(nextSrc);
-    }
-
-    if (previousSrc !== nextSrc) {
-      releaseOwnedURL(previousSrc);
-    }
+    const nextSrc = lifecycle.settleLookup({ url, failed, thumbnail });
 
     if (blurBackground && !blurImageURL && nextSrc) {
       blurImageURL = nextSrc;
@@ -318,7 +240,7 @@
     }
 
     // The media is ready to be shown, so the view transition can capture it
-    releaseHeldTransition();
+    lifecycle.releaseTransition();
 
     // The preview may have been removed while the media was loading
     /* v8 ignore next 3 */
@@ -343,7 +265,7 @@
         const url = await getAssetThumbnailURL(asset, { cacheOnly: true });
 
         // The preview was removed while the thumbnail was being looked up
-        if (destroyed) {
+        if (lifecycle.destroyed) {
           revokeBlobURLIfNeeded(url);
 
           return;
@@ -353,7 +275,7 @@
         // been looked up in `updateSrc`, which may well have finished first, so don’t clear it
         if (url) {
           blurImageURL = url;
-          ownURL(url);
+          lifecycle.ownURL(url);
         }
       })();
     }
@@ -367,27 +289,22 @@
     }
   });
 
+  // The cleanup can’t read the `asset` prop, which may lead to a derived of the parent: reading one
+  // during teardown froze deeply nested editors, so it gets a plain copy instead
   $effect(() => {
-    currentAsset = asset;
+    lifecycle.trackAsset(asset);
   });
 
   $effect(() => {
     if (holdTransition && source) {
-      releaseHeldTransition();
-
-      const { promise, resolve } = /** @type {PromiseWithResolvers<void>} */ (
-        Promise.withResolvers()
-      );
-
-      releaseTransition = resolve;
-      holdViewTransition(promise);
+      lifecycle.holdTransition();
     }
   });
 
   // Notify the parent of a failure, whether the URL lookup or the media element has failed
   $effect(() => {
     if (hasError) {
-      releaseHeldTransition();
+      lifecycle.releaseTransition();
       untrack(() => onError());
     }
   });
@@ -433,29 +350,8 @@
     }
   });
 
-  // eslint-disable-next-line arrow-body-style
-  onMount(() => {
-    // Clean up
-    return () => {
-      destroyed = true;
-      releaseHeldTransition();
-
-      if (currentAsset) {
-        revokeAssetBlobURLIfNeeded(currentAsset);
-      }
-
-      // The revocation is batched into the next frame and skips any URL an element is still
-      // displaying, which is what keeps an image that hasn’t finished decoding — or one that
-      // outlives this component — from losing its source. @see
-      // https://github.com/sveltia/sveltia-cms/issues/944
-      ownedURLs.splice(0).forEach((url) => {
-        revokeBlobURLIfNeeded(url);
-      });
-
-      if (mediaElement) {
-        removeVisibilityResolver(mediaElement);
-      }
-    };
+  onMount(() => () => {
+    lifecycle.destroy(mediaElement);
   });
 </script>
 

@@ -68,6 +68,7 @@ export const replaceTemplateTag = (tag, context) => {
   const {
     type,
     collection,
+    collectionFile,
     content,
     entryFilePath,
     locale,
@@ -112,13 +113,14 @@ export const replaceTemplateTag = (tag, context) => {
     return locale;
   }
 
-  // Handle file path related tags
+  // Handle file path related tags. A collection file can be localized differently from its
+  // collection, e.g. as multiple files, so its own i18n configuration decides the locale suffix
   if (type === 'preview_path' || type === 'media_folder') {
     const filePathValue = handleFilePathTag(
       tag,
       entryFilePath,
       basePath,
-      getFileNameLocaleSuffixes(collection),
+      getFileNameLocaleSuffixes(collectionFile ?? collection),
       fullPathRegEx,
     );
 
@@ -167,7 +169,8 @@ export const replaceTemplatePlaceholder = (placeholder, context) => {
     customStringTransformationRegistry.has(tf.method),
   );
 
-  const isMissingValue = value === undefined;
+  // An empty number field holds `null`, which mustn’t become the word `null`
+  const isMissingValue = value === undefined || value === null;
   const { type, locale } = replaceSubContext;
 
   // A random fallback keeps generated slugs and paths unique, but a `preview_path` is recomputed on
@@ -178,12 +181,13 @@ export const replaceTemplatePlaceholder = (placeholder, context) => {
   // @see https://github.com/sveltia/sveltia-cms/issues/943
   /**
    * Give up on a preview path whose tag resolves to nothing, so the caller can drop the link
-   * instead of building a URL around a value that changes on every render.
-   * @throws {Error} If the template is a `preview_path`.
+   * instead of building a URL around a value that changes on every render. A media library prefix
+   * also needs the real value: a random one would scatter the files in folders of their own.
+   * @throws {Error} If the template is a `preview_path` or a media library prefix.
    */
   const bailOnUnresolvableTag = () => {
-    if (type === 'preview_path') {
-      throw new Error(`Unresolvable template tag in preview path: ${tag}`);
+    if (type === 'preview_path' || type === 'library_prefix') {
+      throw new Error(`Unresolvable template tag: ${tag}`);
     }
   };
 
@@ -216,6 +220,18 @@ export const replaceTemplatePlaceholder = (placeholder, context) => {
   // is kept as is, even if its nested template resolves to nothing
   if (isMissingValue && !hasDefaultTransformation && value === '') {
     return getFallbackValue();
+  }
+
+  // A value stands for a single folder of a media library prefix, so it can’t add path segments.
+  // Unlike a slug, an empty value doesn’t get a random ID
+  if (type === 'library_prefix') {
+    const slug = slugify(sanitizePath(String(value)), {
+      locale,
+      maxLength: Infinity,
+      fallback: false,
+    });
+
+    return slug || getFallbackValue();
   }
 
   // Sanitize path traversal attempts first by removing `.` and `..` segments to prevent writing

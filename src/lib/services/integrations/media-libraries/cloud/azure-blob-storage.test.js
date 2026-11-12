@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { cmsConfig } from '$lib/services/config/state';
 
@@ -352,6 +352,24 @@ describe('integrations/media-libraries/cloud/azure-blob-storage', () => {
       );
     });
 
+    it('should refuse to send the token to a custom endpoint over plain HTTP', async () => {
+      await expect(
+        listBlobs({ ...config, endpoint: 'http://cdn.example.com' }, { apiKey: token }),
+      ).rejects.toThrow('Refusing to send credentials over an insecure connection');
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it('should allow a local emulator endpoint over plain HTTP', async () => {
+      vi.mocked(fetch).mockResolvedValue(new Response(buildListXml([sampleBlob]), { status: 200 }));
+
+      const endpoint = 'http://127.0.0.1:10000/devstoreaccount1';
+
+      expect(await listBlobs({ ...config, endpoint }, { apiKey: token })).toHaveLength(1);
+      expect(fetch).toHaveBeenCalledWith(
+        `${endpoint}/${container}?restype=container&comp=list&maxresults=1000&${token}`,
+      );
+    });
+
     it('should handle multiple blobs', async () => {
       vi.mocked(fetch).mockResolvedValue(
         new Response(buildListXml([sampleBlob, { ...sampleBlob, name: 'second.jpg' }]), {
@@ -556,14 +574,63 @@ describe('integrations/media-libraries/cloud/azure-blob-storage', () => {
       expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('..'), expect.anything());
     });
 
-    it('should fall back to the original file name when it has no file name', async () => {
+    it('should reject a file name that has nothing left once sanitized', async () => {
       const file = new File(['content'], '/', { type: 'image/jpeg' });
 
-      vi.mocked(fetch).mockResolvedValue(new Response('', { status: 201 }));
+      vi.mocked(fetch).mockResolvedValue(new Response(buildListXml([]), { status: 200 }));
 
-      const assets = await uploadBlobs([file], config, { apiKey: token });
+      await expect(uploadBlobs([file], config, { apiKey: token })).rejects.toThrow(
+        'Invalid file name: /',
+      );
+      expect(fetch).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ method: 'PUT' }),
+      );
+    });
 
-      expect(assets[0].fileName).toBe('/');
+    it('should list the folder with a delimiter and rename a file whose name is taken', async () => {
+      const prefixedConfig = { ...config, prefix: 'uploads/' };
+
+      // The service sums up a subfolder in a blob prefix, which isn’t a file
+      const listXml = [
+        '<?xml version="1.0" encoding="utf-8"?>',
+        `<EnumerationResults ContainerName="${container}"><Blobs>`,
+        '<BlobPrefix><Name>uploads/2024/photo.jpg/</Name></BlobPrefix>',
+        '<Blob><Name>uploads/2024/photo.jpg</Name></Blob>',
+        '<Blob><Name>uploads/2024/notes.txt</Name></Blob>',
+        '</Blobs><NextMarker /></EnumerationResults>',
+      ].join('');
+
+      vi.mocked(fetch).mockImplementation(async (_url, init) =>
+        init?.method === 'PUT'
+          ? new Response('', { status: 201 })
+          : new Response(listXml, { status: 200 }),
+      );
+
+      const assets = await uploadBlobs(
+        [
+          new File(['1'], 'photo.jpg', { type: 'image/jpeg' }),
+          new File(['2'], 'photo.jpg', { type: 'image/jpeg' }),
+          new File(['3'], 'beach.jpg', { type: 'image/jpeg' }),
+        ],
+        prefixedConfig,
+        { apiKey: token, dirPath: '2024' },
+      );
+
+      expect(assets.map(({ id }) => id)).toEqual([
+        'uploads/2024/photo-1.jpg',
+        'uploads/2024/photo-2.jpg',
+        'uploads/2024/beach.jpg',
+      ]);
+
+      const listUrl = new URL(String(vi.mocked(fetch).mock.calls[0][0]));
+
+      expect(listUrl.searchParams.get('prefix')).toBe('uploads/2024/');
+      expect(listUrl.searchParams.get('delimiter')).toBe('/');
+      expect(fetch).not.toHaveBeenCalledWith(
+        `${containerURL}/uploads/2024/photo.jpg?${token}`,
+        expect.anything(),
+      );
     });
 
     it('should upload multiple files', async () => {
@@ -577,7 +644,8 @@ describe('integrations/media-libraries/cloud/azure-blob-storage', () => {
       const assets = await uploadBlobs(files, config, { apiKey: token });
 
       expect(assets.map(({ fileName }) => fileName)).toEqual(['first.jpg', 'second.jpg']);
-      expect(fetch).toHaveBeenCalledTimes(2);
+      // A listing of the folder, then an upload for each file
+      expect(fetch).toHaveBeenCalledTimes(3);
     });
 
     it('should return an empty array when there is no file', async () => {
@@ -597,7 +665,9 @@ describe('integrations/media-libraries/cloud/azure-blob-storage', () => {
     it('should throw when the upload fails', async () => {
       const file = new File(['content'], 'test.jpg', { type: 'image/jpeg' });
 
-      vi.mocked(fetch).mockResolvedValue(new Response('AuthorizationFailure', { status: 403 }));
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(new Response(buildListXml([]), { status: 200 }))
+        .mockResolvedValue(new Response('AuthorizationFailure', { status: 403 }));
 
       await expect(uploadBlobs([file], config, { apiKey: token })).rejects.toThrow(
         'Failed to upload file test.jpg: AuthorizationFailure',
@@ -692,6 +762,10 @@ describe('integrations/media-libraries/cloud/azure-blob-storage', () => {
   });
 
   describe('renameBlob', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
     /** @type {any} */
     const asset = {
       id: 'images/my photo.jpg',
@@ -700,20 +774,33 @@ describe('integrations/media-libraries/cloud/azure-blob-storage', () => {
       lastModified: new Date('2024-01-01T00:00:00Z'),
     };
 
+    /**
+     * Get an empty listing of a folder, which is listed before a blob is renamed in it.
+     * @returns {Response} Response.
+     */
+    const createEmptyListing = () =>
+      new Response(
+        '<?xml version="1.0" encoding="utf-8"?><EnumerationResults><Blobs /></EnumerationResults>',
+        { status: 200 },
+      );
+
     it('should copy the blob to the new name and delete the original', async () => {
-      vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 201 }));
+      vi.useFakeTimers({ now: new Date('2025-06-01T12:00:00Z'), toFake: ['Date'] });
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(createEmptyListing())
+        .mockResolvedValue(new Response(null, { status: 201 }));
 
       const result = await renameBlob(asset, 'renamed.jpg', config, { apiKey: token });
 
-      expect(fetch).toHaveBeenCalledTimes(2);
-      expect(fetch).toHaveBeenNthCalledWith(1, `${containerURL}/images/renamed.jpg?${token}`, {
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(fetch).toHaveBeenNthCalledWith(2, `${containerURL}/images/renamed.jpg?${token}`, {
         method: 'PUT',
         headers: {
           'x-ms-blob-type': 'BlockBlob',
           'x-ms-copy-source': `${containerURL}/images/my%20photo.jpg?${token}`,
         },
       });
-      expect(fetch).toHaveBeenNthCalledWith(2, `${containerURL}/images/my%20photo.jpg?${token}`, {
+      expect(fetch).toHaveBeenNthCalledWith(3, `${containerURL}/images/my%20photo.jpg?${token}`, {
         method: 'DELETE',
       });
       expect(result).toEqual(
@@ -721,14 +808,17 @@ describe('integrations/media-libraries/cloud/azure-blob-storage', () => {
           id: 'images/renamed.jpg',
           fileName: 'renamed.jpg',
           size: 1234,
-          lastModified: asset.lastModified,
+          // The copy is a new blob, so it’s been modified just now, not when the source was
+          lastModified: new Date('2025-06-01T12:00:00Z'),
           kind: 'image',
         }),
       );
     });
 
     it('should rename a blob at the container root without metadata', async () => {
-      vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 201 }));
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(createEmptyListing())
+        .mockResolvedValue(new Response(null, { status: 201 }));
 
       const result = await renameBlob(
         { ...asset, id: 'photo.jpg', size: undefined, lastModified: undefined },
@@ -738,13 +828,13 @@ describe('integrations/media-libraries/cloud/azure-blob-storage', () => {
       );
 
       expect(fetch).toHaveBeenNthCalledWith(
-        1,
+        2,
         `${containerURL}/renamed.jpg?${token}`,
         expect.anything(),
       );
       expect(result.id).toBe('renamed.jpg');
       expect(result.size).toBeUndefined();
-      expect(result.lastModified).toBeUndefined();
+      expect(result.lastModified).toBeInstanceOf(Date);
     });
 
     it('should reject when the token is missing', async () => {
@@ -754,23 +844,27 @@ describe('integrations/media-libraries/cloud/azure-blob-storage', () => {
     });
 
     it('should throw and keep the original while an asynchronous copy is pending', async () => {
-      vi.mocked(fetch).mockResolvedValue(
-        new Response(null, { status: 202, headers: { 'x-ms-copy-status': 'pending' } }),
-      );
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(createEmptyListing())
+        .mockResolvedValue(
+          new Response(null, { status: 202, headers: { 'x-ms-copy-status': 'pending' } }),
+        );
 
       await expect(renameBlob(asset, 'renamed.jpg', config, { apiKey: token })).rejects.toThrow(
         'Failed to copy blob images/my photo.jpg: the copy operation is still pending',
       );
-      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(fetch).toHaveBeenCalledTimes(2);
     });
 
     it('should throw and keep the original when the copy fails', async () => {
-      vi.mocked(fetch).mockResolvedValue(new Response('Forbidden', { status: 403 }));
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(createEmptyListing())
+        .mockResolvedValue(new Response('Forbidden', { status: 403 }));
 
       await expect(renameBlob(asset, 'renamed.jpg', config, { apiKey: token })).rejects.toThrow(
         'Failed to copy blob images/my photo.jpg: Forbidden',
       );
-      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(fetch).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -979,7 +1073,8 @@ describe('integrations/media-libraries/cloud/azure-blob-storage', () => {
         dirPath: '2024/summer',
       });
 
-      expect(fetch).toHaveBeenCalledExactlyOnceWith(
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(fetch).toHaveBeenLastCalledWith(
         `${containerURL}/uploads/2024/summer/photo.jpg?${token}`,
         expect.objectContaining({ method: 'PUT' }),
       );

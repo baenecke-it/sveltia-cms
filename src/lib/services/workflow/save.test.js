@@ -1,19 +1,23 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { callEventHooks } from '$lib/services/api/events';
+import { getAssetBlob } from '$lib/services/assets/info';
 import { allAssets } from '$lib/services/assets/state';
 import { backend } from '$lib/services/backends';
 import { promptCommitMessage } from '$lib/services/backends/commit-prompt';
 import { createCommitMessage } from '$lib/services/backends/git/shared/commits';
+import { createFileList } from '$lib/services/backends/process';
 import { getCommitAuthor } from '$lib/services/backends/save';
 import { cmsConfig } from '$lib/services/config';
 import { allEntries } from '$lib/services/contents';
 import { getCollection } from '$lib/services/contents/collection';
+import { resolveCacheDB } from '$lib/services/contents/draft/save/file-changes';
 import {
   buildCascadeDeleteChanges,
   planCascadeDelete,
 } from '$lib/services/contents/entry/relations/cascade/delete';
 import { refreshProductionSHA } from '$lib/services/deployments/resolve';
+import { user } from '$lib/services/user/account.svelte';
 import {
   getUnpublishedEntryByBranch,
   publishingBranches,
@@ -26,16 +30,21 @@ import {
   deleteWorkflowEntry,
   discardWorkflowEntries,
   discardWorkflowEntry,
+  publishReviewedEntry,
   publishWorkflowEntry,
   removeUnpublishedEntry,
   saveWorkflowChanges,
   updateWorkflowStatus,
   upsertUnpublishedEntry,
 } from '$lib/services/workflow/save';
-import { verifyMergeState } from '$lib/services/workflow/verify';
+import { checkReviewedHead, verifyMergeState } from '$lib/services/workflow/verify';
 
 vi.mock('$lib/services/api/events');
+vi.mock('$lib/services/assets/info', () => ({ getAssetBlob: vi.fn() }));
 vi.mock('$lib/services/backends', () => ({ backend: { current: undefined } }));
+vi.mock('$lib/services/backends/process', () => ({
+  createFileList: vi.fn(() => ({ entryFiles: [], assetFiles: [] })),
+}));
 vi.mock('$lib/services/contents/collection', () => ({
   getCollection: vi.fn(() => ({ name: 'posts', _type: 'entry' })),
 }));
@@ -72,14 +81,20 @@ vi.mock('$lib/services/backends/commit-prompt', () => ({
 }));
 vi.mock('$lib/services/backends/git/shared/commits');
 vi.mock('$lib/services/backends/save');
+vi.mock('$lib/services/contents/draft/save/file-changes', () => ({ resolveCacheDB: vi.fn() }));
 vi.mock('$lib/services/deployments/resolve');
 vi.mock('$lib/services/workflow/deploy');
-vi.mock('$lib/services/workflow/verify', () => ({ verifyMergeState: vi.fn() }));
+vi.mock('$lib/services/workflow/verify', () => ({
+  checkReviewedHead: vi.fn(),
+  verifyMergeState: vi.fn(),
+}));
 
 const workflowService = {
   fetchPullRequests: vi.fn(),
   savePullRequest: vi.fn(),
   updateStatus: vi.fn(),
+  approve: vi.fn(),
+  withdrawApproval: vi.fn(),
   /** The pull request as read right before the merge. */
   fetchMergeState: vi.fn(async () => ({
     headSHA: 'abc',
@@ -104,10 +119,26 @@ const createEntry = (branch, status = 'draft') => ({
   subPath: 'hello',
   locales: { _default: { slug: 'hello', path: 'content/posts/hello.md', content: {} } },
   workflow: {
-    pullRequest: { branch, number: 1, status },
+    pullRequest: { branch, number: 1, files: [], status },
     status,
     collectionName: 'posts',
     fileName: undefined,
+  },
+});
+
+/**
+ * Create a new entry of another collection riding along in a pull request.
+ * @param {string} slug Slug.
+ * @param {string} [title] Title.
+ * @returns {any} Companion entry.
+ */
+const createCompanion = (slug, title = slug) => ({
+  collectionName: 'sections',
+  entry: {
+    id: `section-${slug}`,
+    slug,
+    subPath: slug,
+    locales: { _default: { slug, path: `content/sections/${slug}.md`, content: { title } } },
   },
 });
 
@@ -180,7 +211,7 @@ describe('workflow/save', () => {
       };
       workflowService.savePullRequest.mockResolvedValue({
         commit: { sha: 'abc', date: new Date('2026-01-01'), files: {} },
-        pullRequest: { branch: 'cms/apps/site/posts/hello', number: 1, status: 'draft' },
+        pullRequest: { branch: 'cms/apps/site/posts/hello', number: 1, files: [], status: 'draft' },
       });
 
       await saveWorkflowChanges(args);
@@ -202,7 +233,7 @@ describe('workflow/save', () => {
       }));
       workflowService.savePullRequest.mockResolvedValue({
         commit: { sha: 'abc', date: new Date('2026-01-01'), files: {} },
-        pullRequest: { branch: 'cms/posts/hello', number: 1, status: 'draft' },
+        pullRequest: { branch: 'cms/posts/hello', number: 1, files: [], status: 'draft' },
       });
 
       await saveWorkflowChanges(args);
@@ -231,7 +262,7 @@ describe('workflow/save', () => {
           date: new Date('2026-01-01'),
           files: { 'static/img.png': { sha: 'blob-sha' } },
         },
-        pullRequest: { branch: 'cms/posts/hello', number: 1, status: 'draft' },
+        pullRequest: { branch: 'cms/posts/hello', number: 1, files: [], status: 'draft' },
       });
 
       allAssets.current = [
@@ -266,7 +297,7 @@ describe('workflow/save', () => {
     test('falls back to the locally computed asset SHA', async () => {
       workflowService.savePullRequest.mockResolvedValue({
         commit: { sha: 'abc', date: new Date('2026-01-01'), files: {} },
-        pullRequest: { branch: 'cms/posts/hello', number: 1, status: 'draft' },
+        pullRequest: { branch: 'cms/posts/hello', number: 1, files: [], status: 'draft' },
       });
 
       const results = await saveWorkflowChanges({
@@ -277,8 +308,90 @@ describe('workflow/save', () => {
       expect(results.savedAssets[0].sha).toBe('local');
     });
 
+    test('records the files of the commit on the pull request until it’s read again', async () => {
+      // A publish right after the save checks the files against what the commit wrote
+      const image = new File(['png'], 'image.png');
+
+      workflowService.savePullRequest.mockResolvedValue({
+        commit: {
+          sha: 'new',
+          date: new Date('2026-01-01'),
+          files: {
+            'content/posts/hello-world.md': { sha: 'entry-sha' },
+            'content/pages/home.md': { sha: 'home-sha' },
+            'static/image.png': { sha: 'image-sha' },
+          },
+        },
+        pullRequest: {
+          branch: 'cms/posts/hello',
+          number: 1,
+          status: 'draft',
+          headSHA: 'old',
+          files: [
+            {
+              path: 'content/posts/hello.md',
+              sha: 'old-sha',
+              size: 5,
+              text: 'hello',
+              deleted: false,
+            },
+            { path: 'static/kept.png', sha: 'kept-sha', size: 3, deleted: false },
+          ],
+        },
+      });
+
+      const results = await saveWorkflowChanges({
+        ...args,
+        changes: [
+          {
+            action: 'move',
+            path: 'content/posts/hello-world.md',
+            previousPath: 'content/posts/hello.md',
+            data: 'hello world',
+          },
+          { action: 'update', path: 'content/pages/home.md', data: 'home' },
+          { action: 'create', path: 'static/image.png', data: image },
+          { action: 'delete', path: 'static/old.png' },
+        ],
+      });
+
+      expect(/** @type {any} */ (results.savedEntries[0]).workflow.pullRequest).toMatchObject({
+        headSHA: 'new',
+        files: [
+          { path: 'content/posts/hello.md', sha: '', size: 0, deleted: true },
+          { path: 'static/kept.png', sha: 'kept-sha', size: 3, deleted: false },
+          {
+            path: 'content/posts/hello-world.md',
+            sha: 'entry-sha',
+            size: 11,
+            text: 'hello world',
+            deleted: false,
+          },
+          { path: 'content/pages/home.md', sha: 'home-sha', size: 4, text: 'home', deleted: false },
+          { path: 'static/image.png', sha: 'image-sha', size: 3, text: undefined, deleted: false },
+          { path: 'static/old.png', sha: '', size: 0, deleted: true },
+        ],
+      });
+    });
+
+    test('records a file the commit has no ID for with an empty one', async () => {
+      workflowService.savePullRequest.mockResolvedValue({
+        commit: { sha: 'new', date: new Date('2026-01-01'), files: {} },
+        pullRequest: { branch: 'cms/posts/hello', number: 1, status: 'draft', files: [] },
+      });
+
+      const results = await saveWorkflowChanges({
+        ...args,
+        changes: [{ action: 'create', path: 'static/image.png', data: undefined }],
+      });
+
+      expect(/** @type {any} */ (results.savedEntries[0]).workflow.pullRequest.files).toEqual([
+        { path: 'static/image.png', sha: '', size: 0, text: undefined, deleted: false },
+      ]);
+    });
+
     test('creates a pull request on the first save', async () => {
-      const pullRequest = { branch: 'cms/posts/hello', number: 1, status: 'draft' };
+      const pullRequest = { branch: 'cms/posts/hello', number: 1, files: [], status: 'draft' };
 
       workflowService.savePullRequest.mockResolvedValue({
         commit: { sha: 'abc', date: new Date('2026-01-01'), files: {} },
@@ -298,7 +411,11 @@ describe('workflow/save', () => {
       // The head commit is taken from the commit results, so the deploy preview lookup points at
       // the build for this save rather than the previous one
       expect(/** @type {any} */ (results.savedEntries[0]).workflow).toEqual({
-        pullRequest: { ...pullRequest, headSHA: 'abc' },
+        pullRequest: {
+          ...pullRequest,
+          headSHA: 'abc',
+          files: [{ path: 'content/posts/hello.md', sha: '', size: 0, text: '', deleted: false }],
+        },
         status: 'draft',
         collectionName: 'posts',
         fileName: undefined,
@@ -343,7 +460,7 @@ describe('workflow/save', () => {
       workflowService.savePullRequest.mockImplementation(
         async (/** @type {any} */ { branch, status }) => ({
           commit: { sha: 'abc', date: new Date('2026-01-01'), files: {} },
-          pullRequest: { branch, number: 1, status },
+          pullRequest: { branch, number: 1, files: [], status },
         }),
       );
 
@@ -454,7 +571,7 @@ describe('workflow/save', () => {
     test('starts a new pull request when the entry has no branch yet', async () => {
       workflowService.savePullRequest.mockResolvedValue({
         commit: { sha: 'abc', date: new Date('2026-01-01'), files: {} },
-        pullRequest: { branch: 'cms/posts/hello', number: 1, status: 'draft' },
+        pullRequest: { branch: 'cms/posts/hello', number: 1, files: [], status: 'draft' },
       });
 
       // A published entry carries no workflow information
@@ -489,6 +606,56 @@ describe('workflow/save', () => {
       );
 
       expect(results.savedEntries[0].id).toBe(existing.id);
+    });
+
+    test('records the new entries of other collections committed along with the entry', async () => {
+      const guides = createCompanion('guides');
+
+      workflowService.savePullRequest.mockResolvedValue({
+        commit: { sha: 'abc', date: new Date('2026-01-01'), files: {} },
+        pullRequest: { branch: 'cms/posts/hello', number: 1, files: [], status: 'draft' },
+      });
+
+      const results = await saveWorkflowChanges({ ...args, companions: [guides] });
+
+      expect(/** @type {any} */ (results.savedEntries[0]).workflow.companions).toEqual([guides]);
+    });
+
+    test('keeps the new entries an earlier save has committed to the pull request', async () => {
+      const existing = createEntry('cms/posts/hello');
+      const guides = createCompanion('guides');
+      const help = createCompanion('help');
+
+      existing.workflow.companions = [guides, help];
+      upsertUnpublishedEntry(existing);
+
+      workflowService.savePullRequest.mockResolvedValue({
+        commit: { sha: 'def', date: new Date('2026-01-02'), files: {} },
+        pullRequest: existing.workflow.pullRequest,
+      });
+
+      const results = await saveWorkflowChanges({ ...args, originalEntry: existing });
+
+      expect(/** @type {any} */ (results.savedEntries[0]).workflow.companions).toEqual([
+        guides,
+        help,
+      ]);
+
+      // An entry committed again replaces its earlier version
+      const updatedGuides = createCompanion('guides', 'Guides');
+      const faq = createCompanion('faq');
+
+      const resaved = await saveWorkflowChanges({
+        ...args,
+        originalEntry: existing,
+        companions: [updatedGuides, faq],
+      });
+
+      expect(/** @type {any} */ (resaved.savedEntries[0]).workflow.companions).toEqual([
+        help,
+        updatedGuides,
+        faq,
+      ]);
     });
 
     test('throws when the backend doesn’t support the feature', async () => {
@@ -592,6 +759,157 @@ describe('workflow/save', () => {
       expect(trackDeployingEntry).not.toHaveBeenCalled();
     });
 
+    describe('approval', () => {
+      /** The colleague who opened the pull request. */
+      const colleague = { name: 'Alex', email: 'alex@example.com', login: 'alex' };
+
+      /**
+       * Create an unpublished entry whose pull request a colleague opened.
+       * @param {string} status Workflow status.
+       * @returns {any} Unpublished entry.
+       */
+      const createColleagueEntry = (status) => {
+        const entry = createEntry('cms/posts/hello', status);
+
+        Object.assign(entry.workflow.pullRequest, { author: colleague, headSHA: 'abc' });
+        upsertUnpublishedEntry(entry);
+
+        return entry;
+      };
+
+      beforeEach(() => {
+        user.account = /** @type {any} */ ({ backendName: 'github', login: 'me' });
+        workflowService.updateStatus.mockImplementation(async (pullRequest, status) => ({
+          ...pullRequest,
+          status,
+        }));
+      });
+
+      afterEach(() => {
+        user.account = undefined;
+      });
+
+      test.each(['draft', 'pending_review'])(
+        'approves the pull request moved from %s to pending_publish',
+        async (status) => {
+          const entry = createColleagueEntry(status);
+
+          await updateWorkflowStatus(entry, 'pending_publish');
+
+          expect(workflowService.approve).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({ number: 1, headSHA: 'abc', status: 'pending_publish' }),
+          );
+          // The pull request is out of the draft state by the time it’s approved
+          expect(workflowService.updateStatus).toHaveBeenCalledBefore(workflowService.approve);
+        },
+      );
+
+      test.each(['draft', 'pending_review'])(
+        'withdraws the approval when the pull request moves from pending_publish to %s',
+        async (status) => {
+          await updateWorkflowStatus(
+            createColleagueEntry('pending_publish'),
+            /** @type {any} */ (status),
+          );
+
+          expect(workflowService.withdrawApproval).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({ number: 1, files: [], status }),
+          );
+          expect(workflowService.approve).not.toHaveBeenCalled();
+        },
+      );
+
+      test.each([
+        ['draft', 'pending_review'],
+        ['pending_review', 'draft'],
+        ['pending_deletion', 'pending_publish'],
+      ])('reviews nothing when the pull request moves from %s to %s', async (from, to) => {
+        await updateWorkflowStatus(createColleagueEntry(from), /** @type {any} */ (to));
+
+        expect(workflowService.approve).not.toHaveBeenCalled();
+        expect(workflowService.withdrawApproval).not.toHaveBeenCalled();
+      });
+
+      test('doesn’t withdraw an approval of the user’s own pull request', async () => {
+        const entry = createColleagueEntry('pending_publish');
+
+        entry.workflow.pullRequest.author = { ...colleague, login: 'me' };
+        await updateWorkflowStatus(entry, 'pending_review');
+
+        expect(workflowService.withdrawApproval).not.toHaveBeenCalled();
+      });
+
+      test('keeps the status change when the withdrawal fails', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const error = new Error('Must have admin rights');
+
+        workflowService.withdrawApproval.mockRejectedValueOnce(error);
+
+        const updated = await updateWorkflowStatus(
+          createColleagueEntry('pending_publish'),
+          'pending_review',
+        );
+
+        expect(updated.workflow.status).toBe('pending_review');
+        expect(warn).toHaveBeenCalledWith(
+          'Failed to withdraw the approval of the pull request.',
+          error,
+        );
+        warn.mockRestore();
+      });
+
+      test('doesn’t approve the user’s own pull request', async () => {
+        const entry = createColleagueEntry('pending_review');
+
+        entry.workflow.pullRequest.author = { ...colleague, login: 'me' };
+        await updateWorkflowStatus(entry, 'pending_publish');
+
+        expect(workflowService.approve).not.toHaveBeenCalled();
+      });
+
+      test('approves a pull request whose author is unknown', async () => {
+        const entry = createColleagueEntry('pending_review');
+
+        delete entry.workflow.pullRequest.author;
+        await updateWorkflowStatus(entry, 'pending_publish');
+
+        expect(workflowService.approve).toHaveBeenCalledOnce();
+      });
+
+      test('doesn’t approve with Open Authoring', async () => {
+        forkedRepository.current = /** @type {any} */ ({ owner: 'me', repo: 'repo' });
+        await updateWorkflowStatus(createColleagueEntry('pending_review'), 'pending_publish');
+
+        expect(workflowService.approve).not.toHaveBeenCalled();
+      });
+
+      test('doesn’t approve a branch without a pull request', async () => {
+        const entry = createColleagueEntry('pending_review');
+
+        delete entry.workflow.pullRequest.number;
+        await updateWorkflowStatus(entry, 'pending_publish');
+
+        expect(workflowService.approve).not.toHaveBeenCalled();
+      });
+
+      test('keeps the status change when the approval fails', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        const error = new Error('Can not approve');
+
+        workflowService.approve.mockRejectedValueOnce(error);
+
+        const updated = await updateWorkflowStatus(
+          createColleagueEntry('pending_review'),
+          'pending_publish',
+        );
+
+        expect(updated.workflow.status).toBe('pending_publish');
+        expect(getUnpublishedEntryByBranch('cms/posts/hello')).toBe(updated);
+        expect(warn).toHaveBeenCalledWith('Failed to approve the pull request.', error);
+        warn.mockRestore();
+      });
+    });
+
     test('keeps the entry in place rather than moving it to the end', async () => {
       const first = createEntry('cms/posts/a');
       const second = createEntry('cms/posts/b');
@@ -604,6 +922,56 @@ describe('workflow/save', () => {
       expect(unpublishedEntries.current.map((/** @type {any} */ e) => e.id)).toEqual([
         'cms/posts/a',
         'cms/posts/b',
+      ]);
+    });
+  });
+
+  describe('publishReviewedEntry', () => {
+    test('publishes the entry once it’s checked to be the reviewed version', async () => {
+      const entry = createEntry('cms/posts/hello', 'pending_publish');
+      const reviewed = createEntry('cms/posts/hello', 'pending_publish');
+
+      entry.workflow.pullRequest.headSHA = 'abc';
+      reviewed.workflow.pullRequest.headSHA = 'abc';
+      upsertUnpublishedEntry(entry);
+
+      await publishReviewedEntry(entry, reviewed);
+
+      expect(checkReviewedHead).toHaveBeenCalledWith(entry, 'abc');
+      expect(workflowService.publish).toHaveBeenCalledWith(
+        expect.objectContaining({ branch: 'cms/posts/hello', headSHA: 'abc' }),
+      );
+    });
+
+    test('publishes nothing when the entry isn’t the reviewed version', async () => {
+      const entry = createEntry('cms/posts/hello', 'pending_publish');
+      const reviewed = createEntry('cms/posts/hello', 'pending_publish');
+      const error = new Error('publish_refused');
+
+      entry.workflow.pullRequest.headSHA = 'new';
+      reviewed.workflow.pullRequest.headSHA = 'reviewed';
+      upsertUnpublishedEntry(entry);
+      vi.mocked(checkReviewedHead).mockImplementationOnce(() => {
+        throw error;
+      });
+
+      await expect(publishReviewedEntry(entry, reviewed)).rejects.toBe(error);
+      expect(checkReviewedHead).toHaveBeenCalledWith(entry, 'reviewed');
+      expect(workflowService.publish).not.toHaveBeenCalled();
+    });
+
+    test('checks against no head when the reviewed version has no pull request', async () => {
+      const entry = createEntry('cms/posts/hello', 'pending_publish');
+      const { workflow: _workflow, ...published } = createEntry('cms/posts/hello');
+
+      upsertUnpublishedEntry(entry);
+
+      await publishReviewedEntry(entry, published);
+      await publishReviewedEntry(entry, undefined);
+
+      expect(vi.mocked(checkReviewedHead).mock.calls).toEqual([
+        [entry, undefined],
+        [entry, undefined],
       ]);
     });
   });
@@ -649,6 +1017,32 @@ describe('workflow/save', () => {
       // The entry is listed as on its way to the site, once the branch head has been refreshed
       expect(refreshProductionSHA).toHaveBeenCalledBefore(vi.mocked(trackDeployingEntry));
       expect(trackDeployingEntry).toHaveBeenCalledWith(entry);
+    });
+
+    test('publishes the new entries riding along in the pull request with the entry', async () => {
+      const entry = createEntry('cms/posts/hello', 'pending_publish');
+      const guides = createCompanion('guides');
+
+      entry.workflow.companions = [guides];
+      upsertUnpublishedEntry(entry);
+
+      allEntries.current = [
+        /** @type {any} */ ({
+          id: 'other',
+          slug: 'other',
+          subPath: 'other',
+          locales: { _default: { slug: 'other', path: 'content/sections/other.md', content: {} } },
+        }),
+      ];
+
+      await publishWorkflowEntry(entry);
+
+      expect(allEntries.current.map((/** @type {any} */ e) => e.id)).toEqual([
+        'other',
+        entry.id,
+        guides.entry.id,
+      ]);
+      expect(allEntries.current.at(-1)).toBe(guides.entry);
     });
 
     test('marks a draft pull request ready before merging it', async () => {
@@ -886,7 +1280,7 @@ describe('workflow/save', () => {
       // A new pull request opens at the status it was asked for; an existing one is returned as is
       workflowService.savePullRequest.mockImplementation(
         async (/** @type {any} */ { status, pullRequest }) => ({
-          pullRequest: pullRequest ?? { branch: 'cms/posts/hello', number: 7, status },
+          pullRequest: pullRequest ?? { branch: 'cms/posts/hello', number: 7, files: [], status },
           commit: { sha: 'abc', date: new Date('2026-01-01'), files: {} },
         }),
       );
@@ -1004,7 +1398,7 @@ describe('workflow/save', () => {
         savingEntries: [target.entry],
       });
 
-      await deleteWorkflowEntry(entry, collection, undefined);
+      const deleted = await deleteWorkflowEntry(entry, collection, undefined);
 
       expect(planCascadeDelete).toHaveBeenCalledWith({
         collection,
@@ -1012,6 +1406,15 @@ describe('workflow/save', () => {
         entries: [entry],
       });
       expect(buildCascadeDeleteChanges).toHaveBeenCalledWith({ targets: [target] });
+      // The rewrite is recorded on the pull request, so publishing right away can check it
+      expect(/** @type {any} */ (deleted).workflow.pullRequest).toMatchObject({
+        headSHA: 'abc',
+        files: [
+          { path: 'content/posts/hello.md', deleted: true },
+          { path: 'content/posts/ja/hello.md', deleted: true },
+          { path: 'content/posts/post-1.md', text: 'tag: ""', deleted: false },
+        ],
+      });
       // Once the removal lands, no reference is left dangling
       expect(workflowService.savePullRequest).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1115,6 +1518,305 @@ describe('workflow/save', () => {
 
       // The entry list matches the removal against where the entry sits on the configured branch
       expect(entry.workflow.previousPaths).toEqual(['content/posts/hello.md']);
+    });
+
+    test('takes the new entries riding along in a reused pull request off its branch', async () => {
+      // They have never been published, so the removal would otherwise publish them
+      const pending = createEntry('cms/posts/hello');
+
+      pending.workflow.companions = [createCompanion('guides')];
+      upsertUnpublishedEntry(pending);
+
+      const entry = await deleteWorkflowEntry(createPublishedEntry(), collection, undefined);
+
+      expect(workflowService.savePullRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          changes: [
+            { action: 'delete', slug: 'hello', path: 'content/posts/hello.md' },
+            { action: 'delete', slug: 'hello', path: 'content/posts/ja/hello.md' },
+            { action: 'delete', slug: 'hello', path: 'content/sections/guides.md' },
+          ],
+        }),
+      );
+      expect(entry.workflow.companions).toBeUndefined();
+    });
+
+    test('puts the existing entries changed in a reused pull request back as published', async () => {
+      // They’re published entries, so taking them off the branch would delete them from the site
+      // @see https://github.com/sveltia/sveltia-cms/issues/1129
+      const pending = createEntry('cms/posts/hello');
+
+      /** @type {Record<string, string>} */
+      const publishedTexts = {
+        'content/authors/ada.md': 'name: Ada',
+        'content/authors/ja/ada.md': 'name: エイダ',
+      };
+
+      allEntries.current = [
+        /** @type {any} */ ({
+          id: 'ada',
+          slug: 'ada',
+          subPath: 'ada',
+          locales: {
+            en: { path: 'content/authors/ada.md' },
+            ja: { path: 'content/authors/ja/ada.md' },
+            de: { path: 'content/authors/de/ada.md' },
+          },
+        }),
+      ];
+
+      pending.workflow.companions = [
+        createCompanion('guides'),
+        {
+          collectionName: 'authors',
+          entry: {
+            id: 'ada',
+            slug: 'ada',
+            subPath: 'ada',
+            // Japanese turned off, French turned on, German left alone
+            locales: {
+              en: { path: 'content/authors/ada.md' },
+              fr: { path: 'content/authors/fr/ada.md' },
+              de: { path: 'content/authors/de/ada.md' },
+            },
+          },
+          edited: true,
+        },
+        {
+          collectionName: 'authors',
+          // Deleted from the configured branch since, so there’s nothing to put back
+          entry: { id: 'alan', slug: 'alan', subPath: 'alan', locales: {} },
+          edited: true,
+        },
+      ];
+      pending.workflow.pullRequest.files = [
+        { path: 'content/sections/guides.md' },
+        { path: 'content/authors/ada.md' },
+        { path: 'content/authors/ja/ada.md', deleted: true },
+        { path: 'content/authors/fr/ada.md' },
+      ];
+      upsertUnpublishedEntry(pending);
+      vi.mocked(resolveCacheDB).mockReturnValue(
+        /** @type {any} */ ({ get: vi.fn(async (path) => ({ text: publishedTexts[path] })) }),
+      );
+
+      await deleteWorkflowEntry(createPublishedEntry(), collection, undefined);
+
+      expect(workflowService.savePullRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          changes: [
+            { action: 'delete', slug: 'hello', path: 'content/posts/hello.md' },
+            { action: 'delete', slug: 'hello', path: 'content/posts/ja/hello.md' },
+            { action: 'delete', slug: 'hello', path: 'content/sections/guides.md' },
+            {
+              action: 'update',
+              slug: 'hello',
+              path: 'content/authors/ada.md',
+              data: 'name: Ada',
+            },
+            { action: 'delete', slug: 'hello', path: 'content/authors/fr/ada.md' },
+            {
+              action: 'create',
+              slug: 'hello',
+              path: 'content/authors/ja/ada.md',
+              data: 'name: エイダ',
+            },
+          ],
+        }),
+      );
+    });
+
+    test('leaves a changed entry to the reference rewrite of the deletion', async () => {
+      // The rewrite is made from the configured branch, so putting the entry back first would
+      // only write the same file twice in the commit
+      const pending = createEntry('cms/posts/hello');
+      const rewrite = { action: 'update', slug: 'ada', path: 'content/authors/ada.md', data: 'x' };
+
+      allEntries.current = [
+        /** @type {any} */ ({ id: 'ada', locales: { en: { path: 'content/authors/ada.md' } } }),
+      ];
+      pending.workflow.companions = [
+        {
+          collectionName: 'authors',
+          entry: { id: 'ada', locales: { en: { path: 'content/authors/ada.md' } } },
+          edited: true,
+        },
+      ];
+      pending.workflow.pullRequest.files = [{ path: 'content/authors/ada.md' }];
+      upsertUnpublishedEntry(pending);
+      vi.mocked(resolveCacheDB).mockReturnValue(
+        /** @type {any} */ ({ get: vi.fn(async () => ({ text: 'name: Ada' })) }),
+      );
+      vi.mocked(buildCascadeDeleteChanges).mockResolvedValue(
+        /** @type {any} */ ({ changes: [rewrite], savingEntries: [] }),
+      );
+
+      await deleteWorkflowEntry(createPublishedEntry(), collection, undefined);
+
+      expect(workflowService.savePullRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          changes: [
+            { action: 'delete', slug: 'hello', path: 'content/posts/hello.md' },
+            { action: 'delete', slug: 'hello', path: 'content/posts/ja/hello.md' },
+            rewrite,
+          ],
+        }),
+      );
+    });
+
+    test('refuses to delete when a changed entry can’t be put back as published', async () => {
+      const pending = createEntry('cms/posts/hello');
+
+      allEntries.current = [
+        /** @type {any} */ ({ id: 'ada', locales: { en: { path: 'content/authors/ada.md' } } }),
+      ];
+      pending.workflow.companions = [
+        {
+          collectionName: 'authors',
+          entry: { id: 'ada', locales: { en: { path: 'content/authors/ada.md' } } },
+          edited: true,
+        },
+      ];
+      pending.workflow.pullRequest.files = [{ path: 'content/authors/ada.md' }];
+      upsertUnpublishedEntry(pending);
+      vi.mocked(resolveCacheDB).mockReturnValue(undefined);
+
+      await expect(
+        deleteWorkflowEntry(createPublishedEntry(), collection, undefined),
+      ).rejects.toThrow('The published version of content/authors/ada.md could not be found.');
+      expect(workflowService.savePullRequest).not.toHaveBeenCalled();
+    });
+
+    describe('the other files a reused pull request changes', () => {
+      const blob = new Blob(['published image']);
+
+      beforeEach(() => {
+        // Classify the files like the real file list does
+        vi.mocked(createFileList).mockImplementation(
+          (files) =>
+            /** @type {any} */ ({
+              entryFiles: files.filter(({ path }) => path.startsWith('content/')),
+              assetFiles: files.filter(({ path }) => path.startsWith('static/')),
+            }),
+        );
+        vi.mocked(getAssetBlob).mockResolvedValue(blob);
+      });
+
+      afterEach(() => {
+        allAssets.current = [];
+      });
+
+      test('takes them off the branch, or puts them back as published', async () => {
+        const pending = createEntry('cms/posts/hello');
+
+        /** @type {Record<string, any>} */
+        const cache = {
+          'content/posts/other.md': { sha: 'o', size: 1, text: 'related: hello' },
+          'content/posts/hello/child.md': { sha: 'c', size: 1, text: 'title: Child' },
+        };
+
+        allEntries.current = [
+          /** @type {any} */ ({
+            id: 'other',
+            locales: { _default: { path: 'content/posts/other.md' } },
+          }),
+        ];
+        allAssets.current = [
+          // Shadowed by the version the pull request committed
+          /** @type {any} */ ({
+            path: 'static/uploads/logo.png',
+            sha: 'l2',
+            workflow: {
+              branch: 'cms/posts/hello',
+              replacedAsset: { path: 'static/uploads/logo.png', sha: 'l1' },
+            },
+          }),
+          /** @type {any} */ ({ path: 'static/uploads/team.png', sha: 't1' }),
+          /** @type {any} */ ({
+            path: 'static/uploads/new.jpg',
+            sha: 'n1',
+            workflow: { branch: 'cms/posts/hello' },
+          }),
+        ];
+
+        // The entry was renamed and moved, taking the entry below it along and rewriting a
+        // reference to it, and an image was uploaded for it
+        pending.locales = {
+          _default: { slug: 'hello-world', path: 'content/posts/hello-world.md', content: {} },
+        };
+        pending.workflow.previousPaths = ['content/posts/hello.md'];
+        pending.workflow.pullRequest.files = [
+          { path: 'content/posts/hello.md', deleted: true },
+          { path: 'content/posts/hello-world.md', deleted: false },
+          { path: 'content/posts/hello/child.md', deleted: true },
+          { path: 'content/posts/hello-world/child.md', deleted: false },
+          { path: 'content/posts/other.md', deleted: false },
+          { path: 'static/uploads/new.jpg', deleted: false },
+          { path: 'static/uploads/logo.png', deleted: false },
+          { path: 'static/uploads/team.png', deleted: true },
+          // Changed outside the CMS, which can’t tell what it held
+          { path: '.github/workflows/build.yml', deleted: false },
+        ];
+        upsertUnpublishedEntry(pending);
+        vi.mocked(resolveCacheDB).mockReturnValue(
+          /** @type {any} */ ({ get: vi.fn(async (path) => cache[path]) }),
+        );
+
+        const entry = await deleteWorkflowEntry(pending, collection, undefined);
+
+        expect(workflowService.savePullRequest).toHaveBeenCalledWith(
+          expect.objectContaining({
+            changes: [
+              { action: 'delete', slug: 'hello', path: 'content/posts/hello-world.md' },
+              {
+                action: 'create',
+                slug: 'hello',
+                path: 'content/posts/hello/child.md',
+                data: 'title: Child',
+              },
+              { action: 'delete', slug: 'hello', path: 'content/posts/hello-world/child.md' },
+              {
+                action: 'update',
+                slug: 'hello',
+                path: 'content/posts/other.md',
+                data: 'related: hello',
+              },
+              { action: 'delete', slug: 'hello', path: 'static/uploads/new.jpg' },
+              { action: 'update', slug: 'hello', path: 'static/uploads/logo.png', data: blob },
+              { action: 'create', slug: 'hello', path: 'static/uploads/team.png', data: blob },
+            ],
+          }),
+        );
+        expect(getAssetBlob).toHaveBeenCalledWith({ path: 'static/uploads/logo.png', sha: 'l1' });
+        // The asset list no longer offers the versions taken off the branch
+        expect(allAssets.current).toEqual([
+          { path: 'static/uploads/logo.png', sha: 'l1' },
+          { path: 'static/uploads/team.png', sha: 't1' },
+        ]);
+        expect(entry.workflow.previousPaths).toEqual(['content/posts/hello.md']);
+        expect(entry.workflow.pullRequest.files).toContainEqual(
+          expect.objectContaining({ path: 'static/uploads/new.jpg', deleted: true }),
+        );
+      });
+
+      test('refuses to delete when a changed file can’t be put back as published', async () => {
+        const pending = createEntry('cms/posts/hello');
+
+        allEntries.current = [
+          /** @type {any} */ ({
+            id: 'other',
+            locales: { _default: { path: 'content/posts/other.md' } },
+          }),
+        ];
+        pending.workflow.pullRequest.files = [{ path: 'content/posts/other.md', deleted: false }];
+        upsertUnpublishedEntry(pending);
+        vi.mocked(resolveCacheDB).mockReturnValue(undefined);
+
+        await expect(deleteWorkflowEntry(pending, collection, undefined)).rejects.toThrow(
+          'The published version of content/posts/other.md could not be found.',
+        );
+        expect(workflowService.savePullRequest).not.toHaveBeenCalled();
+      });
     });
 
     test('keeps track of the commit when the status of a reused pull request can’t be switched', async () => {
@@ -1254,6 +1956,49 @@ describe('workflow/save', () => {
       expect(allEntries.current).toEqual([rewrittenPost, other]);
     });
 
+    test('brings the references to the whole selection up to date once a removal lands', async () => {
+      const first = createEntry('cms/posts/hello', 'pending_deletion');
+      const second = { ...createEntry('cms/posts/world', 'pending_deletion'), id: 'world' };
+      const elsewhere = createEntry('cms/pages/about', 'pending_deletion');
+      const record = '<!-- sveltia-cms:deletion-group=';
+
+      first.workflow.pullRequest.description = `${record}group-1 -->`;
+      second.workflow.pullRequest.description = `${record}group-1 -->`;
+      elsewhere.id = 'about';
+      elsewhere.workflow.collectionName = 'pages';
+      // A selection is recorded per collection, so another collection’s deletion has its own
+      elsewhere.workflow.pullRequest.description = `${record}group-2 -->`;
+      unpublishedEntries.current = [first, second, elsewhere];
+
+      await publishWorkflowEntry(first);
+
+      // The pull request removed the references to every entry of the selection, as the publish
+      // check expects, so the store has to drop them all, not only those to the published entry
+      expect(planCascadeDelete).toHaveBeenCalledWith({
+        collection: { name: 'posts', _type: 'entry' },
+        collectionFile: undefined,
+        entries: [first, second],
+      });
+    });
+
+    test('brings only the references to an entry deleted on its own up to date', async () => {
+      const first = createEntry('cms/posts/hello', 'pending_deletion');
+      const second = { ...createEntry('cms/posts/world', 'pending_deletion'), id: 'world' };
+
+      // Deleted one at a time, so each pull request removes only the references to its own entry.
+      // Taking in the other one’s would drop references that are still on the site, and save them
+      // with the next edit if the other deletion is then cancelled
+      unpublishedEntries.current = [first, second];
+
+      await publishWorkflowEntry(first);
+
+      expect(planCascadeDelete).toHaveBeenCalledWith({
+        collection: { name: 'posts', _type: 'entry' },
+        collectionFile: undefined,
+        entries: [first],
+      });
+    });
+
     test('leaves the store alone when a regular publish lands', async () => {
       const entry = createEntry('cms/posts/hello', 'pending_publish');
 
@@ -1316,6 +2061,15 @@ describe('workflow/save', () => {
           changes: expect.arrayContaining([cascadeChange]),
         }),
       );
+
+      // Both pull requests record the same selection, so publishing either works out the same
+      // rewrite, while an entry of the collection deleted on its own isn’t taken in
+      const [[{ deletionGroup }], [{ deletionGroup: otherGroup }]] = vi.mocked(
+        workflowService.savePullRequest,
+      ).mock.calls;
+
+      expect(deletionGroup).toEqual(expect.any(String));
+      expect(otherGroup).toBe(deletionGroup);
     });
 
     test('plans a selection spanning collections per collection', async () => {
@@ -1340,6 +2094,12 @@ describe('workflow/save', () => {
       );
       expect(planCascadeDelete).toHaveBeenCalledWith(
         expect.objectContaining({ collection: otherCollection, entries: [second] }),
+      );
+
+      // Each entry is the only one of its collection, so it’s planned on its own, with no record
+      expect(workflowService.savePullRequest).toHaveBeenCalledTimes(2);
+      expect(workflowService.savePullRequest).not.toHaveBeenCalledWith(
+        expect.objectContaining({ deletionGroup: expect.anything() }),
       );
     });
 
@@ -1422,6 +2182,36 @@ describe('workflow/save', () => {
       await publishWorkflowEntry(entry);
 
       expect(callEventHooks).toHaveBeenCalledWith(expect.objectContaining({ collectionFile }));
+    });
+
+    test('are called for the new entries riding along in the pull request', async () => {
+      const entry = createEntry('cms/posts/hello', 'pending_publish');
+      const guides = createCompanion('guides');
+      const sections = { name: 'sections', _type: 'entry' };
+
+      entry.workflow.companions = [guides, { ...createCompanion('gone'), collectionName: 'gone' }];
+      // Looked up for the post first, then for each of the new entries
+      vi.mocked(getCollection)
+        .mockReturnValueOnce(/** @type {any} */ ({ name: 'posts', _type: 'entry' }))
+        .mockReturnValueOnce(/** @type {any} */ (sections))
+        .mockReturnValueOnce(undefined);
+      upsertUnpublishedEntry(entry);
+      await publishWorkflowEntry(entry);
+
+      // An entry whose collection is no longer configured has no hook to call
+      expect(
+        vi.mocked(callEventHooks).mock.calls.map(([{ type, entry: e }]) => [type, e.id]),
+      ).toEqual([
+        ['prePublish', entry.id],
+        ['prePublish', guides.entry.id],
+        ['postPublish', entry.id],
+        ['postPublish', guides.entry.id],
+      ]);
+      expect(callEventHooks).toHaveBeenCalledWith({
+        type: 'postPublish',
+        entry: guides.entry,
+        collection: sections,
+      });
     });
 
     test('are skipped when the collection is no longer configured', async () => {

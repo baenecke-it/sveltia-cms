@@ -1,6 +1,7 @@
-import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { customStringTransformationRegistry } from '$lib/services/api/registries';
+import { loadTransliterator } from '$lib/services/common/slug/transliterate';
 import { cmsConfig } from '$lib/services/config';
 import { getField } from '$lib/services/contents/entry/fields';
 
@@ -9,6 +10,14 @@ import { replaceTemplatePlaceholder, replaceTemplateTag } from './replacers';
 /**
  * @import { ReplaceContext, ReplaceSubContext } from './replacers';
  */
+
+// The `clean_accents` option transliterates with the library the CMS loads from the CDN, so the
+// installed copy is loaded instead
+vi.mock('$lib/services/app/dependencies', () => ({
+  loadModule: vi.fn(() => import('@sindresorhus/transliterate')),
+}));
+
+beforeAll(loadTransliterator);
 
 vi.mock('$lib/services/config', () => ({
   cmsConfig: { current: undefined },
@@ -283,6 +292,24 @@ describe('replaceTemplateTag()', () => {
 });
 
 describe('replaceTemplatePlaceholder()', () => {
+  test('treats a null value, like that of an empty number field, as missing', () => {
+    const content = { release: null };
+    const randomValues = new Map();
+    const entryFilePath = 'content/posts/my-post.md';
+    const value = replaceTemplatePlaceholder('release', createContext({ content, randomValues }));
+
+    expect(value).toMatch(/^[0-9a-f]{12}$/);
+    expect(() =>
+      replaceTemplatePlaceholder(
+        'release',
+        createContext({ type: 'preview_path', content, entryFilePath }),
+      ),
+    ).toThrow();
+    expect(
+      replaceTemplatePlaceholder("release | default('none')", createContext({ content })),
+    ).toBe('none');
+  });
+
   test('slugifies a field value for a slug', () => {
     const context = createContext({ content: { title: 'Hello World!' } });
 
@@ -372,7 +399,7 @@ describe('replaceTemplatePlaceholder()', () => {
     const context = createContext({ type: 'preview_path', entryFilePath: 'content/posts/a.md' });
 
     expect(() => replaceTemplatePlaceholder('missing', context)).toThrow(
-      'Unresolvable template tag in preview path: missing',
+      'Unresolvable template tag: missing',
     );
   });
 
@@ -406,7 +433,7 @@ describe('replaceTemplatePlaceholder()', () => {
           'missing | nothing',
           createContext({ type: 'preview_path', entryFilePath: 'content/posts/a.md' }),
         ),
-      ).toThrow('Unresolvable template tag in preview path: missing');
+      ).toThrow('Unresolvable template tag: missing');
     });
 
     test('keeps an empty `default` result as is, even with a custom transformation', () => {

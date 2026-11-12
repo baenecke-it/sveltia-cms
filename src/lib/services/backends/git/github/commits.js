@@ -1,14 +1,24 @@
 import { encodeBase64 } from '@sveltia/utils/file';
 
+import { clearSaveProgress, reportCommits } from '$lib/services/backends/commit-progress';
 import { getWorkflowRepository } from '$lib/services/backends/git/github/fork';
 import { fetchAliasedBatch } from '$lib/services/backends/git/github/graphql';
 import { repository } from '$lib/services/backends/git/github/repository';
 import { fetchGraphQL } from '$lib/services/backends/git/shared/api';
 import {
+  estimateRemainingCommits,
+  getPayloadSize,
+  isUploadFailure,
+  sortAdditions,
+  takeAdditions,
+} from '$lib/services/backends/git/shared/commit-split';
+import {
   assertBranchNotMoved,
   createCommitMessage,
   createLastCommitError,
   dedupeFileCommits,
+  MAX_FILE_COMMITS,
+  signOffCommitMessage,
 } from '$lib/services/backends/git/shared/commits';
 import { checkDirectCommitAllowed } from '$lib/services/backends/git/shared/fork';
 import { repositoryHead } from '$lib/services/backends/git/shared/head';
@@ -16,6 +26,7 @@ import { getByteSize } from '$lib/services/utils/file';
 
 /**
  * @import { CommitOptions, CommitResults, FileChange, FileCommit } from '$lib/types/private';
+ * @import { FileAddition } from '$lib/services/backends/git/shared/commit-split';
  */
 
 /**
@@ -114,52 +125,54 @@ const getExpectedHeadOid = async ({ headOid, branch }) => {
 export const MAX_COMMIT_PAYLOAD_SIZE = 16 * 1024 * 1024;
 
 /**
- * A file addition in a commit mutation, along with the change it comes from.
- * @typedef {object} FileAddition
- * @property {number} index Index of the addition in the changeset, which is used to alias the file
- * in the query for its new SHA.
- * @property {string} path File path.
- * @property {string} contents Base64-encoded file contents.
- * @property {FileChange['data']} data Original file data.
+ * Size of the Base64-encoded file contents sent in the first commit mutation (2 MB). GitHub closes
+ * a request whose body hasn’t arrived within about ten seconds, so the size a commit can take
+ * depends on the upload speed, which isn’t known until something has been uploaded. The size of the
+ * following commits is worked out from the speed of the previous one.
+ * @see https://github.com/sveltia/sveltia-cms/issues/1084
  */
+export const INITIAL_COMMIT_PAYLOAD_SIZE = 2 * 1024 * 1024;
 
 /**
- * Split file additions into groups, each of which is committed in a single mutation. Assets come
- * first and text files like entries last, so an entry never lands in the repository before the
- * files it refers to. The deletions go into the last commit, so a file that is deleted and added
- * again at the same path, which GitHub resolves within a single commit, goes into the last group
- * as well, however large it is; otherwise the deletion would remove it again.
- * @param {FileAddition[]} additions File additions.
- * @param {Set<string>} [deletedPaths] Paths of the files to be deleted.
- * @returns {FileAddition[][]} Groups of file additions. There is always at least one group, which
- * can be empty, so a changeset with only deletions is still committed.
+ * Minimum size of the Base64-encoded file contents sent in a commit mutation (256 KB), so a slow
+ * connection doesn’t end up with a commit per small file.
  */
-export const splitAdditions = (additions, deletedPaths = new Set()) => {
-  /** @type {FileAddition[][]} */
-  const groups = [[]];
-  let size = 0;
+export const MIN_COMMIT_PAYLOAD_SIZE = 256 * 1024;
 
-  additions
-    .filter(({ path }) => !deletedPaths.has(path))
-    .toSorted((a, b) => Number(typeof a.data === 'string') - Number(typeof b.data === 'string'))
-    .forEach((addition) => {
-      const { length } = addition.contents;
+/**
+ * Time a commit mutation is meant to take (5 seconds), well within the time GitHub waits for a
+ * request body.
+ */
+const TARGET_COMMIT_DURATION = 5000;
 
-      // A single file over the limit goes on its own
-      if (size && size + length > MAX_COMMIT_PAYLOAD_SIZE) {
-        groups.push([]);
-        size = 0;
-      }
-
-      /** @type {FileAddition[]} */ (groups.at(-1)).push(addition);
-      size += length;
-    });
-
-  /** @type {FileAddition[]} */ (groups.at(-1)).push(
-    ...additions.filter(({ path }) => deletedPaths.has(path)),
+/**
+ * Work out the payload size of the next commit from how long the previous one took, so a commit
+ * takes about {@link TARGET_COMMIT_DURATION} on the connection.
+ * @param {number} size Size of the Base64-encoded file contents sent in the previous commit.
+ * @param {number} duration Time the previous commit took, in milliseconds.
+ * @returns {number} Payload size, between {@link MIN_COMMIT_PAYLOAD_SIZE} and
+ * {@link MAX_COMMIT_PAYLOAD_SIZE}.
+ */
+export const getNextPayloadSize = (size, duration) =>
+  Math.min(
+    MAX_COMMIT_PAYLOAD_SIZE,
+    Math.max(
+      MIN_COMMIT_PAYLOAD_SIZE,
+      Math.floor((size / Math.max(duration, 1)) * TARGET_COMMIT_DURATION),
+    ),
   );
 
-  return groups;
+/**
+ * Split a commit message into the headline and the body, as the GraphQL API takes them separately
+ * and joins them with a blank line. The body is left out if there is none.
+ * @param {string} message Commit message.
+ * @returns {{ headline: string, body?: string }} Message parts.
+ */
+const splitCommitMessage = (message) => {
+  const [headline, ...rest] = message.split(/\r?\n/);
+  const body = rest.join('\n').trim();
+
+  return body ? { headline, body } : { headline };
 };
 
 /**
@@ -220,14 +233,16 @@ const createCommit = async ({
       additions: additions.map(({ path, contents }) => ({ path, contents })),
       deletions,
     },
-    message: { headline: message },
+    message: splitCommitMessage(message),
   };
 
   try {
     const {
       createCommitOnBranch: { commit },
     } = /** @type {{ createCommitOnBranch: { commit: Record<string, any> }}} */ (
-      await fetchGraphQL(query, { input })
+      // The commit can be sent again after a transient error: one that has already landed is
+      // refused, as the branch no longer points at `expectedHeadOid`
+      await fetchGraphQL(query, { input }, { retryable: true })
     );
 
     return commit;
@@ -245,7 +260,8 @@ const createCommit = async ({
 /**
  * Save entries or assets remotely. The changes normally go into a single commit, but a large
  * changeset, typically an entry with many new images, is split into several commits made one after
- * another, with the entry files in the last one.
+ * another, with the entry files in the last one. The size of each commit follows the upload speed
+ * measured on the previous one, and a commit that times out is retried with fewer files.
  * @param {FileChange[]} changes File changes to be saved.
  * @param {CommitOptions} options Commit options.
  * @returns {Promise<CommitResults>} Commit results, including the commit SHA and updated file SHAs.
@@ -277,45 +293,88 @@ export const commitChanges = async (changes, options) => {
     .filter(({ action }) => ['move', 'delete'].includes(action))
     .map(({ previousPath, path }) => ({ path: previousPath ?? path }));
 
-  const groups = splitAdditions(additions, new Set(deletions.map(({ path }) => path)));
-  const message = createCommitMessage(changes, options);
+  const { queue, addedAgain } = sortAdditions(
+    additions,
+    new Set(deletions.map(({ path }) => path)),
+  );
+
+  const message = signOffCommitMessage(createCommitMessage(changes, options));
   let expectedHeadOid = await getExpectedHeadOid(options);
+  let payloadSize = INITIAL_COMMIT_PAYLOAD_SIZE;
+  // Smallest payload that has timed out, which the following commits stay below, as the speed
+  // measured on a slow or uneven connection can suggest a size that has already failed
+  let timedOutSize = Infinity;
+  let commitCount = 0;
   /** @type {Record<string, any>} */
   let commit = {};
   /** @type {Record<string, any>} */
   const fileShas = {};
 
-  // Commit the groups one by one, each on top of the previous one. The deletions go into the last
-  // commit along with the entries, so a file isn’t removed before the entry stops referring to it
-  // eslint-disable-next-line no-restricted-syntax
-  for (const [groupIndex, group] of groups.entries()) {
-    try {
-      // eslint-disable-next-line no-await-in-loop
-      commit = await createCommit({
-        owner,
-        repo,
-        branch,
-        expectedHeadOid,
-        additions: group,
-        deletions: groupIndex === groups.length - 1 ? deletions : [],
-        message,
-        onWorkflowBranch: !!options.branch,
-      });
-    } catch (ex) {
-      // Some of the assets have landed on the configured branch, but the entry hasn’t. Take the
-      // last commit made as the known head, so the check before the retry doesn’t load those
-      // assets, which would then be saved again under different names. The retry saves them under
-      // the same paths instead, with the same content, along with the entry. A workflow branch
-      // isn’t tracked this way; it’s reset from scratch when no pull request comes out of it
-      if (groupIndex > 0 && !options.branch) {
-        repositoryHead.current = expectedHeadOid;
+  // Commit the additions in groups, each on top of the previous one, sized so that each commit
+  // takes a few seconds to upload. The deletions go into the last commit along with the entries,
+  // so a file isn’t removed before the entry stops referring to it. There is always at least one
+  // commit, which can have no additions, so a changeset with only deletions is still committed
+  try {
+    do {
+      // The files still waiting, at the current commit size, make up the commits yet to be made
+      reportCommits(commitCount, commitCount + estimateRemainingCommits(queue, payloadSize));
+
+      const group = takeAdditions(queue, payloadSize);
+      const isLast = !queue.length;
+      const groupSize = getPayloadSize(group);
+      const startTime = performance.now();
+
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        commit = await createCommit({
+          owner,
+          repo,
+          branch,
+          expectedHeadOid,
+          additions: isLast ? [...group, ...addedAgain] : group,
+          deletions: isLast ? deletions : [],
+          message,
+          onWorkflowBranch: !!options.branch,
+        });
+      } catch (ex) {
+        // The upload has taken too long on the connection. Put the files back and try again with
+        // half of them, provided the branch is still where it was, so the commit hasn’t landed
+        if (
+          group.length > 1 &&
+          isUploadFailure(ex) &&
+          // eslint-disable-next-line no-await-in-loop
+          (await fetchLastCommit(options.branch).catch(() => undefined))?.hash === expectedHeadOid
+        ) {
+          queue.unshift(...group);
+          timedOutSize = Math.min(timedOutSize, groupSize);
+          payloadSize = Math.floor(groupSize / 2);
+          // eslint-disable-next-line no-continue
+          continue;
+        }
+
+        // Some of the assets have landed on the configured branch, but the entry hasn’t. Take the
+        // last commit made as the known head, so the check before the retry doesn’t load those
+        // assets, which would then be saved again under different names. The retry saves them
+        // under the same paths instead, with the same content, along with the entry. A workflow
+        // branch isn’t tracked this way; it’s reset from scratch when no pull request comes out of
+        // it
+        if (commitCount && !options.branch) {
+          repositoryHead.current = expectedHeadOid;
+        }
+
+        throw ex;
       }
 
-      throw ex;
-    }
-
-    Object.assign(fileShas, commit);
-    expectedHeadOid = commit.oid;
+      payloadSize = Math.min(
+        getNextPayloadSize(groupSize, performance.now() - startTime),
+        timedOutSize - 1,
+      );
+      commitCount += 1;
+      Object.assign(fileShas, commit);
+      expectedHeadOid = commit.oid;
+    } while (queue.length);
+  } finally {
+    clearSaveProgress();
   }
 
   return {
@@ -360,7 +419,7 @@ export const fetchFileCommits = async (paths) => {
       ref(qualifiedName: $branch) {
         target {
           ... on Commit {
-            history(first: 100, path: ${JSON.stringify(path)}) {
+            history(first: ${MAX_FILE_COMMITS}, path: ${JSON.stringify(path)}) {
               nodes {
                 oid
                 messageHeadline

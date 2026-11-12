@@ -3,7 +3,7 @@ import { expect, test } from '../fixtures/test.js';
 import { getEditor, getEntryRows } from '../fixtures/ui.js';
 
 /**
- * @import { Page } from '@playwright/test';
+ * @import { Locator, Page } from '@playwright/test';
  */
 
 /**
@@ -23,18 +23,22 @@ const SEED_FILES = {
  */
 const serveSeed = async (page) => {
   const counter = { manifestRequests: 0 };
+  const { adminPath } = /** @type {{ adminPath: string }} */ (test.info().project.use);
 
-  await page.route('**/admin/', async (route) => {
-    const response = await route.fetch();
+  await page.route(
+    (url) => url.pathname === adminPath,
+    async (route) => {
+      const response = await route.fetch();
 
-    await route.fulfill({
-      response,
-      body: (await response.text()).replace(
-        '</head>',
-        '<link rel="cms-seed-url" href="/seed/manifest.json" /></head>',
-      ),
-    });
-  });
+      await route.fulfill({
+        response,
+        body: (await response.text()).replace(
+          '</head>',
+          '<link rel="cms-seed-url" href="/seed/manifest.json" /></head>',
+        ),
+      });
+    },
+  );
 
   await page.route('**/seed/**', async (route) => {
     const path = decodeURIComponent(new URL(route.request().url()).pathname.slice(6));
@@ -53,13 +57,27 @@ const serveSeed = async (page) => {
 };
 
 /**
+ * Get the dialog welcoming the user to the demo.
+ * @param {Page} page Page.
+ * @returns {Locator} Dialog.
+ */
+const getWelcomeDialog = (page) =>
+  page.getByRole('dialog', { name: 'Welcome to Sveltia CMS Demo' });
+
+/**
  * Sign in with the test backend, whose button offers to start the demo when the repository is
- * seeded, and wait for the main UI.
+ * seeded, wait for the main UI and dismiss the welcome dialog shown on the first visit.
  * @param {Page} page Page.
  */
 const startDemo = async (page) => {
   await page.getByRole('button', { name: 'Start Demo' }).click();
   await expect(page.getByRole('button', { name: 'Show Account Menu' })).toBeVisible();
+
+  const dialog = getWelcomeDialog(page);
+
+  await expect(dialog).toContainText('Your changes are only saved in this browser.');
+  await dialog.getByRole('button', { name: 'Get Started' }).click();
+  await expect(dialog).toBeHidden();
 };
 
 test('seeds an empty repository on the first sign-in', async ({ cms, page }) => {
@@ -101,6 +119,8 @@ test('keeps the changes to a seeded repository after a reload', async ({ cms, pa
   await page.goto(page.url().split('#')[0]);
   await expect(page.getByRole('row', { name: /Edited Post/ })).toBeVisible();
   await expect(page.getByRole('row', { name: /First Post/ })).toBeHidden();
+  // The welcome dialog is only shown once
+  await expect(getWelcomeDialog(page)).toBeHidden();
   expect(counter.manifestRequests).toBe(1);
 });
 
@@ -128,6 +148,7 @@ test('seeds the repository again after all the data is erased', async ({ cms, pa
     .getByRole('button', { name: 'Erase' })
     .click();
 
+  // Starting over welcomes the user again
   await startDemo(page);
   await expect(getEntryRows(page)).toHaveCount(2);
   await expect(page.getByRole('row', { name: /Existing Post/ })).toBeHidden();

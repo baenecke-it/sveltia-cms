@@ -140,6 +140,38 @@ describe('definitions', () => {
         });
       });
 
+      it('should read a title in single quotes', () => {
+        const groups = { src: '/a.png', alt: 'A [1]', singleQuotedTitle: "It\\'s" };
+
+        expect(IMAGE_COMPONENT.fromBlock({ groups })).toEqual({
+          src: '/a.png',
+          alt: 'A [1]',
+          title: "It's",
+        });
+        // It’s written back in double quotes, with the brackets in the alt text escaped
+        expect(IMAGE_COMPONENT.toBlock({ src: '/a.png', alt: 'A [1]', title: "It's" })).toBe(
+          '![A \\[1\\]](/a.png "It\'s")',
+        );
+      });
+
+      it('should keep alt text with brackets or backslashes across a round trip', async () => {
+        const { IMAGE_REGEX } = await vi.importActual(
+          '$lib/services/contents/fields/rich-text/constants',
+        );
+
+        [
+          ['smile :]', '![smile :\\]](/a.png)'],
+          ['Figure [1', '![Figure \\[1](/a.png)'],
+          ['C:\\', '![C:\\\\](/a.png)'],
+          ['a\\]b', '![a\\\\\\]b](/a.png)'],
+          ['C:\\Users', '![C:\\Users](/a.png)'],
+          ['A [1]', '![A \\[1\\]](/a.png)'],
+        ].forEach(([alt, markdown]) => {
+          expect(IMAGE_COMPONENT.toBlock({ src: '/a.png', alt })).toBe(markdown);
+          expect(IMAGE_COMPONENT.fromBlock(markdown.match(IMAGE_REGEX)).alt).toBe(alt);
+        });
+      });
+
       it('should handle a missing title or missing groups', () => {
         expect(IMAGE_COMPONENT.fromBlock({ groups: { src: '/a.png', alt: '' } })).toEqual({
           src: '/a.png',
@@ -330,10 +362,38 @@ describe('definitions', () => {
         });
       });
 
+      it('should read a title in single quotes', () => {
+        expect(
+          LINKED_IMAGE_COMPONENT.fromBlock({ groups: { src: '/a.png', singleQuotedTitle: 'T' } })
+            .title,
+        ).toBe('T');
+        expect(
+          LINKED_IMAGE_COMPONENT.fromBlock({
+            groups: { src2: '/a.png', singleQuotedTitle2: "It\\'s", link: '/b' },
+          }).title,
+        ).toBe("It's");
+      });
+
       it('should unescape the title', () => {
         const match = { groups: { src2: '/a.png', alt2: 'A', title2: 'T \\"q\\"', link: '/b' } };
 
         expect(LINKED_IMAGE_COMPONENT.fromBlock(match).title).toBe('T "q"');
+      });
+
+      it('should keep alt text with brackets or backslashes across a round trip', async () => {
+        const { IMAGE_OR_LINKED_IMAGE_REGEX } = await vi.importActual(
+          '$lib/services/contents/fields/rich-text/constants',
+        );
+
+        ['smile :]', 'Figure [1', 'C:\\', ' [a] '].forEach((alt) => {
+          const markdown = LINKED_IMAGE_COMPONENT.toBlock({ src: '/a.png', alt, link: '/b' });
+
+          const props = LINKED_IMAGE_COMPONENT.fromBlock(
+            markdown.match(IMAGE_OR_LINKED_IMAGE_REGEX),
+          );
+
+          expect(props).toEqual({ src: '/a.png', alt: alt.trim(), title: '', link: '/b' });
+        });
       });
 
       it('should handle missing groups', () => {
@@ -562,6 +622,32 @@ describe('definitions', () => {
       expect(result?.pattern).toEqual(/custom/);
       expect(result?.toBlock).toBe(customComponent.toBlock);
       expect(result?.toPreview).toBe(customComponent.toPreview);
+    });
+
+    it('should resolve a pattern-based inline component', () => {
+      const onInsert = vi.fn();
+
+      customComponentRegistry.set('wikilink', {
+        id: 'wikilink',
+        type: 'inline',
+        pattern: /^\[\[(.+?)\]\]/,
+        trigger: '[[',
+        fromInline: (match) => ({ page: match[1] }),
+        toInline: ({ page = '' }) => `[[${page}]]`,
+        onInsert,
+      });
+
+      const result = getComponentDef('wikilink');
+
+      expect(result?.id).toBe('x-wikilink');
+      expect(result?.label).toBe('wikilink');
+      expect(result?.fields).toEqual([]);
+      expect(result?.pattern).toEqual(/\[\[(.+?)\]\]/);
+      // The trigger text is no toolbar UI
+      expect(result?.trigger).toBeUndefined();
+      expect(result?.inlinePattern).toEqual({ trigger: '[[', onInsert, onEdit: undefined });
+      expect(result?.fromBlock?.(/** @type {any} */ (['[[A]]', 'A']))).toEqual({ page: 'A' });
+      expect(result?.toBlock({ page: 'A' })).toBe('[[A]]');
     });
 
     it('should fall back to the registered name for a custom component without a label', () => {

@@ -102,6 +102,7 @@ export const getConditionKey = (conditions) => {
  * @typedef {{
  * group?: GroupingConditions | null,
  * collapsedGroups?: Record<string, string[]>,
+ * expandedGroups?: Record<string, string[]>,
  * } & Record<string, unknown>} ViewWithGroups
  */
 
@@ -185,6 +186,20 @@ export const matchesFilter = (value, pattern, regex) => {
 };
 
 /**
+ * Compare two sort keys in ascending order.
+ * @param {string | number} a First key.
+ * @param {string | number} b Second key.
+ * @param {boolean} isStringType Whether the keys should be compared as strings (locale-aware); if
+ * `false`, numeric subtraction is used instead.
+ * @returns {number} Negative if `a` comes first, positive if `b` comes first, `0` if they are
+ * equal.
+ */
+export const compareSortKeys = (a, b, isStringType) =>
+  isStringType
+    ? compare(/** @type {string} */ (a), /** @type {string} */ (b))
+    : /** @type {number} */ (a) - /** @type {number} */ (b);
+
+/**
  * Sort an array of items using a key function and apply ascending/descending order. An item whose
  * key is `undefined` has no value to sort by, so it goes last in either order, keeping its place
  * among the other such items.
@@ -203,9 +218,11 @@ export const sortItemsByKey = (items, getKey, isStringType, order) => {
   const emptyItems = keyedItems.filter(({ key }) => key === undefined);
 
   valuedItems.sort(({ key: aKey }, { key: bKey }) =>
-    isStringType
-      ? compare(/** @type {string} */ (aKey), /** @type {string} */ (bKey))
-      : /** @type {number} */ (aKey) - /** @type {number} */ (bKey),
+    compareSortKeys(
+      /** @type {string | number} */ (aKey),
+      /** @type {string | number} */ (bKey),
+      isStringType,
+    ),
   );
 
   if (order === 'descending') {
@@ -240,26 +257,66 @@ export const getGroupingKey = (conditions) =>
   conditions ? getConditionKey(conditions) : undefined;
 
 /**
- * Check whether a group is collapsed in the given view.
- * @param {ViewWithGroups} view View settings.
- * @param {string} name Group name.
- * @returns {boolean} Whether the group’s items are hidden.
+ * Check whether the groups produced by the given grouping conditions start collapsed, because the
+ * view group option they came from has the `collapsed` option enabled.
+ * @param {ViewGroup[] | undefined} options View group options.
+ * @param {GroupingConditions | null | undefined} conditions Grouping conditions of the view.
+ * @returns {boolean} Whether the groups are collapsed unless the user has expanded them.
+ * @see https://github.com/sveltia/sveltia-cms/issues/1151
  */
-export const isGroupCollapsed = (view, name) => {
-  const key = getGroupingKey(view.group);
+export const isCollapsedByDefault = (options, conditions) => {
+  const key = getGroupingKey(conditions);
 
-  return key !== undefined && !!view.collapsedGroups?.[key]?.includes(name);
+  return (
+    key !== undefined &&
+    !!options?.some(
+      (option) => option.collapsed === true && getConditionKey(getViewConditions(option)) === key,
+    )
+  );
 };
 
 /**
- * Get the view settings with the collapsed groups of the current grouping condition replaced.
+ * Get the property of the view settings that holds the names of the groups the user has toggled
+ * from their default state, under each grouping condition’s key: the collapsed groups when groups
+ * start expanded, and the expanded groups when they start collapsed. Saving the exceptions rather
+ * than the full state means a group that appears later starts in the default state too.
+ * @param {boolean} collapsedByDefault Whether the groups start collapsed.
+ * @returns {'collapsedGroups' | 'expandedGroups'} Property name.
+ */
+const getToggledGroupsProp = (collapsedByDefault) =>
+  collapsedByDefault ? 'expandedGroups' : 'collapsedGroups';
+
+/**
+ * Check whether a group is collapsed in the given view.
+ * @param {ViewWithGroups} view View settings.
+ * @param {string} name Group name.
+ * @param {boolean} [collapsedByDefault] Whether the groups start collapsed. See
+ * {@link isCollapsedByDefault}.
+ * @returns {boolean} Whether the group’s items are hidden.
+ */
+export const isGroupCollapsed = (view, name, collapsedByDefault = false) => {
+  const key = getGroupingKey(view.group);
+
+  // The `*` group has no expander, so it’s always expanded
+  if (key === undefined || name === '*') {
+    return false;
+  }
+
+  const toggled = !!view[getToggledGroupsProp(collapsedByDefault)]?.[key]?.includes(name);
+
+  return toggled !== collapsedByDefault;
+};
+
+/**
+ * Get the view settings with the toggled groups of the current grouping condition replaced.
  * @template {ViewWithGroups} T
  * @param {T} view View settings.
- * @param {string[]} names Names of the collapsed groups. The condition is dropped from the saved
- * state when there is none, and so is the whole `collapsedGroups` property once it’s empty.
+ * @param {string[]} names Names of the groups toggled from their default state. The condition is
+ * dropped from the saved state when there is none, and so is the whole property once it’s empty.
+ * @param {boolean} collapsedByDefault Whether the groups start collapsed.
  * @returns {T} New view settings.
  */
-const setCollapsedGroups = (view, names) => {
+const setToggledGroups = (view, names, collapsedByDefault) => {
   const key = getGroupingKey(view.group);
 
   // The list isn’t grouped, so there is nothing to collapse
@@ -267,13 +324,12 @@ const setCollapsedGroups = (view, names) => {
     return view;
   }
 
-  const { [key]: _current, ...others } = view.collapsedGroups ?? {};
-  const collapsedGroups = names.length ? { ...others, [key]: names } : others;
-  const { collapsedGroups: _previous, ...rest } = view;
+  const prop = getToggledGroupsProp(collapsedByDefault);
+  const { [key]: _current, ...others } = view[prop] ?? {};
+  const groups = names.length ? { ...others, [key]: names } : others;
+  const { [prop]: _previous, ...rest } = view;
 
-  return /** @type {T} */ (
-    Object.keys(collapsedGroups).length ? { ...rest, collapsedGroups } : rest
-  );
+  return /** @type {T} */ (Object.keys(groups).length ? { ...rest, [prop]: groups } : rest);
 };
 
 /**
@@ -282,18 +338,21 @@ const setCollapsedGroups = (view, names) => {
  * @param {T} view View settings.
  * @param {string} name Group name.
  * @param {boolean} collapsed Whether to hide the group’s items.
+ * @param {boolean} [collapsedByDefault] Whether the groups start collapsed. See
+ * {@link isCollapsedByDefault}.
  * @returns {T} New view settings.
  */
-export const setGroupCollapsed = (view, name, collapsed) => {
+export const setGroupCollapsed = (view, name, collapsed, collapsedByDefault = false) => {
   const key = getGroupingKey(view.group);
-  const current = key === undefined ? [] : (view.collapsedGroups?.[key] ?? []);
+  const prop = getToggledGroupsProp(collapsedByDefault);
+  const current = key === undefined ? [] : (view[prop]?.[key] ?? []);
   const names = current.filter((_name) => _name !== name);
 
-  if (collapsed) {
+  if (collapsed !== collapsedByDefault) {
     names.push(name);
   }
 
-  return setCollapsedGroups(view, names);
+  return setToggledGroups(view, names, collapsedByDefault);
 };
 
 /**
@@ -302,10 +361,12 @@ export const setGroupCollapsed = (view, name, collapsed) => {
  * @param {T} view View settings.
  * @param {string[]} names Names of the collapsible groups.
  * @param {boolean} collapsed Whether to hide the groups’ items.
+ * @param {boolean} [collapsedByDefault] Whether the groups start collapsed. See
+ * {@link isCollapsedByDefault}.
  * @returns {T} New view settings.
  */
-export const setAllGroupsCollapsed = (view, names, collapsed) =>
-  setCollapsedGroups(view, collapsed ? [...names] : []);
+export const setAllGroupsCollapsed = (view, names, collapsed, collapsedByDefault = false) =>
+  setToggledGroups(view, collapsed === collapsedByDefault ? [] : [...names], collapsedByDefault);
 
 /**
  * Initialize a view settings state backed by IndexedDB and persist any changes to it.

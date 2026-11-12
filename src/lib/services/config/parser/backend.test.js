@@ -13,6 +13,7 @@ const mockI18nStrings = {
   'config.error.unsupported_backend_suggestion': 'Please check the supported backends.',
   'config.error.missing_repository': 'Missing repository',
   'config.error.invalid_repository': 'Invalid repository format',
+  'config.error.missing_api_root': 'Missing API root',
   'config.error.invalid_root_dir': 'Invalid root directory',
   'config.error.invalid_root_dir_branch': 'Root directory not usable in branch names',
   'config.error.oauth_implicit_flow': 'OAuth implicit flow is not supported',
@@ -22,6 +23,8 @@ const mockI18nStrings = {
     'OAuth application ID is not defined. Users are required to provide an access token to sign in.',
   'config.error.open_authoring_no_workflow':
     'The `open_authoring` option requires the `editorial_workflow` publish mode.',
+  'config.error.auth_scope_no_repo':
+    'The `auth_scope` option must include `repo` or `public_repo`.',
 };
 
 vi.mock('@sveltia/i18n', async () =>
@@ -41,7 +44,7 @@ vi.mock('$lib/services/config/deprecations', () => ({
 }));
 
 vi.mock('$lib/services/backends', () => ({
-  validBackendNames: ['github', 'gitlab', 'gitea', 'local', 'test-repo'],
+  validBackendNames: ['github', 'gitlab', 'gitea', 'forgejo', 'local', 'test-repo'],
   unsupportedBackends: {
     azure: { label: 'Azure DevOps' },
     bitbucket: { label: 'Bitbucket' },
@@ -54,6 +57,7 @@ vi.mock('$lib/services/backends/git/services', () => ({
     github: { name: 'github' },
     gitlab: { name: 'gitlab' },
     gitea: { name: 'gitea' },
+    forgejo: { name: 'forgejo' },
   },
 }));
 
@@ -421,6 +425,94 @@ describe('parseBackendConfig', () => {
       const [error] = [...collectors.errors];
 
       expect(error).toBe('Invalid repository format');
+    });
+  });
+
+  describe('Forgejo backend', () => {
+    it('should accept a Forgejo backend with the API root', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        backend: {
+          name: 'forgejo',
+          repo: 'owner/repo',
+          app_id: 'app',
+          api_root: 'https://codeberg.org/api/v1',
+        },
+      };
+
+      parseBackendConfig(config, collectors);
+
+      expect(collectors.errors.size).toBe(0);
+      expect(collectors.warnings.size).toBe(0);
+    });
+
+    it('should error when the Forgejo backend has no API root', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+      /** @type {any} */
+      const config = { backend: { name: 'forgejo', repo: 'owner/repo', app_id: 'app' } };
+
+      parseBackendConfig(config, collectors);
+
+      expect([...collectors.errors]).toEqual(['Missing API root']);
+    });
+
+    it('should not require the API root with the Gitea backend', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+      /** @type {any} */
+      const config = { backend: { name: 'gitea', repo: 'owner/repo', app_id: 'app' } };
+
+      parseBackendConfig(config, collectors);
+
+      expect(collectors.errors.size).toBe(0);
+    });
+
+    it('should warn when the Forgejo backend has no app_id', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        backend: { name: 'forgejo', repo: 'owner/repo', api_root: 'https://codeberg.org/api/v1' },
+      };
+
+      parseBackendConfig(config, collectors);
+
+      expect(collectors.errors.size).toBe(0);
+      expect([...collectors.warnings][0]).toContain('OAuth application ID is not defined');
+    });
+
+    it('should link to the Gitea/Forgejo documentation', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+      const original = mockI18nStrings['config.error.oauth_implicit_flow'];
+
+      mockI18nStrings['config.error.oauth_implicit_flow'] = 'Not supported. <a>Learn more</a>';
+
+      /** @type {any} */
+      const config = {
+        backend: {
+          name: 'forgejo',
+          repo: 'owner/repo',
+          app_id: 'app',
+          api_root: 'https://codeberg.org/api/v1',
+          auth_type: 'implicit',
+        },
+      };
+
+      try {
+        parseBackendConfig(config, collectors);
+      } finally {
+        mockI18nStrings['config.error.oauth_implicit_flow'] = original;
+      }
+
+      expect([...collectors.errors][0]).toContain(
+        'href="https://sveltiacms.app/en/docs/backends/gitea-forgejo#authentication"',
+      );
     });
   });
 
@@ -971,6 +1063,49 @@ describe('parseBackendConfig', () => {
       parseBackendConfig(config, collectors);
 
       expect(collectors.warnings.size).toBe(0);
+    });
+
+    it('should accept a list of scopes that adds `workflow`', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        publish_mode: 'editorial_workflow',
+        backend: {
+          name: 'github',
+          repo: 'owner/repo',
+          open_authoring: true,
+          auth_scope: ['public_repo', 'workflow'],
+        },
+      };
+
+      parseBackendConfig(config, collectors);
+
+      expect(collectors.errors.size).toBe(0);
+      expect(collectors.warnings.size).toBe(0);
+    });
+
+    it('should error when a list of scopes has no repository scope', async () => {
+      const { parseBackendConfig } = await import('./backend.js');
+      const collectors = createCollectors();
+
+      /** @type {any} */
+      const config = {
+        publish_mode: 'editorial_workflow',
+        backend: {
+          name: 'github',
+          repo: 'owner/repo',
+          open_authoring: true,
+          auth_scope: ['workflow'],
+        },
+      };
+
+      parseBackendConfig(config, collectors);
+
+      expect([...collectors.errors]).toEqual([
+        'The `auth_scope` option must include `repo` or `public_repo`.',
+      ]);
     });
 
     it('should error without the editorial workflow publish mode', async () => {

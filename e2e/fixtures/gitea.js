@@ -11,6 +11,7 @@ import { getBlobSHA, MockGitRepository } from './git.js';
  * @property {number} number Pull request index, which the API paths use.
  * @property {number} id Internal ID, unique across the instance.
  * @property {string} title Title. A work in progress carries a `WIP: ` prefix.
+ * @property {string} [body] Description.
  * @property {string} headBranch Head branch name.
  * @property {number} headRepoId ID of the repository the head branch is in: the repository’s own,
  * or the fork’s for a pull request from a fork.
@@ -26,6 +27,8 @@ import { getBlobSHA, MockGitRepository } from './git.js';
  * @property {string} [mergeBaseSHA] Commit the pull request shared with the configured branch when
  * it was merged, which the instance stores and lists its files from afterwards.
  * @property {MockUser} author Author.
+ * @property {{ id: number, login: string, commitId?: string }[]} [approvals] Approvals the pull
+ * request has been given and that still stand, not deleted.
  */
 
 /**
@@ -64,6 +67,11 @@ export class MockGitea extends MockGitRepository {
    * @type {boolean | undefined}
    */
   forgejo = undefined;
+
+  /**
+   * Number of reviews submitted so far, which gives each one its ID.
+   */
+  reviewCount = 0;
 
   /**
    * Version the instance reports. A Forgejo version carries the Gitea version it’s based on, e.g.
@@ -136,6 +144,7 @@ export class MockGitea extends MockGitRepository {
    * @param {object} args Arguments.
    * @param {string} args.title Title.
    * @param {string} args.headBranch Head branch name.
+   * @param {string} [args.body] Description.
    * @param {object} [options] Options.
    * @param {number} [options.headRepoId] ID of the repository holding the head branch.
    * @param {string} [options.baseBranch] Base branch name, the configured one by default.
@@ -144,7 +153,7 @@ export class MockGitea extends MockGitRepository {
    * @returns {MockPullRequest} Pull request.
    */
   openPullRequest(
-    { title, headBranch },
+    { title, headBranch, body = '' },
     { headRepoId = REPO_ID, baseBranch = this.branch, labels = [], author } = {},
   ) {
     labels.forEach((name) => this.createLabel(name));
@@ -154,6 +163,7 @@ export class MockGitea extends MockGitRepository {
       number: this.pullRequests.length + 1,
       id: 900 + this.pullRequests.length + 1,
       title,
+      body,
       headBranch,
       headRepoId,
       baseBranch,
@@ -734,9 +744,10 @@ export class MockGitea extends MockGitRepository {
    * @returns {Record<string, any>} Item.
    */
   toPullRequestItem(pullRequest, { list = false } = {}) {
-    const { number, id, title, headBranch, headRepoId, baseBranch, labels, state, merged, author } =
+    const { number, id, title, body, headBranch, headRepoId, baseBranch, labels, state } =
       pullRequest;
 
+    const { merged, author } = pullRequest;
     const fromFork = headRepoId !== REPO_ID;
     const branchKey = fromFork ? this.forkBranch(headBranch) : headBranch;
     const liveHeadSHA = this.refs.has(branchKey) ? this.getHead(branchKey).oid : '';
@@ -746,6 +757,7 @@ export class MockGitea extends MockGitRepository {
       number,
       id,
       title,
+      body,
       html_url: `https://gitea.com/${this.owner}/${this.repo}/pulls/${number}`,
       state,
       merged,
@@ -871,7 +883,13 @@ export class MockGitea extends MockGitRepository {
       }
 
       if (method === 'POST') {
-        const { title, head, base } = /** @type {Record<string, string>} */ (body);
+        const {
+          title,
+          head,
+          base,
+          body: description,
+        } = /** @type {Record<string, string>} */ (body);
+
         // A cross-repository head is named `owner:branch`
         const [owner, forkRef] = head.includes(':') ? head.split(':') : [undefined, undefined];
 
@@ -879,7 +897,7 @@ export class MockGitea extends MockGitRepository {
           status: 201,
           json: this.toPullRequestItem(
             this.openPullRequest(
-              { title, headBranch: forkRef ?? head },
+              { title, headBranch: forkRef ?? head, body: description },
               {
                 headRepoId: owner ? FORK_REPO_ID : REPO_ID,
                 author: this.user,
@@ -913,6 +931,10 @@ export class MockGitea extends MockGitRepository {
         pullRequest.title = body.title;
       }
 
+      if (typeof body?.body === 'string') {
+        pullRequest.body = body.body;
+      }
+
       if (body?.state === 'closed' || body?.state === 'open') {
         pullRequest.state = body.state;
         pullRequest.closedHeadSHA =
@@ -920,6 +942,57 @@ export class MockGitea extends MockGitRepository {
       }
 
       return { json: this.toPullRequestItem(pullRequest) };
+    }
+
+    if (method === 'GET' && segments[1] === 'reviews' && !segments[2]) {
+      return {
+        json: this.paginate(pullRequest.approvals ?? [], searchParams).map(
+          ({ id, login, commitId }) => ({
+            id,
+            state: 'APPROVED',
+            dismissed: false,
+            commit_id: commitId,
+            user: { login },
+          }),
+        ),
+      };
+    }
+
+    if (method === 'DELETE' && segments[1] === 'reviews' && segments[2]) {
+      const review = pullRequest.approvals?.find(({ id }) => id === Number(segments[2]));
+
+      if (!review) {
+        return { status: 404, json: { message: 'Not Found' } };
+      }
+
+      // Like Gitea, let a reviewer delete only their own review
+      if (review.login !== this.user.login) {
+        return { status: 403, json: { message: 'no permission to delete comment' } };
+      }
+
+      pullRequest.approvals = pullRequest.approvals?.filter((approval) => approval !== review);
+
+      return { status: 204, body: '' };
+    }
+
+    if (method === 'POST' && segments[1] === 'reviews') {
+      // Like Gitea, refuse an approval of one’s own pull request
+      if (body?.event === 'APPROVED' && pullRequest.author.login === this.user.login) {
+        return { status: 422, json: { message: 'approve your own pull is not allowed' } };
+      }
+
+      this.reviewCount += 1;
+
+      const id = this.reviewCount;
+
+      if (body?.event === 'APPROVED') {
+        pullRequest.approvals = [
+          ...(pullRequest.approvals ?? []),
+          { id, login: this.user.login, commitId: body.commit_id },
+        ];
+      }
+
+      return { json: { id, state: 'APPROVED', commit_id: body?.commit_id } };
     }
 
     if (segments[1] === 'merge') {

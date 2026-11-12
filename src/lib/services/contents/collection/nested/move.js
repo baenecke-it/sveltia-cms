@@ -7,13 +7,17 @@ import {
   getSharedEntryFileName,
   isDescendantPath,
 } from '$lib/services/contents/collection/nested';
+import { hasLocalizedSlugs } from '$lib/services/contents/collection/slug';
 import {
   buildEntryFileChanges,
   resolveCacheDB,
 } from '$lib/services/contents/draft/save/file-changes';
-import { hasLocalizedSlugs } from '$lib/services/contents/draft/slugs';
 import { createSyntheticDraft } from '$lib/services/contents/entry/changes';
+import { mapEntryContent } from '$lib/services/contents/entry/locales';
+import { getEntryLocaleFile } from '$lib/services/contents/entry/paths';
+import { refreshPermalinks } from '$lib/services/contents/entry/permalink';
 import { resolveFileConfig } from '$lib/services/contents/file/config';
+import { getBaseName } from '$lib/services/utils/file';
 
 /**
  * @import { IndexedDB } from '@sveltia/utils/storage';
@@ -23,6 +27,7 @@ import { resolveFileConfig } from '$lib/services/contents/file/config';
  * InternalCollection,
  * InternalEntryCollection,
  * InternalLocaleCode,
+ * LocalizedEntry,
  * } from '$lib/types/private';
  * @import { EntryFilePlan } from '$lib/services/contents/draft/save/file-changes';
  */
@@ -111,7 +116,7 @@ const moveEntry = ({ entry, dirMove, localeDirMoves }) => {
 };
 
 /**
- * Refresh the canonical slug of a moved entry. In a nested collection with localized slugs, the
+ * Refresh the canonical slug of a moved entry. Among nested entries with localized slugs, the
  * localized files are linked by the default locale’s sub path, which has just changed, so each file
  * gets the new one, or the link would go stale and stop matching the entry’s own location.
  * @param {object} args Arguments.
@@ -146,18 +151,11 @@ const updateCanonicalSlug = ({ collection, entry }) => {
           currentSlug: subPath,
         });
 
-  return {
-    ...entry,
-    locales: Object.fromEntries(
-      Object.entries(locales).map(([locale, localizedEntry]) => [
-        locale,
-        localizedEntry.content
-          ? // Copy the content, which is shared with the entry in the store
-            { ...localizedEntry, content: { ...localizedEntry.content, [key]: canonicalSlug } }
-          : localizedEntry,
-      ]),
-    ),
-  };
+  // Copy the content, which is shared with the entry in the store
+  return mapEntryContent(entry, ({ localizedEntry: { content } }) => ({
+    ...content,
+    [key]: canonicalSlug,
+  }));
 };
 
 /**
@@ -188,8 +186,15 @@ const buildMoveChanges = async ({ collection, originalEntry, movedEntry, draft, 
      */
     planChange: (locale) => {
       if (locale === undefined) {
-        const previousPath = originalEntry.locales[defaultLocale].path;
-        const { slug, path } = movedEntry.locales[defaultLocale];
+        // The default locale can be missing from a single-file i18n entry; another locale then
+        // has the same path
+        const { path: previousPath } = /** @type {LocalizedEntry} */ (
+          getEntryLocaleFile(originalEntry, { defaultLocale })
+        );
+
+        const { slug, path } = /** @type {LocalizedEntry} */ (
+          getEntryLocaleFile(movedEntry, { defaultLocale })
+        );
 
         return { action: 'move', slug, path, previousPath, currentPath: previousPath };
       }
@@ -223,7 +228,7 @@ const buildMoveChanges = async ({ collection, originalEntry, movedEntry, draft, 
 };
 
 /**
- * Build the file changes that move the whole subtree of a nested collection entry along with the
+ * Build the file changes that move the whole subtree of a nested entry along with the
  * entry itself. In the `subfolders` mode, an entry stored as the index file owns the folder it’s
  * stored in, so relocating it with the path editor has to take everything below that folder with
  * it, or the descendants would be orphaned in a folder that no longer has an entry of its own.
@@ -250,11 +255,7 @@ export const buildNestedMoveChanges = async ({
   // An entry only owns its folder when it’s stored as the index file that names every entry in the
   // `subfolders` mode. Otherwise it’s a regular file sharing the folder with its siblings and with
   // whatever is below, none of which moves with it
-  if (
-    !originalEntry ||
-    !indexFileName ||
-    originalEntry.subPath.slice(originalEntry.subPath.lastIndexOf('/') + 1) !== indexFileName
-  ) {
+  if (!originalEntry || !indexFileName || getBaseName(originalEntry.subPath) !== indexFileName) {
     return noChanges;
   }
 
@@ -301,7 +302,10 @@ export const buildNestedMoveChanges = async ({
       ? [
           {
             originalEntry: entry,
-            movedEntry: updateCanonicalSlug({ collection, entry: movedEntry }),
+            movedEntry: refreshPermalinks({
+              collection,
+              entry: updateCanonicalSlug({ collection, entry: movedEntry }),
+            }),
           },
         ]
       : [];

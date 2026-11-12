@@ -1,7 +1,5 @@
 import { unique } from '@sveltia/utils/array';
 import { isTextFileType } from '@sveltia/utils/file';
-import { sleep } from '@sveltia/utils/misc';
-import mime from 'mime';
 
 import { fetchAllPages, fetchPages } from '$lib/services/backends/git/gitea/api';
 import { fetchRawFile } from '$lib/services/backends/git/gitea/files';
@@ -10,11 +8,21 @@ import { repository } from '$lib/services/backends/git/gitea/repository';
 import { fetchAPI } from '$lib/services/backends/git/shared/api';
 import { fetchAPIOrUndefined } from '$lib/services/backends/git/shared/api-optional';
 import { runConcurrently } from '$lib/services/backends/git/shared/concurrency';
+import { pollUntil, SETTLE_POLL } from '$lib/services/backends/git/shared/poll';
 import {
   createDraftTitleCodec,
-  PULL_REQUEST_DESCRIPTION,
+  parseRestFiles,
+  parseRestPullRequest,
+  toCommitAuthor,
 } from '$lib/services/backends/git/shared/pull-requests';
+import {
+  getPullRequestPath,
+  getRepositoryPath,
+  getRestBranchPath,
+} from '$lib/services/backends/git/shared/repository';
 import { deleteRemoteBranch } from '$lib/services/backends/git/shared/workflow';
+import { getEntryFoldersByPath } from '$lib/services/contents/folders';
+import mime from '$lib/services/utils/mime';
 import { encodePathSegments } from '$lib/services/utils/url';
 import {
   getStatusFromLabels,
@@ -25,6 +33,7 @@ import { forkedRepository } from '$lib/services/workflow/open-authoring';
 
 /**
  * @import {
+ * CommitAuthor,
  * FileChange,
  * RepositoryPath,
  * WorkflowFile,
@@ -78,6 +87,13 @@ export const isSameRepositoryPullRequest = ({ head, base }) =>
   typeof head?.repo_id === 'number' && head.repo_id !== -1 && head.repo_id === base?.repo_id;
 
 /**
+ * Parse the user who opened a pull request, as the REST API returns it.
+ * @param {Record<string, any> | undefined} user User object.
+ * @returns {CommitAuthor | undefined} Author, or `undefined` if the user is unknown.
+ */
+const parseAuthor = (user) => toCommitAuthor({ ...user, name: user?.full_name });
+
+/**
  * Parse a pull request returned by the REST API.
  * @param {Record<string, any>} item Pull request.
  * @returns {WorkflowPullRequest | undefined} Parsed pull request, or `undefined` if the pull
@@ -93,7 +109,7 @@ export const parsePullRequest = (item) => {
     return undefined;
   }
 
-  const { ref: branch, sha: headSHA } = item.head ?? {};
+  const { ref: branch } = item.head ?? {};
 
   // A pull request from a fork has its branch in a repository this flow can’t read. Labelling one
   // by hand would otherwise put a card on the board showing the configured repository’s branch of
@@ -111,21 +127,13 @@ export const parsePullRequest = (item) => {
     return undefined;
   }
 
-  const { full_name: fullName, login, email, id } = item.user ?? {};
-
-  return {
-    number: item.number,
-    nodeId: String(item.id),
+  return parseRestPullRequest(item, {
     title: wipTitle.strip(item.title),
-    url: item.html_url,
     branch,
-    headSHA,
     status,
-    createdDate: new Date(item.created_at),
-    updatedDate: new Date(item.updated_at),
-    author: login ? { name: fullName || login, email: email ?? '', id, login } : undefined,
-    files: [],
-  };
+    author: parseAuthor(item.user),
+    description: item.body ?? '',
+  });
 };
 
 /**
@@ -141,11 +149,10 @@ export const parsePullRequest = (item) => {
  * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoGetGitRef
  */
 export const fetchPullRequestHeadRef = async (number) => {
-  const { owner, repo } = repository;
   const ref = `refs/pull/${number}/head`;
 
   const result = /** @type {Record<string, any> | Record<string, any>[] | undefined} */ (
-    await fetchAPIOrUndefined(`/repos/${owner}/${repo}/git/${ref}`)
+    await fetchAPIOrUndefined(`${getRepositoryPath(repository)}/git/${ref}`)
   );
 
   if (!result) {
@@ -165,7 +172,7 @@ export const fetchPullRequestHeadRef = async (number) => {
  * head in the background once a commit is pushed, so a list read right after a save can still
  * describe the commit before it.
  */
-const FILE_LIST_POLL = { attempts: 10, interval: 1000 };
+const FILE_LIST_POLL = SETTLE_POLL;
 /**
  * How many times the changed files are read for the board, which only waits a moment for the
  * reference to catch up. A list that still describes another commit then is shown as of that
@@ -195,36 +202,31 @@ const getListedCommit = ({ contents_url: url }) => {
  * If it doesn’t, the list can’t vouch for the commit, and is reported as incomplete.
  * @param {number} number Pull request number.
  * @param {string} headSHA Git object ID of the commit.
- * @param {number} [attemptsLeft] Remaining reads, including this one.
+ * @param {number} [attempts] Number of reads at most, including the first one.
  * @returns {Promise<{ files: Record<string, any>[], complete: boolean, commit?: string }>} Files,
  * whether they are every file changed as of the commit, and the commit they were listed at, if
  * they name a single one.
  * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoGetPullRequestFiles
  */
-export const fetchChangedFiles = async (
-  number,
-  headSHA,
-  attemptsLeft = FILE_LIST_POLL.attempts,
-) => {
-  const { owner, repo } = repository;
-  const { items, complete } = await fetchPages(`/repos/${owner}/${repo}/pulls/${number}/files`);
+export const fetchChangedFiles = (number, headSHA, attempts = FILE_LIST_POLL.attempts) =>
+  pollUntil(
+    async () => {
+      const { items, complete } = await fetchPages(
+        `${getPullRequestPath(repository, number)}/files`,
+      );
 
-  const listedCommits = items.length
-    ? [...new Set(items.map((file) => getListedCommit(file)))]
-    : [await fetchPullRequestHeadRef(number)];
+      const listedCommits = items.length
+        ? [...new Set(items.map((file) => getListedCommit(file)))]
+        : [await fetchPullRequestHeadRef(number)];
 
-  // The single commit every file was listed at, if they agree on one
-  const commit = listedCommits.length === 1 ? (listedCommits[0] ?? undefined) : undefined;
-  const current = commit === headSHA;
+      // The single commit every file was listed at, if they agree on one
+      const commit = listedCommits.length === 1 ? (listedCommits[0] ?? undefined) : undefined;
 
-  if (current || attemptsLeft <= 1) {
-    return { files: items, complete: complete && current, commit };
-  }
-
-  await sleep(FILE_LIST_POLL.interval);
-
-  return fetchChangedFiles(number, headSHA, attemptsLeft - 1);
-};
+      return { files: items, complete: complete && commit === headSHA, commit };
+    },
+    ({ commit }) => commit === headSHA,
+    { ...FILE_LIST_POLL, attempts },
+  );
 
 /**
  * Fetch the list of files changed in the given pull request as of its head commit, the one a
@@ -239,7 +241,6 @@ export const fetchChangedFiles = async (
  * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoGetPullRequestFiles
  */
 export const fetchPullRequestFileList = async (pullRequest) => {
-  const { owner, repo } = repository;
   const { number, headSHA } = /** @type {{ number: number, headSHA?: string }} */ (pullRequest);
   /** @type {Record<string, any>[]} */
   let files;
@@ -250,16 +251,10 @@ export const fetchPullRequestFileList = async (pullRequest) => {
     files = result.files;
     pullRequest.headSHA = result.commit;
   } else {
-    files = await fetchAllPages(`/repos/${owner}/${repo}/pulls/${number}/files`);
+    files = await fetchAllPages(`${getPullRequestPath(repository, number)}/files`);
   }
 
-  pullRequest.files = files.map(({ filename, status, previous_filename: previousPath }) => ({
-    path: filename,
-    sha: '',
-    size: 0,
-    deleted: status === 'deleted',
-    previousPath: previousPath || undefined,
-  }));
+  pullRequest.files = parseRestFiles(files, { removedStatus: 'deleted' });
 };
 
 /**
@@ -278,6 +273,21 @@ export const decodeFileText = (content) => {
 };
 
 /**
+ * Check whether the given file holds text, which is worth reading again when an instance omits its
+ * content. An entry file always does, whatever its extension: a custom one like `njk` or `svx` has
+ * no MIME type, and TOML’s `application/toml` isn’t counted as text by `isTextFileType()`.
+ * @param {string} path File path.
+ * @returns {boolean} Result.
+ */
+const isTextFile = (path) => {
+  const type = mime.getType(path) ?? '';
+
+  return (
+    isTextFileType(type) || type === 'application/toml' || !!getEntryFoldersByPath(path).length
+  );
+};
+
+/**
  * Fetch the content of a single file changed in the given pull request, and populate the
  * {@link WorkflowFile} object in place.
  * @param {WorkflowPullRequest} pullRequest Pull request the file belongs to.
@@ -288,13 +298,13 @@ export const fetchPullRequestFileContent = async (pullRequest, file) => {
   // A workflow branch lives in the contributor’s fork with Open Authoring, so that’s where the file
   // has to be read from. It’s read at the head commit rather than the branch, so the content shown
   // is that of the commit a publish is pinned to, even if the branch moves on while the board loads
-  const { owner, repo } = getWorkflowRepository();
   const { path } = file;
   const ref = pullRequest.headSHA ?? pullRequest.branch;
 
   const result = /** @type {Record<string, any> | undefined} */ (
     await fetchAPIOrUndefined(
-      `/repos/${owner}/${repo}/contents/${encodePathSegments(path)}?ref=${encodeURIComponent(ref)}`,
+      `${getRepositoryPath(getWorkflowRepository())}/contents/${encodePathSegments(path)}` +
+        `?ref=${encodeURIComponent(ref)}`,
     )
   );
 
@@ -316,7 +326,7 @@ export const fetchPullRequestFileContent = async (pullRequest, file) => {
   // An instance omits the content of an oversized blob, and keeping that empty would wipe the file
   // the next time the entry is saved. Only a text file is worth reading again; the media that make
   // up most of the oversized blobs have no text to store anyway
-  if (!content && file.size && isTextFileType(mime.getType(path) ?? '')) {
+  if (!content && file.size && isTextFile(path)) {
     file.text = await fetchRawFile(path, ref);
   }
 };
@@ -344,10 +354,8 @@ export const fetchPullRequestFileContents = async (pullRequest) => {
  * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoGetBranch
  */
 export const fetchBranchHead = async (branch) => {
-  const { owner, repo } = getWorkflowRepository();
-
   const result = /** @type {{ commit?: { id?: string } } | undefined} */ (
-    await fetchAPIOrUndefined(`/repos/${owner}/${repo}/branches/${encodePathSegments(branch)}`)
+    await fetchAPIOrUndefined(getRestBranchPath(getWorkflowRepository(), branch))
   );
 
   return result?.commit?.id;
@@ -360,11 +368,9 @@ export const fetchBranchHead = async (branch) => {
  * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoDeleteBranch
  */
 export const deleteBranch = async (branch) => {
-  const { owner, repo } = getWorkflowRepository();
-
   await deleteRemoteBranch({
     branch,
-    path: `/repos/${owner}/${repo}/branches/${encodePathSegments(branch)}`,
+    path: getRestBranchPath(getWorkflowRepository(), branch),
     goneStatuses: [404],
   });
 };
@@ -376,9 +382,7 @@ export const deleteBranch = async (branch) => {
  * @see https://docs.gitea.com/api/next/#tag/issue/operation/issueCreateLabel
  */
 export const createStatusLabel = async (status) => {
-  const { owner, repo } = repository;
-
-  await fetchAPI(`/repos/${owner}/${repo}/labels`, {
+  await fetchAPI(`${getRepositoryPath(repository)}/labels`, {
     method: 'POST',
     body: {
       name: getStatusLabel(status),
@@ -403,8 +407,7 @@ export const createStatusLabel = async (status) => {
  * @see https://docs.gitea.com/api/next/#tag/issue/operation/issueReplaceLabels
  */
 export const applyLabels = async (number, labels, status, method) => {
-  const { owner, repo } = repository;
-  const path = `/repos/${owner}/${repo}/issues/${number}/labels`;
+  const path = `${getRepositoryPath(repository)}/issues/${number}/labels`;
   const statusLabel = getStatusLabel(status);
 
   const result = /** @type {Record<string, any>[]} */ (
@@ -428,11 +431,10 @@ export const applyLabels = async (number, labels, status, method) => {
  * @see https://docs.gitea.com/api/next/#tag/issue/operation/issueGetLabels
  */
 export const updateLabels = async (pullRequest, status) => {
-  const { owner, repo } = repository;
   const { number } = pullRequest;
 
   const labels = /** @type {Record<string, any>[]} */ (
-    await fetchAPI(`/repos/${owner}/${repo}/issues/${number}/labels`)
+    await fetchAPI(`${getRepositoryPath(repository)}/issues/${number}/labels`)
   );
 
   const newLabels = replaceStatusLabel(
@@ -451,10 +453,9 @@ export const updateLabels = async (pullRequest, status) => {
  * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoEditPullRequest
  */
 export const updateDraftState = async (pullRequest, isDraft) => {
-  const { owner, repo } = repository;
   const { number, title } = pullRequest;
 
-  await fetchAPI(`/repos/${owner}/${repo}/pulls/${number}`, {
+  await fetchAPI(getPullRequestPath(repository, number), {
     method: 'PATCH',
     body: { title: wipTitle.format(title, isDraft) },
   });
@@ -467,23 +468,24 @@ export const updateDraftState = async (pullRequest, isDraft) => {
  * @param {string} args.branch Workflow branch name.
  * @param {string} args.title Pull request title.
  * @param {WorkflowStatus} args.status Status to open the pull request with.
+ * @param {string} args.description Pull request description.
  * @returns {Promise<WorkflowPullRequest>} Created pull request.
  * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoCreatePullRequest
  */
-export const createPullRequest = async ({ branch, title, status }) => {
-  const { owner, repo, branch: baseBranch } = repository;
+export const createPullRequest = async ({ branch, title, status, description }) => {
+  const { branch: baseBranch } = repository;
   const fork = forkedRepository.current;
   const isDraft = status === 'draft';
 
   const result = /** @type {Record<string, any>} */ (
-    await fetchAPI(`/repos/${owner}/${repo}/pulls`, {
+    await fetchAPI(`${getRepositoryPath(repository)}/pulls`, {
       method: 'POST',
       body: {
         title: wipTitle.format(title, isDraft),
         // A cross-repository pull request identifies its head branch by the fork’s owner
         head: fork ? `${fork.owner}:${branch}` : branch,
         base: baseBranch,
-        body: PULL_REQUEST_DESCRIPTION,
+        body: description,
       },
     })
   );
@@ -497,18 +499,14 @@ export const createPullRequest = async ({ branch, title, status }) => {
     await applyLabels(result.number, [getStatusLabel(status)], status, 'POST');
   }
 
-  return {
-    number: result.number,
-    nodeId: String(result.id),
+  return parseRestPullRequest(result, {
     title,
-    url: result.html_url,
     branch,
-    headSHA: result.head?.sha,
     status,
-    createdDate: new Date(result.created_at),
-    updatedDate: new Date(result.updated_at),
-    files: [],
-  };
+    // The signed-in user, which is how a later save recognizes the pull request as their own
+    author: parseAuthor(result.user),
+    description,
+  });
 };
 
 /**
@@ -532,7 +530,8 @@ const getSourcePath = ({ action, path, previousPath }) =>
 export const fetchFileSHA = async (path, ref, { owner, repo } = getWorkflowRepository()) => {
   const result = /** @type {Record<string, any> | undefined} */ (
     await fetchAPIOrUndefined(
-      `/repos/${owner}/${repo}/contents/${encodePathSegments(path)}?ref=${encodeURIComponent(ref)}`,
+      `${getRepositoryPath({ owner, repo })}/contents/${encodePathSegments(path)}` +
+        `?ref=${encodeURIComponent(ref)}`,
     )
   );
 

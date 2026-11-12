@@ -11,7 +11,12 @@
   import EntryReorderList from '$lib/components/contents/list/entry-reorder-list.svelte';
   import EntryTableHead from '$lib/components/contents/list/entry-table-head.svelte';
   import CreateEntryButton from '$lib/components/contents/toolbar/create-entry-button.svelte';
-  import { getGroupLabel, isGroupCollapsed, setGroupCollapsed } from '$lib/services/common/view';
+  import {
+    getGroupLabel,
+    isCollapsedByDefault,
+    isGroupCollapsed,
+    setGroupCollapsed,
+  } from '$lib/services/common/view';
   import { selectedCollection } from '$lib/services/contents/collection';
   import {
     bulkEditing,
@@ -20,6 +25,7 @@
     listedUnpublishedEntries,
     reordering,
   } from '$lib/services/contents/collection/view';
+  import { viewGroups } from '$lib/services/contents/collection/view/group';
   import {
     currentView,
     getEntryOrderKey,
@@ -28,6 +34,7 @@
   } from '$lib/services/contents/collection/view/settings';
   import { sortKeys } from '$lib/services/contents/collection/view/sort-keys';
   import { getTableColumns } from '$lib/services/contents/collection/view/table';
+  import { getEntryLocaleFile } from '$lib/services/contents/entry/paths';
   import { env } from '$lib/services/user/env.svelte';
   import { openAuthoring } from '$lib/services/workflow/open-authoring';
 
@@ -52,7 +59,10 @@
       ? getTableColumns({ collection, sortKeys: sortKeys.current.map(({ key }) => key) })
       : [],
   );
-  const allEntries = $derived(entryGroups.current.flatMap(({ entries }) => entries));
+  const collapsedByDefault = $derived(
+    isCollapsedByDefault(viewGroups.current, currentView.current.group),
+  );
+  const hasEntries = $derived(entryGroups.current.some(({ entries }) => entries.length));
   // Changes when the entries are sorted, filtered or grouped differently, which starts the list
   // again from the top: the rows are rendered anew a chunk at a time, rather than every row loaded
   // so far being rendered at once in the new order, and the list is scrolled back to the top
@@ -83,15 +93,18 @@
         ? _('workflow.published_entries')
         : undefined}
     collapsible={name !== '*'}
-    expanded={!isGroupCollapsed(currentView.current, name)}
+    expanded={!isGroupCollapsed(currentView.current, name, collapsedByDefault)}
     onChange={({ detail: { expanded } }) => {
-      currentView.current = setGroupCollapsed(currentView.current, name, !expanded);
+      currentView.current = setGroupCollapsed(
+        currentView.current,
+        name,
+        !expanded,
+        collapsedByDefault,
+      );
     }}
   >
     <InfiniteScroll
-      items={entries.filter(
-        ({ locales }) => !!(locales[defaultLocale] ?? Object.values(locales)[0])?.content,
-      )}
+      items={entries.filter((entry) => !!getEntryLocaleFile(entry, { defaultLocale })?.content)}
       itemKey="id"
     >
       {#snippet renderItem(/** @type {Entry} */ entry)}
@@ -105,7 +118,7 @@
   {#if collection}
     {#if bulkEditing.current}
       <EntryBulkEditList {collection} />
-    {:else if allEntries.length || listedUnpublishedEntries.current.length}
+    {:else if hasEntries || listedUnpublishedEntries.current.length}
       <ListingGrid
         {viewType}
         id="entry-list"

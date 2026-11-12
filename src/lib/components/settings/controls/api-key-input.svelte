@@ -8,6 +8,7 @@
 
   /**
    * @import {
+   * AiService,
    * MediaLibraryService,
    * SettingsPanelOnChangeArgs,
    * TranslationService,
@@ -17,21 +18,14 @@
   /**
    * @typedef {object} Props
    * @property {string} serviceId The ID of the service for which the API key is being input.
-   * @property {MediaLibraryService | TranslationService} service The service for which the API key
-   * is being input.
+   * @property {AiService | MediaLibraryService | TranslationService} service The service for
+   * which the API key is being input.
    * @property {string} [ariaLabel] Custom aria-label for the input.
    * @property {(detail: SettingsPanelOnChangeArgs) => void} [onChange] `change` event handler.
    */
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    serviceId,
-    service,
-    ariaLabel,
-    onChange = undefined,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { serviceId, service, ariaLabel, onChange = undefined } = $props();
 
   const { apiKeyPattern } = $derived(service);
 

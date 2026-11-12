@@ -15,22 +15,21 @@
 
   import BulkEditCell from '$lib/components/contents/list/bulk-edit-cell.svelte';
   import { getGroupLabel } from '$lib/services/common/view';
-  import {
-    getBulkEditValue,
-    isBulkEditableEntry,
-    setBulkEditValue,
-    validateBulkEdits,
-  } from '$lib/services/contents/collection/entries/bulk-edit';
+  import { getBulkEditValue } from '$lib/services/contents/collection/entries/bulk-edit';
   import { getBulkEditableFields } from '$lib/services/contents/collection/entries/bulk-edit/config';
+  import {
+    snapshotBulkEditGroups,
+    updateBulkEditValue,
+  } from '$lib/services/contents/collection/entries/bulk-edit/session';
   import {
     bulkEditedEntries,
     bulkEditErrors,
     bulkEdits,
     bulkEditSaving,
-    entryGroups,
   } from '$lib/services/contents/collection/view';
   import { setEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
   import { getEntrySummary } from '$lib/services/contents/entry/summary';
+  import { getFieldLabel } from '$lib/services/contents/i18n/options';
 
   /**
    * @import { Entry, InternalEntryCollection } from '$lib/types/private';
@@ -48,7 +47,9 @@
 
   // The field controls are those of the entry editor, some of which look for the draft being
   // edited, e.g. to offer the entries a Relation field can create. There is no draft here, as the
-  // values are kept in the bulk edits, so the controls are given an empty one
+  // values are kept in the bulk edits, so the controls are given an empty one, which keeps the
+  // draft-only features off. Each cell provides the values and slug of its row instead, which the
+  // controls read through `getEditorEntryValues()`
   setEntryDraftContext(/** @type {EntryDraftState} */ ({ current: undefined }));
 
   const fields = $derived(getBulkEditableFields(collection));
@@ -61,28 +62,13 @@
   let groups = $state.raw([]);
 
   /**
-   * Record a new value of a field, and validate the edits again if the user has been told some of
-   * them are invalid, so a fixed field stops being reported.
+   * Record a new value of a field.
    * @param {Entry} entry Entry.
    * @param {FieldKeyPath} keyPath Field name.
    * @param {any} value New value.
    */
   const updateValue = (entry, keyPath, value) => {
-    bulkEdits.current = setBulkEditValue({
-      collection,
-      entry,
-      keyPath,
-      value,
-      edits: bulkEdits.current,
-    });
-
-    if (Object.keys(bulkEditErrors.current).length) {
-      bulkEditErrors.current = validateBulkEdits({
-        collection,
-        entries: bulkEditedEntries.current,
-        edits: bulkEdits.current,
-      });
-    }
+    updateBulkEditValue({ collection, entry, keyPath, value });
   };
 
   /* v8 ignore start -- the app locale is always set once the UI strings are loaded */
@@ -104,14 +90,7 @@
 
   // Snapshot the entry groups once, when the mode is entered. See the component description
   onMount(() => {
-    groups = entryGroups.current
-      .map(({ name, entries }) => ({
-        name,
-        entries: entries.filter((entry) => isBulkEditableEntry(collection, entry)),
-      }))
-      .filter(({ entries }) => entries.length);
-
-    bulkEditedEntries.current = groups.flatMap(({ entries }) => entries);
+    groups = snapshotBulkEditGroups(collection);
   });
 </script>
 
@@ -125,8 +104,8 @@
   >
     <div role="row" class="row header" aria-rowindex={1}>
       <div role="columnheader" class="cell title">{_('bulk_edit_entry')}</div>
-      {#each fields as { name, label } (name)}
-        <div role="columnheader" class="cell">{label || name}</div>
+      {#each fields as field (field.name)}
+        <div role="columnheader" class="cell">{getFieldLabel({ config: field, locale })}</div>
       {/each}
       <div role="none" class="cell filler"></div>
     </div>
@@ -170,6 +149,8 @@
                       keyPath,
                       edits: bulkEdits.current,
                     })}
+                    {entry}
+                    entryEdits={edits}
                     edited={!!edits && Object.hasOwn(edits, keyPath)}
                     errors={bulkEditErrors.current[entry.id]?.[keyPath]}
                     readonly={bulkEditSaving.current}

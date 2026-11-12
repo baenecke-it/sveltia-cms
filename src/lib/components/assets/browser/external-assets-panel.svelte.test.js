@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { page } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
+import AssetUpdatesToast from '$lib/components/assets/shared/asset-updates-toast.svelte';
+import { prepareExternalUploads } from '$lib/services/assets/external/data';
 import { selectAssetsView } from '$lib/services/contents/editor';
 import { env } from '$lib/services/user/env.svelte';
 import { prefs } from '$lib/services/user/prefs.svelte';
@@ -30,6 +32,7 @@ vi.mock('$lib/services/assets/external/data', async (importOriginal) => {
 
   return {
     ...actual,
+    prepareExternalUploads: vi.fn(actual.prepareExternalUploads),
     fetchExternalAssetBlob: vi.fn(
       async (/** @type {import('$lib/types/private').ExternalAsset} */ asset) =>
         heldDownloads.get(asset.downloadURL) ?? actual.fetchExternalAssetBlob(asset),
@@ -57,7 +60,7 @@ const getOption = (id) =>
  * @returns {import('vitest/browser').Locator} Locator.
  */
 const getAssetOptions = () =>
-  page.getByRole('listbox', { name: 'Available Images' }).getByRole('option');
+  page.getByRole('listbox', { name: /^Available (Images|Files)$/ }).getByRole('option');
 
 /**
  * Wait for the list to be rendered.
@@ -90,6 +93,8 @@ describe('ExternalAssetsPanel', () => {
     const { container } = await render(ExternalAssetsPanel, props);
 
     await waitForList(2);
+    // The list is named after the kind of assets being picked
+    await expect.element(page.getByRole('listbox', { name: 'Available Images' })).toBeVisible();
     expect(list).toHaveBeenCalledWith({
       kind: 'image',
       fieldConfig: undefined,
@@ -288,7 +293,9 @@ describe('ExternalAssetsPanel', () => {
 
   test('searches the assets', async () => {
     const list = vi.fn().mockResolvedValue(assets);
-    const search = vi.fn().mockResolvedValue([assets[1]]);
+    // Hold the first search so the transient “Searching…” state can be observed
+    const pending = Promise.withResolvers();
+    const search = vi.fn().mockReturnValueOnce(pending.promise);
 
     const props = $state({
       serviceProps: createMockCloudService({ list, search }),
@@ -301,6 +308,7 @@ describe('ExternalAssetsPanel', () => {
 
     props.searchTerms = ' b ';
     await expect.element(page.getByRole('alert')).toHaveTextContent('Searching…');
+    pending.resolve([assets[1]]);
     await waitForList(1);
     expect(search).toHaveBeenCalledWith('b', expect.anything());
 
@@ -446,6 +454,25 @@ describe('ExternalAssetsPanel', () => {
     await expect
       .element(page.getByRole('alert'))
       .toHaveTextContent('The service is not configured properly.');
+  });
+
+  test('prepares the uploaded files with the entry draft', async () => {
+    const draft = /** @type {any} */ ({ collection: { name: 'posts' } });
+    const upload = vi.fn().mockResolvedValue([]);
+
+    const { component } = await render(ExternalAssetsPanel, {
+      draft,
+      serviceProps: createMockCloudService({ list: vi.fn().mockResolvedValue(assets), upload }),
+      selectedResources: [],
+    });
+
+    await waitForList(2);
+
+    const file = await createMockImageFile({ name: 'c.png' });
+
+    await component.uploadFiles([file]);
+
+    expect(prepareExternalUploads).toHaveBeenCalledWith([file], expect.anything(), { draft });
   });
 
   test('uploads files, selecting them and reporting the rejected ones', async () => {
@@ -599,6 +626,9 @@ describe('ExternalAssetsPanel', () => {
   });
 
   test('uploads the files dropped onto the list', async () => {
+    // The toasts reporting the commit are rendered by the shared component
+    await render(AssetUpdatesToast, {});
+
     const upload = vi.fn(async (/** @type {File[]} */ files) =>
       files.map((file) => createMockExternalAsset({ fileName: file.name })),
     );
@@ -663,6 +693,9 @@ describe('ExternalAssetsPanel', () => {
   });
 
   test('reports an upload failure, listing the files uploaded before it', async () => {
+    // The toasts reporting the commit are rendered by the shared component
+    await render(AssetUpdatesToast, {});
+
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     // The first file made it to the service before the second one failed
     const uploaded = createMockExternalAsset({ fileName: 'c.png' });
@@ -702,6 +735,9 @@ describe('ExternalAssetsPanel', () => {
   });
 
   test('keeps the progress toast up until a slow upload is done, then hides it', async () => {
+    // The toasts reporting the commit are rendered by the shared component
+    await render(AssetUpdatesToast, {});
+
     /**
      * Finish the upload with the given assets.
      * @type {(assets: any[]) => void}
@@ -848,7 +884,16 @@ describe('ExternalAssetsPanel', () => {
 
       // The root lists its folders and none of the files, which are all in folders
       await expect.poll(getFolderNames).toEqual(['folder docs', 'folder images']);
-      expect(getAssetOptions().elements()).toHaveLength(0);
+      // An empty list box would only be a stop for the Tab key
+      expect(page.getByRole('listbox').elements()).toHaveLength(1);
+      // Files of any kind can be picked
+      await page.getByRole('option', { name: 'images' }).click();
+      await expect.element(page.getByRole('listbox', { name: 'Available Files' })).toBeVisible();
+      await page
+        .getByRole('navigation', { name: 'Folder' })
+        .getByRole('button', { name: 'Test Cloud' })
+        .click();
+      await expect.poll(getFolderNames).toEqual(['folder docs', 'folder images']);
       expect(page.getByRole('navigation').elements()).toHaveLength(0);
       expect(component.canCreateFolder()).toBe(false);
 
@@ -957,6 +1002,9 @@ describe('ExternalAssetsPanel', () => {
     });
 
     test('names the service at its root, and reports a failure to create a folder', async () => {
+      // The toasts reporting the commit are rendered by the shared component
+      await render(AssetUpdatesToast, {});
+
       const createFolder = vi.fn().mockRejectedValue(new Error('denied'));
 
       vi.spyOn(console, 'error').mockImplementation(() => {});

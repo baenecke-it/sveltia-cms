@@ -7,6 +7,7 @@
   import { highlightEditorField } from '$lib/services/contents/editor/fields';
   import { getFieldLocaleAccess } from '$lib/services/contents/editor/locale';
   import { getCurrentValue, isFieldMultiple } from '$lib/services/contents/entry/fields';
+  import { getFieldLabel } from '$lib/services/contents/i18n/options';
 
   /**
    * @import { InternalLocaleCode, TypedFieldKeyPath } from '$lib/types/private';
@@ -25,18 +26,11 @@
   const entryDraft = getEntryDraftContext();
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    locale,
-    keyPath,
-    typedKeyPath,
-    fieldConfig,
-    showLabel = true,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { locale, keyPath, typedKeyPath, fieldConfig, showLabel = true } = $props();
 
-  const { name: fieldName, widget: fieldType = 'string' } = $derived(fieldConfig);
-  const { label = '', preview = true } = $derived(/** @type {VisibleField} */ (fieldConfig));
+  const { widget: fieldType = 'string' } = $derived(fieldConfig);
+  const { preview = true } = $derived(/** @type {VisibleField} */ (fieldConfig));
+  const fieldLabel = $derived(getFieldLabel({ config: fieldConfig, locale }));
   const multiple = $derived(isFieldMultiple(fieldConfig));
   const isList = $derived(fieldType === 'list' || multiple);
   const valueMap = $derived(getFieldValueMapSnapshot(entryDraft.current, locale, keyPath));
@@ -74,7 +68,7 @@
     }}
   >
     {#if showLabel}
-      <h4>{label || fieldName}</h4>
+      <h4>{fieldLabel}</h4>
     {/if}
     <ErrorBoundary>
       {#if customFieldType?.preview}
@@ -128,6 +122,11 @@
   }
 
   @media (width < 768px) {
+    /* Remove the padding to make an image or an embedded video full-width */
+    :global([role='document']) section > :global(p:has(img, iframe)) {
+      margin-inline: calc(var(--entry-preview-padding-inline) * -1);
+    }
+
     /* A top-level field, which is wrapped for the Edit Pane to find it before it’s rendered */
     :global([role='document'] > [data-lazy-key-path]) {
       & > section:is([data-field-type='file'], [data-field-type='image']):has(:global(img)),

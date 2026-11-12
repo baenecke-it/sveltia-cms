@@ -84,6 +84,36 @@ export const getKeyboardMoveTarget = ({ key, index, itemCount }) => {
 };
 
 /**
+ * Minimum number of items for a list to offer Move to Top, Move to Bottom and Move To. With fewer,
+ * Move Up and Move Down already reach every position in a single step.
+ */
+export const MOVE_TO_EDGE_MIN_ITEMS = 3;
+
+/**
+ * Check if a list has enough items to offer Move to Top, Move to Bottom and Move To.
+ * @param {number} itemCount Total number of items in the list.
+ * @returns {boolean} Result.
+ */
+export const canMoveToEdge = (itemCount) => itemCount >= MOVE_TO_EDGE_MIN_ITEMS;
+
+/**
+ * Get the destination index for a position entered in the Move To dialog.
+ * @param {object} args Arguments.
+ * @param {number | undefined} args.position Entered position. Positions are 1-based, like the
+ * numbers shown on the items.
+ * @param {number} args.itemCount Total number of items in the list.
+ * @returns {number | undefined} Zero-based destination index, or `undefined` if the position isn’t
+ * a whole number between 1 and the number of items.
+ */
+export const parseMovePosition = ({ position, itemCount }) => {
+  if (position === undefined || !Number.isInteger(position)) {
+    return undefined;
+  }
+
+  return position >= 1 && position <= itemCount ? position - 1 : undefined;
+};
+
+/**
  * Find the list item that contains the given drag event target.
  *
  * The list-level drag handlers run in the capture phase so that a nested drop zone or sortable list
@@ -122,19 +152,44 @@ export const getListItemAt = ({ target, listElement }) => {
 };
 
 /**
- * Move the focus to a reorder control on the list item at the given index. Call it once an item has
- * been moved with one of its controls, so the control can be used repeatedly without having to find
- * it again.
+ * Reorder control actions to fall back on, in order, when the control that moved an item can no
+ * longer be used: the Move Up and Move Down buttons, the drag handle and the reorder menu.
+ */
+const REORDER_CONTROL_ACTIONS = ['move-up', 'move-down', 'reorder', 'move-options'];
+
+/**
+ * Move the focus to a reorder control on a list item. Call it once the item has been moved with
+ * one of its controls, so the control can be used repeatedly without having to find it again. If
+ * that control is disabled now, as the Move Up button is once the item has reached the top of the
+ * list, another enabled reorder control on the item gets the focus instead, so the focus doesn’t
+ * fall back to the document body.
+ * @param {object} args Arguments.
+ * @param {Element | null | undefined} args.item List item element.
+ * @param {string} [args.action] `data-action` of the control to focus.
+ */
+export const focusItemReorderControl = ({ item, action = 'reorder' }) => {
+  [action, ...REORDER_CONTROL_ACTIONS]
+    .map(
+      (name) =>
+        /** @type {HTMLButtonElement | null | undefined} */ (
+          item?.querySelector(`button[data-action="${name}"]`)
+        ),
+    )
+    .find((button) => button && !button.disabled)
+    ?.focus();
+};
+
+/**
+ * Move the focus to a reorder control on the list item at the given index, as
+ * {@link focusItemReorderControl} does.
  * @param {object} args Arguments.
  * @param {HTMLElement | undefined} args.listElement Element whose direct children are the list
  * items.
  * @param {number} args.index Index the item was moved to.
  * @param {string} [args.action] `data-action` of the control to focus.
  */
-export const focusReorderControl = ({ listElement, index, action = 'reorder' }) => {
-  /** @type {HTMLElement | null | undefined} */ (
-    listElement?.children[index]?.querySelector(`button[data-action="${action}"]`)
-  )?.focus();
+export const focusReorderControl = ({ listElement, index, action }) => {
+  focusItemReorderControl({ item: listElement?.children[index], action });
 };
 
 /**

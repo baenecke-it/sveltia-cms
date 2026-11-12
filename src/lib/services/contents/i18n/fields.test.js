@@ -3,11 +3,23 @@ import { describe, expect, test } from 'vitest';
 import {
   isFieldI18nDisabled,
   isFieldLocalized,
+  isFieldMirrored,
   isFieldTranslatable,
 } from '$lib/services/contents/i18n/fields';
 
 /** @type {any[]} */
-const OPTIONS = [undefined, true, false, 'translate', 'duplicate', 'duplicate_keys', 'none'];
+const OPTIONS = [
+  undefined,
+  true,
+  false,
+  'translate',
+  'duplicate',
+  'duplicate_keys',
+  'duplicate_if_empty',
+  'sync',
+  'none',
+];
+
 /**
  * Get the options for which the given predicate returns `true`.
  * @param {(i18n: any) => boolean} predicate Predicate.
@@ -16,14 +28,26 @@ const OPTIONS = [undefined, true, false, 'translate', 'duplicate', 'duplicate_ke
 const getMatches = (predicate) => OPTIONS.filter((i18n) => predicate(i18n));
 
 describe('Test isFieldTranslatable()', () => {
-  test('matches `true` and `translate` only', () => {
-    expect(getMatches(isFieldTranslatable)).toEqual([true, 'translate']);
+  test('matches `true`, `translate` and `duplicate_if_empty` only', () => {
+    expect(getMatches(isFieldTranslatable)).toEqual([true, 'translate', 'duplicate_if_empty']);
+  });
+});
+
+describe('Test isFieldMirrored()', () => {
+  test('matches `duplicate` and `sync` only', () => {
+    expect(getMatches(isFieldMirrored)).toEqual(['duplicate', 'sync']);
   });
 });
 
 describe('Test isFieldLocalized()', () => {
-  test('matches `true`, `translate` and `duplicate` only', () => {
-    expect(getMatches(isFieldLocalized)).toEqual([true, 'translate', 'duplicate']);
+  test('matches the translatable and mirrored options only', () => {
+    expect(getMatches(isFieldLocalized)).toEqual([
+      true,
+      'translate',
+      'duplicate',
+      'duplicate_if_empty',
+      'sync',
+    ]);
   });
 });
 

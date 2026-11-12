@@ -5,8 +5,9 @@ import {
   getIndexFileName,
   isCollectionIndexFile,
 } from '$lib/services/contents/collection/entries/index-file';
+import { getListedEntryValue } from '$lib/services/contents/collection/view/values';
 import { getAssociatedCollections } from '$lib/services/contents/entry/collections';
-import { getPropertyValue } from '$lib/services/contents/entry/values';
+import { getEntryDisplayLocale } from '$lib/services/contents/entry/paths';
 import { getSlug } from '$lib/services/contents/file/process';
 import { getOrCreate } from '$lib/services/utils/cache';
 import { getRegex } from '$lib/services/utils/regex';
@@ -102,11 +103,17 @@ export const matchesCollectionFilter = (collection, entry) => {
 
   const { field, pattern, values } = condition;
 
-  const value = getPropertyValue({
+  // The filter is matched against the stored value, like Decap CMS does, so a Relation field isn’t
+  // resolved to the label of the referenced entry. Resolving it would also look up the entries of
+  // the referenced collection, which loops forever if that’s this collection. A multi-file i18n
+  // entry can lack its default locale file, in which case it’s listed in another locale, and so the
+  // filter reads the value from that locale
+  const value = getListedEntryValue({
     entry,
     locale: collection._i18n.defaultLocale,
     collectionName: collection.name,
     key: field,
+    resolveRef: false,
   });
 
   // A multi-value field, such as a List field or a Relation field with `multiple: true`, yields an
@@ -304,7 +311,7 @@ const getForeignEntriesInFolder = (collection, ownEntries) => {
 
     // The default locale’s file may not be in the folder, e.g. with the `multiple_root_folders`
     // i18n structure
-    const locale = locales[defaultLocale] ? defaultLocale : Object.keys(locales)[0];
+    const locale = getEntryDisplayLocale(locales, defaultLocale);
 
     if (!locale) {
       return [];

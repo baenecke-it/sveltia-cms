@@ -4,14 +4,27 @@ import { fetchAliasedBatch } from '$lib/services/backends/git/github/graphql';
 import { repository } from '$lib/services/backends/git/github/repository';
 import { fetchAPI, fetchGraphQL } from '$lib/services/backends/git/shared/api';
 import { runConcurrently } from '$lib/services/backends/git/shared/concurrency';
-import { PULL_REQUEST_DESCRIPTION } from '$lib/services/backends/git/shared/pull-requests';
+import {
+  parseRestFiles,
+  parseRestPullRequest,
+  toCommitAuthor,
+} from '$lib/services/backends/git/shared/pull-requests';
+import {
+  getPullRequestPath,
+  getRepositoryPath,
+} from '$lib/services/backends/git/shared/repository';
 import { deleteRemoteBranch } from '$lib/services/backends/git/shared/workflow';
 import { encodePathSegments } from '$lib/services/utils/url';
 import { getStatusLabel, replaceStatusLabel } from '$lib/services/workflow/labels';
 import { forkedRepository } from '$lib/services/workflow/open-authoring';
 
 /**
- * @import { WorkflowFile, WorkflowPullRequest, WorkflowStatus } from '$lib/types/private';
+ * @import {
+ * CommitAuthor,
+ * WorkflowFile,
+ * WorkflowPullRequest,
+ * WorkflowStatus,
+ * } from '$lib/types/private';
  */
 
 /**
@@ -48,21 +61,6 @@ export const parseFileNodes = (nodes) =>
   }));
 
 /**
- * Convert the changed files of a pull request or comparison, as listed by the REST API, to workflow
- * files.
- * @param {Record<string, any>[]} files Files.
- * @returns {WorkflowFile[]} Files.
- */
-export const parseRestFiles = (files) =>
-  files.map(({ filename, status, previous_filename: previousPath }) => ({
-    path: filename,
-    sha: '',
-    size: 0,
-    deleted: status === 'removed',
-    previousPath,
-  }));
-
-/**
  * Re-fetch the list of files changed in the given pull request with the REST API, which is the only
  * one that reports the path a renamed file had before. The GraphQL API used by
  * `fetchPullRequests()` has a `RENAMED` change type but no matching previous-path field, so
@@ -72,15 +70,13 @@ export const parseRestFiles = (files) =>
  * @see https://docs.github.com/en/rest/pulls/pulls#list-pull-requests-files
  */
 export const fetchPullRequestFileList = async (pullRequest) => {
-  const { owner, repo } = repository;
-
   const files = /** @type {Record<string, any>[]} */ (
     await fetchAPI(
-      `/repos/${owner}/${repo}/pulls/${pullRequest.number}/files?per_page=${MAX_ITEMS.files}`,
+      `${getPullRequestPath(repository, pullRequest.number)}/files?per_page=${MAX_ITEMS.files}`,
     )
   );
 
-  pullRequest.files = parseRestFiles(files);
+  pullRequest.files = parseRestFiles(files, { removedStatus: 'removed' });
 };
 
 /**
@@ -208,11 +204,11 @@ export const fetchBranchHead = async (branch) => {
  * @see https://docs.github.com/en/rest/git/refs#delete-a-reference
  */
 export const deleteBranch = async (branch) => {
-  const { owner, repo } = getWorkflowRepository();
+  const repoPath = getRepositoryPath(getWorkflowRepository());
 
   await deleteRemoteBranch({
     branch,
-    path: `/repos/${owner}/${repo}/git/refs/heads/${encodePathSegments(branch)}`,
+    path: `${repoPath}/git/refs/heads/${encodePathSegments(branch)}`,
     // GitHub answers a missing reference with a 422 rather than a 404
     goneStatuses: [404, 422],
   });
@@ -226,13 +222,11 @@ export const deleteBranch = async (branch) => {
  * @see https://docs.github.com/en/rest/issues/issues#update-an-issue
  */
 export const updateLabels = async (pullRequest, status) => {
-  const { owner, repo } = repository;
-
   // Read the labels from the pulls endpoint: the issues endpoint's `GET` needs issue access, which
   // a fine-grained token created from the token page doesn't have, while its `PATCH` also accepts
   // pull request access. @see https://github.com/sveltia/sveltia-cms/issues/1014
   const { labels = [] } = /** @type {{ labels?: { name: string }[] }} */ (
-    await fetchAPI(`/repos/${owner}/${repo}/pulls/${pullRequest.number}`)
+    await fetchAPI(getPullRequestPath(repository, pullRequest.number))
   );
 
   const newLabels = replaceStatusLabel(
@@ -240,10 +234,23 @@ export const updateLabels = async (pullRequest, status) => {
     status,
   );
 
-  await fetchAPI(`/repos/${owner}/${repo}/issues/${pullRequest.number}`, {
+  await fetchAPI(`${getRepositoryPath(repository)}/issues/${pullRequest.number}`, {
     method: 'PATCH',
     body: { labels: newLabels },
   });
+};
+
+/**
+ * Parse the user who opened a pull request, as the REST or GraphQL API returns it. The REST API
+ * gives the ID as `id` and leaves out the name and email address, while the GraphQL API gives the
+ * ID as `databaseId` and, unless the user keeps them private, the name and email address.
+ * @param {Record<string, any> | undefined} user User object.
+ * @returns {CommitAuthor | undefined} Author, or `undefined` if the user is unknown.
+ */
+export const parseAuthor = (user) => {
+  const { id = user?.databaseId } = user ?? {};
+
+  return toCommitAuthor({ ...user, id });
 };
 
 /**
@@ -278,49 +285,46 @@ export const updateDraftState = async (pullRequest, isDraft) => {
  * @param {string} args.branch Workflow branch name.
  * @param {string} args.title Pull request title.
  * @param {WorkflowStatus} args.status Status to open the pull request with.
+ * @param {string} args.description Pull request description.
  * @returns {Promise<WorkflowPullRequest>} Created pull request.
  * @see https://docs.github.com/en/rest/pulls/pulls#create-a-pull-request
  * @see https://docs.github.com/en/rest/issues/labels#add-labels-to-an-issue
  */
-export const createPullRequest = async ({ branch, title, status }) => {
-  const { owner, repo, branch: baseBranch } = repository;
+export const createPullRequest = async ({ branch, title, status, description }) => {
+  const { branch: baseBranch } = repository;
+  const repoPath = getRepositoryPath(repository);
   const fork = forkedRepository.current;
-  const isDraft = status === 'draft';
 
   const result = /** @type {Record<string, any>} */ (
-    await fetchAPI(`/repos/${owner}/${repo}/pulls`, {
+    await fetchAPI(`${repoPath}/pulls`, {
       method: 'POST',
       body: {
         title,
         // A cross-repository pull request identifies its head branch by the fork’s owner
         head: fork ? `${fork.owner}:${branch}` : branch,
         base: baseBranch,
-        draft: isDraft,
-        body: PULL_REQUEST_DESCRIPTION,
+        draft: status === 'draft',
+        body: description,
       },
     })
   );
 
-  /** @type {WorkflowPullRequest} */
-  const pullRequest = {
-    number: result.number,
+  const pullRequest = parseRestPullRequest(result, {
     nodeId: result.node_id,
     title: result.title,
-    url: result.html_url,
     branch,
-    headSHA: result.head?.sha,
     status,
-    createdDate: new Date(result.created_at),
-    updatedDate: new Date(result.updated_at),
-    files: [],
-  };
+    // The signed-in user, which is how a later save recognizes the pull request as their own
+    author: parseAuthor(result.user),
+    description,
+  });
 
   // Labelling an issue requires write access to the repository, which an Open Authoring contributor
   // doesn’t have. Their status is read from the pull request itself instead
   if (!fork) {
     // A brand-new pull request has no label to preserve, so add the status label outright rather
     // than reading the current list first like {@link updateLabels} has to
-    await fetchAPI(`/repos/${owner}/${repo}/issues/${result.number}/labels`, {
+    await fetchAPI(`${repoPath}/issues/${result.number}/labels`, {
       method: 'POST',
       body: { labels: [getStatusLabel(status)] },
     });

@@ -9,9 +9,11 @@ import {
   fetchMergeRequestFileList,
   fetchOpenMergeRequests,
   fetchPullRequests,
+  getMergeRequestPath,
   parseDiff,
   parseMergeRequest,
   toMergeRequest,
+  updateDescription,
 } from '$lib/services/backends/git/gitlab/merge-requests';
 import { fetchAPI, fetchGraphQL } from '$lib/services/backends/git/shared/api';
 import { cmsConfig } from '$lib/services/config';
@@ -27,7 +29,8 @@ vi.mock('$lib/services/backends/git/gitlab/fork', () => ({
   getWorkflowRepository: () => forkedRepository.current ?? { owner: 'group/sub', repo: 'project' },
   projectIds: { base: 42 },
 }));
-vi.mock('$lib/services/backends/git/gitlab/repository', () => {
+vi.mock('$lib/services/backends/git/gitlab/repository', async (importOriginal) => {
+  const { fetchProjectBranchHead } = /** @type {any} */ (await importOriginal());
   const mockRepository = { owner: 'group/sub', repo: 'project', branch: 'main' };
   /**
    * Get the project ID the same way the real module does.
@@ -47,6 +50,9 @@ vi.mock('$lib/services/backends/git/gitlab/repository', () => {
      */
     getBranchPath: (branch, repoPath) =>
       `/projects/${getProjectId(repoPath)}/repository/branches/${encodeURIComponent(branch)}`,
+    // The workflow branch is always looked up in a given project, so the real function, which
+    // only falls back to the configured project without one, can be used
+    fetchProjectBranchHead,
   };
 });
 vi.mock('$lib/services/backends/git/shared/api');
@@ -84,6 +90,12 @@ describe('GitLab merge requests', () => {
     forkedRepository.current = undefined;
     vi.mocked(fetchAPI).mockResolvedValue({});
     vi.mocked(fetchGraphQL).mockResolvedValue({});
+  });
+
+  describe('getMergeRequestPath', () => {
+    test('returns the path of the merge request on the configured project', () => {
+      expect(getMergeRequestPath(3)).toBe(`/projects/${PROJECT_ID}/merge_requests/3`);
+    });
   });
 
   describe('draftTitle.strip', () => {
@@ -174,7 +186,16 @@ describe('GitLab merge requests', () => {
         updatedDate: new Date('2026-01-02T00:00:00Z'),
         author: { name: 'Me', email: '', id: 7, login: 'me' },
         files: [],
+        description: '',
       });
+    });
+
+    test('keeps the description as it is', () => {
+      const description = 'Automatically generated\n\n<!-- sveltia-cms:deletion-group=group-1 -->';
+
+      expect(parseMergeRequest(createItem({ description }))?.description).toBe(description);
+      // The API gives an empty description as `null`
+      expect(parseMergeRequest(createItem({ description: null }))?.description).toBe('');
     });
 
     test('returns undefined for a merge request to another branch', () => {
@@ -436,6 +457,61 @@ describe('GitLab merge requests', () => {
         paths: ['content/posts/hello.md'],
       });
     });
+
+    test.each([
+      ['the configured project', undefined, PROJECT_ID],
+      ['the fork', { owner: 'contributor', repo: 'project' }, 'contributor%2Fproject'],
+    ])(
+      'reads a text cut short by the GraphQL API again in full from %s',
+      async (_label, fork, projectId) => {
+        forkedRepository.current = fork;
+
+        const mergeRequest = /** @type {any} */ ({
+          branch: 'cms/posts/huge',
+          headSHA: 'abc123',
+          files: [
+            { path: 'content/posts/huge.md', sha: '', size: 0, deleted: false },
+            { path: 'content/posts/small.md', sha: '', size: 0, deleted: false },
+          ],
+        });
+
+        // GitLab reports the full size of a blob, but caps the data `rawTextBlob` holds
+        vi.mocked(fetchGraphQL).mockResolvedValue({
+          project: {
+            repository: {
+              blobs: {
+                nodes: [
+                  {
+                    path: 'content/posts/huge.md',
+                    oid: 'sha1',
+                    size: '20000000',
+                    rawTextBlob: '# Huge, partial',
+                  },
+                  {
+                    path: 'content/posts/small.md',
+                    oid: 'sha2',
+                    size: '7',
+                    rawTextBlob: '# Small',
+                  },
+                ],
+              },
+            },
+          },
+        });
+        vi.mocked(fetchAPI).mockResolvedValue('# Huge, in full');
+
+        await fetchMergeRequestFileContents(mergeRequest);
+
+        // Only the truncated blob is read again, from the project and commit it was read at
+        expect(fetchAPI).toHaveBeenCalledOnce();
+        expect(fetchAPI).toHaveBeenCalledWith(
+          `/projects/${projectId}/repository/files/content%2Fposts%2Fhuge.md/raw?ref=abc123`,
+          { responseType: 'text' },
+        );
+        expect(mergeRequest.files[0]).toMatchObject({ size: 20000000, text: '# Huge, in full' });
+        expect(mergeRequest.files[1]).toMatchObject({ size: 7, text: '# Small' });
+      },
+    );
 
     test('marks a file as deleted when the blob is missing', async () => {
       const mergeRequest = /** @type {any} */ ({
@@ -734,6 +810,7 @@ describe('GitLab merge requests', () => {
         branch: 'cms/contributor/project/posts/hello',
         title: 'Create Post “hello”',
         status: 'pending_review',
+        description: 'Description',
       });
 
       expect(fetchAPI).toHaveBeenCalledWith(`/projects/${FORK_ID}/merge_requests`, {
@@ -765,6 +842,7 @@ describe('GitLab merge requests', () => {
         branch: 'cms/posts/hello',
         title: 'Create Post “hello”',
         status: 'draft',
+        description: 'Description',
       });
 
       expect(fetchAPI).toHaveBeenCalledWith(`/projects/${PROJECT_ID}/merge_requests`, {
@@ -804,6 +882,7 @@ describe('GitLab merge requests', () => {
         branch: 'cms/posts/hello',
         title: 'Create Post “hello”',
         status: 'draft',
+        description: 'Description',
       });
 
       expect(result.canMerge).toBe(false);
@@ -824,6 +903,7 @@ describe('GitLab merge requests', () => {
         branch: 'cms/posts/wip',
         title: 'WIP: notes',
         status: 'pending_review',
+        description: 'Description',
       });
 
       expect(result).toEqual(
@@ -834,6 +914,63 @@ describe('GitLab merge requests', () => {
           author: { name: 'Alice', email: '', id: 1, login: 'alice' },
         }),
       );
+    });
+  });
+
+  describe('description', () => {
+    test('is the one given to a new merge request', async () => {
+      const description = 'Automatically generated\n\n<!-- sveltia-cms:deletion-group=group-1 -->';
+
+      vi.mocked(fetchAPI).mockResolvedValue({
+        iid: 5,
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+        // Whatever the service gives back, the merge request carries the description it was
+        // opened with
+        description: null,
+      });
+
+      const result = await createPullRequest({
+        branch: 'cms/posts/hello',
+        title: 'Delete Post “hello”',
+        status: 'pending_deletion',
+        description,
+      });
+
+      expect(fetchAPI).toHaveBeenCalledWith(`/projects/${PROJECT_ID}/merge_requests`, {
+        method: 'POST',
+        body: expect.objectContaining({ description }),
+      });
+      expect(result.description).toBe(description);
+    });
+
+    test('is updated with what the transform makes of the current one', async () => {
+      const transform = vi.fn((/** @type {string} */ description) => `${description}, updated`);
+
+      vi.mocked(fetchAPI)
+        .mockResolvedValueOnce({ description: 'Edited' })
+        .mockResolvedValueOnce({});
+
+      await expect(updateDescription(/** @type {any} */ ({ number: 5 }), transform)).resolves.toBe(
+        'Edited, updated',
+      );
+
+      expect(transform).toHaveBeenCalledWith('Edited');
+      expect(fetchAPI).toHaveBeenNthCalledWith(1, getMergeRequestPath(5));
+      expect(fetchAPI).toHaveBeenNthCalledWith(2, getMergeRequestPath(5), {
+        method: 'PUT',
+        body: { description: 'Edited, updated' },
+      });
+    });
+
+    test('is passed to the transform as an empty string when the merge request has none', async () => {
+      const transform = vi.fn(() => 'New');
+
+      vi.mocked(fetchAPI).mockResolvedValueOnce({ description: null }).mockResolvedValueOnce({});
+
+      await updateDescription(/** @type {any} */ ({ number: 5 }), transform);
+
+      expect(transform).toHaveBeenCalledWith('');
     });
   });
 

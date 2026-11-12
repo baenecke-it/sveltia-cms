@@ -44,6 +44,12 @@ vi.mock('$lib/services/utils/file', () => ({
    * @returns {string} Path.
    */
   sanitizePath: (path) => path,
+  /**
+   * Get the last segment of a path, as the real function does.
+   * @param {string} path Path.
+   * @returns {string} Last segment.
+   */
+  getBaseName: (path) => path.slice(path.lastIndexOf('/') + 1),
 }));
 
 vi.mock('$lib/services/assets/file-name', () => ({
@@ -1155,7 +1161,7 @@ describe('Test processResource()', () => {
     expect(Object.keys(draft.files)).toHaveLength(0);
   });
 
-  test('should deduplicate a file saved beside the index file of a nested collection entry', async () => {
+  test('should deduplicate a file saved beside the index file of a nested entry', async () => {
     const mockFile = new File(['content'], 'photo.jpg', { type: 'image/jpeg' });
 
     Object.defineProperty(mockFile, 'size', { value: 50000 });
