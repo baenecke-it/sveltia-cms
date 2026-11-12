@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { page } from 'vitest/browser';
 import { render } from 'vitest-browser-svelte';
 
+import AssetUpdatesToast from '$lib/components/assets/shared/asset-updates-toast.svelte';
 import { saveAssets } from '$lib/services/assets/data/create';
 import { editingAsset } from '$lib/services/assets/state';
 import { showAssetOverlay } from '$lib/services/assets/view';
@@ -36,7 +37,8 @@ describe('EditAssetDialog', () => {
     editingAsset.current = asset;
 
     const dialog = page.getByRole('dialog', { name: 'Edit \u2068notes.txt\u2069' });
-    const textarea = dialog.getByRole('textbox');
+    // The text area is named after the dialog
+    const textarea = dialog.getByRole('textbox', { name: 'Edit \u2068notes.txt\u2069' });
 
     await expect.element(textarea).toHaveValue('Hello');
     await expect.element(dialog.getByRole('button', { name: 'Save' })).toBeDisabled();
@@ -75,6 +77,9 @@ describe('EditAssetDialog', () => {
   });
 
   test('reports a failure to save, and reopens with the edited text', async () => {
+    // The toasts reporting the commit are rendered by the shared component
+    await render(AssetUpdatesToast, {});
+
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     vi.mocked(saveAssets).mockRejectedValueOnce(new Error('offline'));
@@ -146,6 +151,9 @@ describe('EditAssetDialog', () => {
   }, 15000);
 
   test('lets go of the asset when saving fails after the asset details overlay has closed', async () => {
+    // The toasts reporting the commit are rendered by the shared component
+    await render(AssetUpdatesToast, {});
+
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     /**
      * Fail the pending save.
@@ -186,6 +194,41 @@ describe('EditAssetDialog', () => {
         .toBe('error Error Save failed.');
       await expect.poll(() => editingAsset.current).toBeUndefined();
       expect(page.getByRole('dialog').elements()).toHaveLength(0);
+      await waitForToastsToHide();
+    } finally {
+      error.mockRestore();
+    }
+  }, 15000);
+
+  test('reopens with the edited text when saving fails in the dialog opened from the list', async () => {
+    // The toasts reporting the commit are rendered by the shared component
+    await render(AssetUpdatesToast, {});
+
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    // The edit options menu on the asset list toolbar, without the asset details overlay
+    showAssetOverlay.current = false;
+    vi.mocked(saveAssets).mockRejectedValueOnce(new Error('offline'));
+
+    try {
+      await render(EditAssetDialog);
+
+      editingAsset.current = asset;
+
+      const dialog = page.getByRole('dialog');
+      const textarea = dialog.getByRole('textbox');
+
+      await expect.element(textarea).toHaveValue('Hello');
+      await textarea.fill('Hello, world!');
+      await dialog.getByRole('button', { name: 'Save' }).click();
+      await vi.waitFor(() => expect(saveAssets).toHaveBeenCalledOnce());
+      await expect
+        .poll(() => document.querySelector('.sui.toast:not([aria-hidden="true"]) .sui.alert.error'))
+        .not.toBeNull();
+
+      // The dialog is back with the edited text, so saving can be retried
+      await expect.element(textarea).toHaveValue('Hello, world!');
+      expect(editingAsset.current).toBe(asset);
       await waitForToastsToHide();
     } finally {
       error.mockRestore();

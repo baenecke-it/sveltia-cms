@@ -11,7 +11,7 @@
   import { goto } from '$lib/services/app/navigation';
   import { cmsConfig } from '$lib/services/config';
   import { selectedCollection } from '$lib/services/contents/collection';
-  import { isNestedCollection } from '$lib/services/contents/collection/nested';
+  import { hasNestedEntries } from '$lib/services/contents/collection/nested';
   import { env } from '$lib/services/user/env.svelte';
 
   /**
@@ -20,19 +20,16 @@
    */
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    isSearchPage = false,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { isSearchPage = false } = $props();
 
   // @ts-ignore Dividers can be included in the collection list
   const collections = $derived(cmsConfig.current?.collections?.filter(({ hide }) => !hide) ?? []);
   const singletons = $derived(cmsConfig.current?.singletons ?? []);
-  // Only a nested collection has a folder tree, and with it a chevron in front of its icon. Without
-  // one, nothing in the list can expand, so the space kept for the chevrons is dropped.
-  const hasNestedCollections = $derived(
-    collections.some((collection) => !('divider' in collection) && isNestedCollection(collection)),
+  // Only a collection with nested entries has a folder tree, and with it a chevron in front of its
+  // icon. Without one, nothing in the list can expand, so the space kept for the chevrons is
+  // dropped.
+  const hasAnyNestedEntries = $derived(
+    collections.some((collection) => !('divider' in collection) && hasNestedEntries(collection)),
   );
 </script>
 
@@ -52,9 +49,9 @@
   <!-- The chevron is the only way to expand or collapse a folder, so that activating a collection
   or a folder always navigates to it -->
   <Tree
-    class={hasNestedCollections ? undefined : 'flat'}
+    class={hasAnyNestedEntries ? undefined : 'flat'}
     ariaLabel={_('collection_list')}
-    aria-controls={isSearchPage ? undefined : 'collection-container'}
+    aria-controls={isSearchPage || env.isSmallScreen ? undefined : 'collection-container'}
     expandOnSelect={false}
   >
     {#if collections.length}
@@ -99,7 +96,7 @@
               <Icon name="bookmark_manager" />
             {/snippet}
             {#snippet endIcon()}
-              <span class="count" aria-label="({_('x_entries', { values: { count } })})">
+              <span class="count" aria-label={_('x_entries', { values: { count } })}>
                 {appNumberFormatter.current.format(count)}
               </span>
             {/snippet}

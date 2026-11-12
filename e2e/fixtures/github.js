@@ -24,6 +24,11 @@ import { MockGitRepository } from './git.js';
  * @property {string} [mergeCommit] SHA of the commit that merged the pull request.
  * @property {string} [lastHead] SHA of the head commit when the pull request was closed or merged,
  * which stays known after its branch is deleted.
+ * @property {{ method: 'merge' | 'squash', title?: string }} [autoMerge] The merge options, once
+ * the pull request is set to be merged when its required checks pass.
+ * @property {{ id: number, login: string, commitId?: string }[]} [approvals] Approvals the pull
+ * request has been given and that still stand, not dismissed.
+ * @property {string[]} [dismissals] Messages the pull request’s reviews were dismissed with.
  */
 
 /**
@@ -102,9 +107,21 @@ export class MockGitHub extends MockGitRepository {
   branchRule = null;
 
   /**
+   * Whether a required status check is running on the pull requests. Until it passes, a pull
+   * request can’t be merged, but it can be set to auto-merge then; {@link finishChecks} lets it
+   * pass.
+   */
+  checksRunning = false;
+
+  /**
    * Whether the API rate limit is exhausted, so the repository can’t be read for now.
    */
   rateLimited = false;
+
+  /**
+   * Number of reviews submitted so far, which gives each one its ID.
+   */
+  reviewCount = 0;
 
   /**
    * Paths of the files whose commit history comes back empty, as for a file deleted since the CMS
@@ -312,6 +329,101 @@ export class MockGitHub extends MockGitRepository {
     this.pullRequests.push(pullRequest);
 
     return pullRequest;
+  }
+
+  /**
+   * Get the merge state of a pull request as the GraphQL API reports it.
+   * @param {number} number Pull request number.
+   * @returns {Record<string, any> | null} Pull request node, or `null` if there is no such pull
+   * request.
+   */
+  toMergeReadinessNode(number) {
+    const pullRequest = this.pullRequests.find((pr) => pr.number === number);
+
+    if (!pullRequest) {
+      return null;
+    }
+
+    const open = pullRequest.state === 'open';
+
+    return {
+      id: pullRequest.nodeId,
+      state: pullRequest.state.toUpperCase(),
+      merged: pullRequest.state === 'merged',
+      mergeStateStatus: !open ? 'UNKNOWN' : this.checksRunning ? 'BLOCKED' : 'CLEAN',
+      reviewDecision: null,
+      // Like GitHub, only offer auto-merge on a pull request that can’t be merged right away
+      viewerCanEnableAutoMerge: open && this.checksRunning && !pullRequest.autoMerge,
+      autoMergeRequest: pullRequest.autoMerge ? { enabledAt: new Date().toISOString() } : null,
+      commits: {
+        nodes: [
+          {
+            commit: {
+              statusCheckRollup: { state: this.checksRunning ? 'PENDING' : 'SUCCESS' },
+            },
+          },
+        ],
+      },
+    };
+  }
+
+  /**
+   * Handle the `enablePullRequestAutoMerge` and `disablePullRequestAutoMerge` mutations. Like
+   * GitHub, refuse to enable auto-merge pinned to a commit the branch no longer points at.
+   * @param {string} mutation Mutation name.
+   * @param {Record<string, any>} input Mutation input.
+   * @returns {Record<string, any>} Response body.
+   */
+  handleAutoMerge(mutation, input) {
+    const pullRequest = this.pullRequests.find(({ nodeId }) => nodeId === input.pullRequestId);
+
+    if (!pullRequest || pullRequest.state !== 'open') {
+      return {
+        data: { [mutation]: null },
+        errors: [{ type: 'UNPROCESSABLE', message: 'Pull request is not open' }],
+      };
+    }
+
+    if (mutation === 'disablePullRequestAutoMerge') {
+      delete pullRequest.autoMerge;
+
+      return { data: { [mutation]: { clientMutationId: null } } };
+    }
+
+    if (
+      input.expectedHeadOid &&
+      input.expectedHeadOid !== this.getPullRequestHead(pullRequest).oid
+    ) {
+      return {
+        data: { [mutation]: null },
+        errors: [{ type: 'UNPROCESSABLE', message: 'Head branch was modified' }],
+      };
+    }
+
+    pullRequest.autoMerge = {
+      method: input.mergeMethod === 'SQUASH' ? 'squash' : 'merge',
+      title: input.commitHeadline,
+    };
+
+    return { data: { [mutation]: { clientMutationId: null } } };
+  }
+
+  /**
+   * Let the running required check pass, which merges the pull requests set to auto-merge, as the
+   * user who set them.
+   */
+  finishChecks() {
+    this.checksRunning = false;
+    this.pullRequests
+      .filter(({ state, autoMerge }) => state === 'open' && autoMerge)
+      .forEach((pullRequest) => {
+        const { method, title } = /** @type {NonNullable<MockPullRequest['autoMerge']>} */ (
+          pullRequest.autoMerge
+        );
+
+        delete pullRequest.autoMerge;
+        this.mergePullRequest(pullRequest, { method, title, author: this.user });
+      });
   }
 
   /**
@@ -763,6 +875,13 @@ export class MockGitHub extends MockGitRepository {
         return { status: 409, json: { message: 'There are merge conflicts' } };
       }
 
+      if (this.isWorkflowChangeRefused(upstream)) {
+        return {
+          status: 422,
+          json: { message: 'Refusing to allow an OAuth App to create or update workflow' },
+        };
+      }
+
       this.refs.set(forkBranch, upstream);
 
       return {
@@ -789,7 +908,8 @@ export class MockGitHub extends MockGitRepository {
 
   /**
    * Answer a request to compare two branches, possibly across repositories, or a branch with a
-   * commit, with the files the head changes since the merge base, like GitHub’s “Files changed”.
+   * commit, with the merge base and the files the head changes since then, like GitHub’s “Files
+   * changed”.
    * @param {string} range Encoded range, e.g. `main...mona:cms/mona/e2e-site/posts/hello` or
    * `main...<oid>`.
    * @returns {MockResponse} Response.
@@ -816,6 +936,7 @@ export class MockGitHub extends MockGitRepository {
 
     return {
       json: {
+        merge_base_commit: { sha: mergeBase.oid },
         files: MockGitHub.diffTrees(mergeBase.tree, headCommit.tree).map(
           ({ path, changeType }) => ({
             filename: path,
@@ -939,6 +1060,7 @@ export class MockGitHub extends MockGitRepository {
 
       Object.assign(pullRequest, {
         ...(body.title !== undefined ? { title: body.title } : {}),
+        ...(body.body !== undefined ? { body: body.body } : {}),
         ...(body.state !== undefined && pullRequest.state !== 'merged'
           ? { state: body.state }
           : {}),
@@ -954,6 +1076,58 @@ export class MockGitHub extends MockGitRepository {
       pullRequest.updatedAt = new Date();
 
       return { json: pullRequest.labels.map((name) => ({ name })) };
+    }
+
+    if (request === 'POST pulls/reviews') {
+      // Like GitHub, refuse an approval of one’s own pull request
+      if (body.event === 'APPROVE' && pullRequest.author.login === this.user.login) {
+        return {
+          status: 422,
+          json: {
+            message: 'Unprocessable Entity',
+            errors: ['Can not approve your own pull request'],
+          },
+        };
+      }
+
+      this.reviewCount += 1;
+
+      const id = this.reviewCount;
+
+      if (body.event === 'APPROVE') {
+        pullRequest.approvals = [
+          ...(pullRequest.approvals ?? []),
+          { id, login: this.user.login, commitId: body.commit_id },
+        ];
+      }
+
+      return { json: { id, state: 'APPROVED', commit_id: body.commit_id } };
+    }
+
+    if (request === 'GET pulls/reviews') {
+      return {
+        json: (pullRequest.approvals ?? []).map(({ id, login, commitId }) => ({
+          id,
+          state: 'APPROVED',
+          commit_id: commitId,
+          user: { login },
+        })),
+      };
+    }
+
+    const [, dismissedId] = request.match(/^PUT pulls\/reviews\/(\d+)\/dismissals$/) ?? [];
+
+    if (dismissedId) {
+      const review = pullRequest.approvals?.find(({ id }) => id === Number(dismissedId));
+
+      if (!review) {
+        return { status: 404, json: { message: 'Not Found' } };
+      }
+
+      pullRequest.approvals = pullRequest.approvals?.filter((approval) => approval !== review);
+      pullRequest.dismissals = [...(pullRequest.dismissals ?? []), body.message];
+
+      return { json: { id: review.id, state: 'DISMISSED' } };
     }
 
     // Like GitHub, answer whether the pull request has been merged with a status alone
@@ -974,6 +1148,14 @@ export class MockGitHub extends MockGitRepository {
         return {
           status: 409,
           json: { message: 'Head branch was modified. Review and try the merge again.' },
+        };
+      }
+
+      // Like GitHub, refuse to merge while a required check is running
+      if (this.checksRunning) {
+        return {
+          status: 405,
+          json: { message: 'Required status check "check" is in progress.' },
         };
       }
 
@@ -1034,7 +1216,7 @@ export class MockGitHub extends MockGitRepository {
    * @returns {Record<string, any>} Node.
    */
   toPullRequestNode(pullRequest) {
-    const { number, nodeId, title, state, draft, labels, createdAt, updatedAt, author } =
+    const { number, nodeId, title, body, state, draft, labels, createdAt, updatedAt, author } =
       pullRequest;
 
     const { owner: headOwner, name: headRefName } = splitBranchKey(pullRequest.head);
@@ -1043,6 +1225,7 @@ export class MockGitHub extends MockGitRepository {
       id: nodeId,
       number,
       title,
+      body,
       url: `https://github.com/${this.owner}/${this.repo}/pull/${number}`,
       state: state.toUpperCase(),
       isDraft: draft,
@@ -1105,6 +1288,18 @@ export class MockGitHub extends MockGitRepository {
       return { data: { [mutation]: { pullRequest: { isDraft: pullRequest.draft } } } };
     }
 
+    if (query.includes('mergeStateStatus')) {
+      return { data: { repository: { pullRequest: this.toMergeReadinessNode(variables.number) } } };
+    }
+
+    const autoMergeMutation = query.match(
+      /(enablePullRequestAutoMerge|disablePullRequestAutoMerge)\(/,
+    );
+
+    if (autoMergeMutation) {
+      return this.handleAutoMerge(autoMergeMutation[1], variables.input);
+    }
+
     // The state of a pull request, read before an Open Authoring contributor changes it, along with
     // what tells whether it’s still the entry’s
     if (/node\(id:\s*\$id\)\s*\{\s*\.\.\.\s*on\s+PullRequest\b/.test(query)) {
@@ -1128,7 +1323,8 @@ export class MockGitHub extends MockGitRepository {
       };
     }
 
-    if (query.includes('defaultBranchRef')) {
+    // The default branch name, which the query for a workflow branch’s base asks the fork for too
+    if (query.includes('defaultBranchRef') && !/fork:\s*repository\(/.test(query)) {
       return { data: { repository: { defaultBranchRef: { name: this.branch } } } };
     }
 
@@ -1158,18 +1354,27 @@ export class MockGitHub extends MockGitRepository {
       return { data: { repository: { refs: { nodes: this.findForkBranches(variables) } } } };
     }
 
-    // The repository to create a workflow branch in, and the head of the branch to start it from
+    // The repository to create a workflow branch in, whether it has a copy of the branch and the
+    // name of its default branch, and the head of that branch in the repository
     if (/fork:\s*repository\(/.test(query)) {
-      const { forkOwner, forkRepo } = variables;
+      const { forkOwner, forkRepo, branch } = variables;
       const isFork = forkOwner === this.fork?.owner && forkRepo === this.fork?.repo;
 
       return {
         data: {
           fork:
             forkOwner === this.owner && forkRepo === this.repo
-              ? { id: this.repositoryId }
+              ? {
+                  id: this.repositoryId,
+                  ref: this.refs.has(branch) ? { name: branch } : null,
+                  defaultBranchRef: { name: this.branch },
+                }
               : isFork
-                ? { id: this.forkId }
+                ? {
+                    id: this.forkId,
+                    ref: this.refs.has(this.forkBranch(branch)) ? { name: branch } : null,
+                    defaultBranchRef: { name: this.branch },
+                  }
                 : null,
           base: { ref: this.getRefNode(variables.branch, { oid: true }) },
         },
@@ -1452,7 +1657,33 @@ export class MockGitHub extends MockGitRepository {
   }
 
   /**
-   * Handle the `createRef` mutation. Like GitHub, refuse to create a branch that already exists.
+   * Tell whether GitHub would refuse to bring the given commit into the fork, as it does for an
+   * OAuth token without the `workflow` scope when the commit holds a GitHub Actions workflow file
+   * that none of the fork’s branches has at the same path with the same contents. Set
+   * {@link scopes} to a list including `workflow` to allow it.
+   * @param {string} oid Commit SHA.
+   * @returns {boolean} Whether it’s refused.
+   */
+  isWorkflowChangeRefused(oid) {
+    if (this.scopes?.split(/,\s*/).includes('workflow')) {
+      return false;
+    }
+
+    const prefix = `${this.user.login}:`;
+
+    const forkTrees = [...this.refs.keys()]
+      .filter((key) => key.startsWith(prefix))
+      .map((key) => this.getHead(key).tree);
+
+    return [.../** @type {MockCommit} */ (this.getCommit(oid)).tree].some(
+      ([path, blob]) =>
+        path.startsWith('.github/workflows/') && !forkTrees.some((tree) => tree.get(path) === blob),
+    );
+  }
+
+  /**
+   * Handle the `createRef` mutation. Like GitHub, refuse to create a branch that already exists,
+   * and one in the fork that {@link isWorkflowChangeRefused}.
    * @param {Record<string, any>} input Mutation input.
    * @returns {Record<string, any>} Response body.
    */
@@ -1464,6 +1695,20 @@ export class MockGitHub extends MockGitRepository {
       return {
         data: { createRef: null },
         errors: [{ type: 'UNPROCESSABLE', message: 'Object does not exist' }],
+      };
+    }
+
+    if (repositoryId === this.forkId && this.isWorkflowChangeRefused(oid)) {
+      return {
+        data: { createRef: null },
+        errors: [
+          {
+            type: 'FORBIDDEN',
+            message:
+              `${this.user.login} does not have the correct permissions to execute ` +
+              '`CreateRef`',
+          },
+        ],
       };
     }
 

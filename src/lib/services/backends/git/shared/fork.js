@@ -1,11 +1,20 @@
-import { sleep } from '@sveltia/utils/misc';
-
+import { fetchAPI } from '$lib/services/backends/git/shared/api';
+import { fetchAPIOrUndefined } from '$lib/services/backends/git/shared/api-optional';
 import { runConcurrently } from '$lib/services/backends/git/shared/concurrency';
 import { createLocalizedError } from '$lib/services/backends/git/shared/errors';
+import { pollUntil } from '$lib/services/backends/git/shared/poll';
+import { PULL_REQUEST_DESCRIPTION } from '$lib/services/backends/git/shared/pull-requests';
+import {
+  getRepositoryPath,
+  isSameRepository,
+  toRepositoryPath,
+} from '$lib/services/backends/git/shared/repository';
 import { cmsConfig } from '$lib/services/config';
+import { user } from '$lib/services/user/account.svelte';
 import {
   ENTRY_ALREADY_PUBLISHED,
   forkedRepository,
+  getForkPath,
   openAuthoring,
   openAuthoringInitialized,
   requestForkPermission,
@@ -15,6 +24,7 @@ import {
  * @import {
  * CommitOptions,
  * CommitResults,
+ * FetchApiOptions,
  * ForkRequestState,
  * RepositoryInfo,
  * RepositoryPath,
@@ -37,14 +47,21 @@ const FORK_POLL = {
  * Check whether Open Authoring is turned on for the given backend in the site configuration. It
  * doesn’t mean the signed-in user is actually contributing through a fork: a user who can write to
  * the configured repository keeps working on it directly. Use the `openAuthoring` store for that.
- * @param {GitBackend['name']} name Backend name, e.g. `github`.
+ * @param {GitBackend['name'] | GitBackend['name'][]} name Backend name, e.g. `github`, or the names
+ * of a backend that has more than one, e.g. `gitea` and `forgejo`.
  * @returns {boolean} `true` if the given backend is configured, with the `open_authoring` option
  * enabled.
  */
 export const isOpenAuthoringConfiguredFor = (name) => {
   const { backend } = cmsConfig.current ?? {};
+  const names = Array.isArray(name) ? name : [name];
 
-  return backend?.name === name && 'open_authoring' in backend && backend.open_authoring === true;
+  return (
+    !!backend &&
+    /** @type {string[]} */ (names).includes(backend.name) &&
+    'open_authoring' in backend &&
+    backend.open_authoring === true
+  );
 };
 
 /**
@@ -146,12 +163,15 @@ export const requestForkWithFallbackName = async ({
  * @param {() => Promise<'ready' | 'pending' | 'failed'>} args.checkFork Function to report how far
  * the copy has got. `failed` is for a service that says it has given up, which no amount of waiting
  * will change.
- * @param {number} [args.attemptsLeft] Number of attempts remaining, used for the recursive retry.
+ * @param {number} [args.attemptsLeft] Number of checks at most, including the first one.
  * @throws {Error} When the fork hasn’t become available within the allotted time, or the copy
  * failed outright.
  */
 export const pollForFork = async ({ repoPath, checkFork, attemptsLeft = FORK_POLL.attempts }) => {
-  const status = await checkFork();
+  const status = await pollUntil(checkFork, (value) => value !== 'pending', {
+    ...FORK_POLL,
+    attempts: attemptsLeft,
+  });
 
   if (status === 'ready') {
     return;
@@ -165,16 +185,11 @@ export const pollForFork = async ({ repoPath, checkFork, attemptsLeft = FORK_POL
     });
   }
 
-  if (attemptsLeft <= 1) {
-    throw createLocalizedError(
-      'Timed out waiting for the fork to be created.',
-      'open_authoring.fork_failed',
-      { repo: repoPath },
-    );
-  }
-
-  await sleep(FORK_POLL.interval);
-  await pollForFork({ repoPath, checkFork, attemptsLeft: attemptsLeft - 1 });
+  throw createLocalizedError(
+    'Timed out waiting for the fork to be created.',
+    'open_authoring.fork_failed',
+    { repo: repoPath },
+  );
 };
 
 /**
@@ -202,11 +217,12 @@ export const runOpenAuthoringSetUp = async (setUp) => {
  * differ.
  * @template {{ canWrite: boolean }} A
  * @param {object} args Arguments.
- * @param {string} args.repoPath Configured repository path, e.g. `owner/repo`.
+ * @param {RepositoryPath & { branch?: string }} args.repository Configured repository.
  * @param {() => Promise<A>} args.fetchAccess Function to read the signed-in user’s access to the
  * configured repository.
- * @param {() => Promise<void>} [args.prepare] Function to run once the user turns out to be a
- * contributor, before the fork is looked up.
+ * @param {() => Promise<unknown>} [args.fetchDefaultBranchName] Function to resolve the branch name
+ * once the user turns out to be a contributor, before the fork is looked up, if the fork needs it.
+ * It’s otherwise resolved later in the data load.
  * @param {() => Promise<RepositoryPath | undefined>} args.fetchFork Function to look up the user’s
  * existing fork.
  * @param {(fork: RepositoryPath) => Promise<void>} [args.prepareFork] Function to bring an existing
@@ -218,7 +234,7 @@ export const runOpenAuthoringSetUp = async (setUp) => {
  * @see https://sveltiacms.app/en/docs/workflows/open
  */
 export const setUpForkFor = async (args) => {
-  const { repoPath, fetchAccess, prepare, fetchFork, prepareFork, fetchForkingAllowed } = args;
+  const { repository, fetchAccess, fetchFork, prepareFork, fetchForkingAllowed } = args;
   const access = await fetchAccess();
 
   // A maintainer keeps working on the configured repository, as if Open Authoring was off
@@ -226,7 +242,9 @@ export const setUpForkFor = async (args) => {
     return;
   }
 
-  await prepare?.();
+  if (!repository.branch) {
+    await args.fetchDefaultBranchName?.();
+  }
 
   const existingFork = await fetchFork();
 
@@ -238,7 +256,10 @@ export const setUpForkFor = async (args) => {
   }
 
   // Forking can be turned off on the repository or the instance, and the user has to agree to it
-  await ensureForkPermission({ repoPath, allowForking: await fetchForkingAllowed(access) });
+  await ensureForkPermission({
+    repoPath: `${repository.owner}/${repository.repo}`,
+    allowForking: await fetchForkingAllowed(access),
+  });
 
   forkedRepository.current = await args.createFork();
 };
@@ -329,6 +350,106 @@ export const checkMergedBranch = async ({ branch, mergedSHA, fetchBranchHead, de
 };
 
 /**
+ * Report that a request to bring the contributor’s fork up to date with the upstream repository
+ * failed. The fork still works when it trails the upstream, it just makes for a noisier pull
+ * request, so this only warns.
+ * @param {RepositoryPath} fork Fork.
+ * @param {any} error Error the request failed with.
+ */
+export const warnForkSyncError = (fork, error) => {
+  // eslint-disable-next-line no-console
+  console.warn(`Failed to sync the ${getForkPath(fork)} fork with the upstream repository.`, error);
+};
+
+/**
+ * Report that the contributor’s fork can’t be fast-forwarded to the upstream repository, e.g.
+ * because it has commits of its own on the branch, which the CMS can’t resolve on their behalf.
+ * Like {@link warnForkSyncError}, this only warns.
+ * @param {RepositoryPath} fork Fork.
+ */
+export const warnForkNotFastForwarded = (fork) => {
+  // eslint-disable-next-line no-console
+  console.warn(
+    `The ${getForkPath(fork)} fork could not be fast-forwarded to the upstream repository.`,
+  );
+};
+
+/**
+ * Bring the fork’s copy of the given branch up to date with the configured repository, so a new
+ * workflow branch starts from what’s currently on the site and the resulting pull request only
+ * contains the entry being edited. GitHub and Gitea take the same `merge-upstream` request, which
+ * is sent unless another one is given. A failure is logged rather than raised: a fork that has
+ * drifted still works, it just makes for a noisier pull request.
+ * @param {RepositoryPath} fork Fork to update.
+ * @param {string | undefined} branch Branch name.
+ * @param {() => Promise<Response | undefined>} [request] Function to send another request instead,
+ * resolving to `undefined` when it found nothing to send.
+ * @see https://docs.github.com/en/rest/branches/branches#sync-a-fork-branch-with-the-upstream-repository
+ * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoMergeUpstream
+ */
+export const syncForkWith = async (fork, branch, request) => {
+  /** @type {Response | undefined} */
+  let response;
+
+  try {
+    response = /** @type {Response | undefined} */ (
+      await (request
+        ? request()
+        : fetchAPI(`${getRepositoryPath(fork)}/merge-upstream`, {
+            method: 'POST',
+            body: { branch },
+            responseType: 'raw',
+          }))
+    );
+  } catch (/** @type {any} */ ex) {
+    warnForkSyncError(fork, ex);
+
+    return;
+  }
+
+  // The request is refused when the fork has commits of its own on the branch that can’t be
+  // fast-forwarded or merged, which is a state the CMS can’t resolve on the contributor’s behalf.
+  // On GitHub, it’s also refused when the update would change GitHub Actions workflow files and
+  // the OAuth token lacks the `workflow` scope
+  if (response && !response.ok) {
+    warnForkNotFastForwarded(fork);
+  }
+};
+
+/**
+ * Look for the fork at the name GitHub or Gitea/Forgejo gives it by default, which is the parent’s.
+ * This is where it is unless the contributor renamed it, or already had a repository of that name
+ * when the fork was made. A repository that happens to share the name but isn’t a fork of the
+ * configured one is ignored.
+ * @param {RepositoryPath} repository Configured repository.
+ * @param {FetchApiOptions} [options] Request options.
+ * @returns {Promise<RepositoryPath | undefined>} The fork, or `undefined` if it isn’t there.
+ * @see https://docs.github.com/en/rest/repos/repos#get-a-repository
+ * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoGet
+ */
+export const fetchForkByNameFor = async (repository, options) => {
+  const userName = /** @type {string} */ (user.account?.login);
+
+  // Only a missing repository means there’s no fork at the name. Reading a rate limit or an outage
+  // the same way would have the contributor asked to create another one, so that is passed on
+  const result = /** @type {Record<string, any> | undefined} */ (
+    await fetchAPIOrUndefined(
+      getRepositoryPath({ owner: userName, repo: repository.repo }),
+      options,
+    )
+  );
+
+  // The service redirects a request for a repository that was renamed or transferred, so the one
+  // it answered with can sit on an account other than the one asked for. Everything the CMS writes
+  // goes to this repository, so take it only once it’s confirmed to be the signed-in user’s own
+  return result?.fork &&
+    isSameRepository(result.parent?.full_name, repository) &&
+    result.owner?.login?.toLowerCase() === userName.toLowerCase()
+    ? toRepositoryPath(result.full_name)
+    : undefined;
+};
+
+/**
  * Go through the Editorial Workflow branches in the contributor’s fork, deleting the ones left
  * over from a merged request and parsing the rest. A merged request whose head the branch still
  * points at has nothing left on it. Tidying it up keeps the fork from collecting a branch per
@@ -376,8 +497,8 @@ export const pruneForkBranches = async (items, classify, deleteBranch) => {
  * @param {WorkflowStatus} args.status New status.
  * @param {'number' | 'nodeId'} args.requestKey Property of the pull request that identifies the
  * request on the service, `undefined` until one is opened.
- * @param {(args: { branch: string, title: string, status: WorkflowStatus }) =>
- * Promise<WorkflowPullRequest>} args.createRequest Function to open the request.
+ * @param {(args: { branch: string, title: string, status: WorkflowStatus, description: string })
+ * => Promise<WorkflowPullRequest>} args.createRequest Function to open the request.
  * @param {(pullRequest: WorkflowPullRequest) => Promise<ForkRequestState | undefined>}
  * args.fetchRequest Function to read the current state of the request. `undefined` means the
  * request couldn’t be found, in which case the entry carries on with what it knows.
@@ -406,7 +527,7 @@ export const updateForkStatusWith = async (args) => {
   if (pullRequest[requestKey] === undefined) {
     return status === 'draft'
       ? { ...pullRequest, status, updatedDate: new Date() }
-      : createRequest({ branch, title, status });
+      : createRequest({ branch, title, status, description: PULL_REQUEST_DESCRIPTION });
   }
 
   // The request may have been closed, reopened or merged outside the CMS, so read the current state

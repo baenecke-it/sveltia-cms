@@ -7,13 +7,23 @@ import { env } from '$lib/services/user/env.svelte';
 import {
   canShowMobileSignInDialog,
   createOneOffNotice,
+  DEMO_WELCOME_STORAGE_KEY,
+  demoWelcomeNotice,
   getState,
   setState,
+  showDemoWelcomeDialogIfNeeded,
   showMobileSignInDialog,
 } from './onboarding';
 
 // Mock dependencies
-const { mockIndexedDBGet, mockIndexedDBSet, mockIndexedDBConstructor } = vi.hoisted(() => {
+const {
+  mockIndexedDBGet,
+  mockIndexedDBSet,
+  mockIndexedDBConstructor,
+  mockLocalStorageGet,
+  mockLocalStorageSet,
+  mockIsDemoSite,
+} = vi.hoisted(() => {
   const get = vi.fn();
   const set = vi.fn();
 
@@ -24,6 +34,9 @@ const { mockIndexedDBGet, mockIndexedDBSet, mockIndexedDBConstructor } = vi.hois
     mockIndexedDBConstructor: vi.fn(function () {
       return { get, set };
     }),
+    mockLocalStorageGet: vi.fn(),
+    mockLocalStorageSet: vi.fn(),
+    mockIsDemoSite: vi.fn(),
   };
 });
 
@@ -32,6 +45,11 @@ let mockOnboardingState;
 
 vi.mock('@sveltia/utils/storage', () => ({
   IndexedDB: mockIndexedDBConstructor,
+  LocalStorage: { get: mockLocalStorageGet, set: mockLocalStorageSet },
+}));
+
+vi.mock('$lib/services/backends/fs/seed', () => ({
+  isDemoSite: mockIsDemoSite,
 }));
 
 vi.mock('$lib/services/backends', () => ({
@@ -260,6 +278,80 @@ describe('onboarding', () => {
 
       await notice.showIfNeeded();
       expect(notice.show.current).toBe(false);
+    });
+  });
+
+  describe('demo welcome dialog', () => {
+    beforeEach(() => {
+      demoWelcomeNotice.show.current = false;
+      /** @type {any} */ (backend).current = { name: 'test-repo' };
+      mockIsDemoSite.mockImplementation((name) => name === 'test-repo');
+    });
+
+    it('should be hidden by default', () => {
+      expect(demoWelcomeNotice.show.current).toBe(false);
+    });
+
+    it('should show the dialog on a demo site the user hasn’t seen it on yet', async () => {
+      mockLocalStorageGet.mockResolvedValue(undefined);
+
+      await showDemoWelcomeDialogIfNeeded();
+      expect(mockIsDemoSite).toHaveBeenCalledWith('test-repo');
+      expect(mockLocalStorageGet).toHaveBeenCalledWith(DEMO_WELCOME_STORAGE_KEY);
+      expect(demoWelcomeNotice.show.current).toBe(true);
+    });
+
+    it('should not show the dialog again once the user has seen it', async () => {
+      mockLocalStorageGet.mockResolvedValue(true);
+
+      await showDemoWelcomeDialogIfNeeded();
+      expect(demoWelcomeNotice.show.current).toBe(false);
+    });
+
+    it('should not show the dialog outside a demo site', async () => {
+      /** @type {any} */ (backend).current = { name: 'github' };
+
+      await showDemoWelcomeDialogIfNeeded();
+      expect(mockLocalStorageGet).not.toHaveBeenCalled();
+      expect(demoWelcomeNotice.show.current).toBe(false);
+    });
+
+    it('should not show the dialog without a backend', async () => {
+      /** @type {any} */ (backend).current = undefined;
+
+      await showDemoWelcomeDialogIfNeeded();
+      expect(mockIsDemoSite).toHaveBeenCalledWith(undefined);
+      expect(demoWelcomeNotice.show.current).toBe(false);
+    });
+
+    it('should show the dialog when the storage can’t be read', async () => {
+      mockLocalStorageGet.mockRejectedValue(new Error('denied'));
+
+      await showDemoWelcomeDialogIfNeeded();
+      expect(demoWelcomeNotice.show.current).toBe(true);
+    });
+
+    it('should use a local storage key with the CMS prefix', () => {
+      expect(DEMO_WELCOME_STORAGE_KEY).toBe('sveltia-cms.demo-welcome-seen');
+    });
+
+    it('should remember that the user has seen the dialog', async () => {
+      mockLocalStorageSet.mockResolvedValue(undefined);
+      demoWelcomeNotice.show.current = true;
+
+      demoWelcomeNotice.hide();
+      expect(demoWelcomeNotice.show.current).toBe(false);
+      expect(mockLocalStorageSet).toHaveBeenCalledWith(DEMO_WELCOME_STORAGE_KEY, true);
+    });
+
+    it('should ignore an error while remembering the dismissal', async () => {
+      mockLocalStorageSet.mockRejectedValue(new Error('denied'));
+
+      // Vitest fails the run on an unhandled rejection, so the error has to be caught
+      expect(() => demoWelcomeNotice.hide()).not.toThrow();
+      await vi.waitFor(() => {
+        expect(mockLocalStorageSet).toHaveBeenCalledWith(DEMO_WELCOME_STORAGE_KEY, true);
+      });
     });
   });
 });

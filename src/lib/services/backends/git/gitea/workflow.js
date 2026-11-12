@@ -24,15 +24,23 @@ import { fetchAPI } from '$lib/services/backends/git/shared/api';
 import { runConcurrently } from '$lib/services/backends/git/shared/concurrency';
 import { checkPublishAllowed } from '$lib/services/backends/git/shared/fork';
 import {
+  getPullRequestPath,
+  getRepositoryPath,
+} from '$lib/services/backends/git/shared/repository';
+import {
+  approvePullRequest,
   assertBranchAtHead,
   commitToNewWorkflowBranch,
-  getMovedHeadMergeState,
+  discardPullRequest,
+  findOwnApprovals,
   getParentDirs,
   isPullRequestMerged,
   isSquashMergeEnabled,
+  resolveMergeState,
   saveWorkflowBranch,
   toChangedFilesWithModes,
   updateLabelledStatus,
+  updatePullRequestDescription,
 } from '$lib/services/backends/git/shared/workflow';
 import { encodePathSegments } from '$lib/services/utils/url';
 import { getAllStatusLabels } from '$lib/services/workflow/labels';
@@ -60,7 +68,6 @@ import { openAuthoring } from '$lib/services/workflow/open-authoring';
  * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoListPullRequests
  */
 export const fetchLabelledPullRequests = async () => {
-  const { owner, repo } = repository;
   const statusLabels = getAllStatusLabels();
 
   // The status labels are matched by the API rather than by {@link parsePullRequest}, so the item
@@ -69,7 +76,7 @@ export const fetchLabelledPullRequests = async () => {
   // endpoint takes label IDs and matches a pull request carrying any of them, so the IDs are looked
   // up first. The issue endpoint takes names instead, but only matches an item carrying all of
   // them, which no pull request does once more than one status label exists
-  const labelIds = (await fetchAllPages(`/repos/${owner}/${repo}/labels`))
+  const labelIds = (await fetchAllPages(`${getRepositoryPath(repository)}/labels`))
     .filter(({ name }) => statusLabels.includes(name))
     .map(({ id }) => id);
 
@@ -81,7 +88,7 @@ export const fetchLabelledPullRequests = async () => {
   const labelQuery = labelIds.map((id) => `&labels=${id}`).join('');
 
   const items = await fetchAllPages(
-    `/repos/${owner}/${repo}/pulls?state=open&sort=recentupdate${labelQuery}`,
+    `${getRepositoryPath(repository)}/pulls?state=open&sort=recentupdate${labelQuery}`,
   );
 
   // A pull request carrying more than one status label is listed once for each. The list reports
@@ -93,7 +100,7 @@ export const fetchLabelledPullRequests = async () => {
 
   await runConcurrently(numbers, async (number) => {
     const item = /** @type {Record<string, any>} */ (
-      await fetchAPI(`/repos/${owner}/${repo}/pulls/${number}`)
+      await fetchAPI(getPullRequestPath(repository, number))
     );
 
     const pullRequest = parsePullRequest(item);
@@ -134,8 +141,9 @@ export const fetchPullRequests = async () =>
  * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoListPullRequests
  */
 const fetchOpenPullRequest = async (branch) => {
-  const { owner, repo } = repository;
-  const items = await fetchAllPages(`/repos/${owner}/${repo}/pulls?state=open&sort=recentupdate`);
+  const items = await fetchAllPages(
+    `${getRepositoryPath(repository)}/pulls?state=open&sort=recentupdate`,
+  );
 
   // A pull request from a fork can have a head branch of the same name, but it isn’t this branch
   return items.find((item) => item.head?.ref === branch && isSameRepositoryPullRequest(item));
@@ -218,6 +226,16 @@ const commitToExistingBranch = async (changes, options, pullRequest) => {
 };
 
 /**
+ * Update the description of the given pull request with the given function.
+ * @param {WorkflowPullRequest} pullRequest Pull request.
+ * @param {(description: string) => string} transform Function to get the new description from the
+ * current one.
+ * @returns {Promise<string>} New description.
+ */
+const updateDescription = (pullRequest, transform) =>
+  updatePullRequestDescription(repository, pullRequest, transform);
+
+/**
  * Commit the given changes on the workflow branch, creating the branch and the pull request if they
  * don’t exist yet.
  * @param {WorkflowSaveOptions} args Arguments.
@@ -225,7 +243,12 @@ const commitToExistingBranch = async (changes, options, pullRequest) => {
  * and the new or updated pull request.
  */
 export const savePullRequest = async (args) =>
-  saveWorkflowBranch(args, { commitToNewBranch, commitToExistingBranch, createPullRequest });
+  saveWorkflowBranch(args, {
+    commitToNewBranch,
+    commitToExistingBranch,
+    createPullRequest,
+    updateDescription,
+  });
 
 /**
  * Update the pull request’s status label and draft state. A pull request in the `draft` status is
@@ -236,6 +259,34 @@ export const savePullRequest = async (args) =>
  */
 export const updateStatus = (pullRequest, status) =>
   updateLabelledStatus(pullRequest, status, { updateForkStatus, updateLabels, updateDraftState });
+
+/**
+ * Approve the pull request on behalf of the signed-in user, pinned to the head commit the entry was
+ * reviewed at.
+ * @param {WorkflowPullRequest} pullRequest Pull request.
+ * @returns {Promise<void>}
+ */
+export const approve = (pullRequest) => approvePullRequest(repository, pullRequest, 'APPROVED');
+
+/**
+ * Withdraw the signed-in user’s approval of the pull request by deleting their approving reviews,
+ * which a reviewer may do with their own, while dismissing one takes a repository administrator.
+ * @param {WorkflowPullRequest} pullRequest Pull request.
+ * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoListPullReviews
+ * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoDeletePullReview
+ */
+export const withdrawApproval = async (pullRequest) => {
+  const path = `${getPullRequestPath(repository, pullRequest.number)}/reviews`;
+  const reviews = /** @type {Record<string, any>[]} */ (await fetchAllPages(path));
+
+  // A deletion comes back as `204 No Content`, which can’t be parsed as JSON, so the response is
+  // read as text, while a refusal still throws for the caller to report
+  await Promise.all(
+    findOwnApprovals(reviews).map(({ id }) =>
+      fetchAPI(`${path}/${id}`, { method: 'DELETE', responseType: 'text' }),
+    ),
+  );
+};
 
 /**
  * Map of the file statuses the REST API reports to {@link WorkflowChangedFile} ones. A copy adds a
@@ -273,14 +324,13 @@ const CONTENT_TYPE_MODES = {
  * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoGetContentsList
  */
 const fetchFileModes = async ({ headSHA, paths }) => {
-  const { owner, repo } = repository;
   /** @type {Map<string, string>} */
   const modes = new Map();
 
   await runConcurrently(getParentDirs(paths), async (dir) => {
     const entries = /** @type {Record<string, any>[]} */ (
       await fetchAPI(
-        `/repos/${owner}/${repo}/contents${dir ? `/${encodePathSegments(dir)}` : ''}` +
+        `${getRepositoryPath(repository)}/contents${dir ? `/${encodePathSegments(dir)}` : ''}` +
           `?ref=${encodeURIComponent(headSHA)}`,
       )
     );
@@ -304,12 +354,11 @@ const fetchFileModes = async ({ headSHA, paths }) => {
  * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoGetPullRequest
  */
 export const fetchMergeState = async (pullRequest) => {
-  const { owner, repo } = repository;
   const { number } = /** @type {{ number: number }} */ (pullRequest);
 
   // The head commit of a single pull request is the branch’s own, read when asked
   const item = /** @type {Record<string, any>} */ (
-    await fetchAPI(`/repos/${owner}/${repo}/pulls/${number}`)
+    await fetchAPI(getPullRequestPath(repository, number))
   );
 
   const headSHA = /** @type {string | undefined} */ (item.head?.sha);
@@ -320,28 +369,29 @@ export const fetchMergeState = async (pullRequest) => {
   const onConfiguredBranches =
     item.base?.ref === repository.branch && isSameRepositoryPullRequest(item);
 
-  if (!headSHA || !onConfiguredBranches) {
-    return { headSHA, onConfiguredBranches: false, files: [], complete: false };
-  }
-
-  const movedHeadState = getMovedHeadMergeState(pullRequest, headSHA);
-
-  if (movedHeadState) {
-    return movedHeadState;
-  }
-
-  const { files, complete } = await fetchChangedFiles(number, headSHA);
-
-  return {
+  return resolveMergeState({
+    pullRequest,
     headSHA,
     onConfiguredBranches,
-    files: await toChangedFilesWithModes(files, {
-      statusMap: REST_FILE_STATUSES,
-      headSHA,
-      fetchFileModes,
-    }),
-    complete,
-  };
+    /**
+     * List the files the pull request changes at the head commit.
+     * @param {string} sha Head commit.
+     * @returns {Promise<{ files: WorkflowChangedFile[], complete: boolean }>} Files, and whether
+     * the list is complete.
+     */
+    listChangedFiles: async (sha) => {
+      const { files, complete } = await fetchChangedFiles(number, sha);
+
+      return {
+        files: await toChangedFilesWithModes(files, {
+          statusMap: REST_FILE_STATUSES,
+          headSHA: sha,
+          fetchFileModes,
+        }),
+        complete,
+      };
+    },
+  });
 };
 
 /**
@@ -382,14 +432,13 @@ export const fetchUnchangedPaths = async ({ headSHA, paths }) => {
 export const publish = async (pullRequest) => {
   checkPublishAllowed();
 
-  const { owner, repo } = repository;
   const { number } = pullRequest;
   const squash = isSquashMergeEnabled();
 
   // A successful merge comes back as `200 OK` with an empty body, which can’t be parsed as JSON, so
   // the response is taken as is and the error case is handled here
   const response = /** @type {Response} */ (
-    await fetchAPI(`/repos/${owner}/${repo}/pulls/${number}/merge`, {
+    await fetchAPI(`${getPullRequestPath(repository, number)}/merge`, {
       method: 'POST',
       responseType: 'raw',
       body: {
@@ -433,30 +482,16 @@ export const publish = async (pullRequest) => {
 /**
  * Close the pull request without merging it, and delete the workflow branch.
  * @param {WorkflowPullRequest} pullRequest Pull request.
- * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoEditPullRequest
+ * @returns {Promise<void>}
  */
-export const discard = async (pullRequest) => {
-  const { owner, repo } = repository;
-
-  // An Open Authoring draft has no pull request yet, so deleting the branch is all there is to do
-  if (pullRequest.number !== undefined) {
-    try {
-      await fetchAPI(`/repos/${owner}/${repo}/pulls/${pullRequest.number}`, {
-        method: 'PATCH',
-        body: { state: 'closed' },
-      });
-    } catch (/** @type {any} */ ex) {
-      // The pull request was merged after the board was loaded, which the instance reports as a
-      // precondition failure on any state change. There’s nothing left to close, and the branch is
-      // still worth tidying up, so carry on
-      if (ex.cause?.status !== 412) {
-        throw ex;
-      }
-    }
-  }
-
-  await deleteBranch(pullRequest.branch);
-};
+export const discard = (pullRequest) =>
+  discardPullRequest(repository, pullRequest, {
+    deleteBranch,
+    // The pull request was merged after the board was loaded, which the instance reports as a
+    // precondition failure on any state change. There’s nothing left to close, and the branch is
+    // still worth tidying up, so carry on
+    closedStatuses: [412],
+  });
 
 /**
  * Gitea/Forgejo’s Editorial Workflow implementation.
@@ -466,6 +501,8 @@ export default {
   fetchPullRequests,
   savePullRequest,
   updateStatus,
+  approve,
+  withdrawApproval,
   fetchBranchHead,
   fetchMergeState,
   fetchUnchangedPaths,

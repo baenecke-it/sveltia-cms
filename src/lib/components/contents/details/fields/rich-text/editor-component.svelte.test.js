@@ -35,6 +35,8 @@ const wrappers = [];
  * @param {object} [options] Options.
  * @param {boolean} [options.contained] Whether the pane elements are there. Otherwise the
  * component can’t tell which locale and field it belongs to.
+ * @param {boolean} [options.readonly] Whether the rich text field the component is in is read-only,
+ * which its textbox tells. Otherwise the component isn’t in a textbox.
  * @returns {Promise<{
  * draft: any,
  * entryDraft: EntryDraftState,
@@ -43,7 +45,7 @@ const wrappers = [];
  * component: any,
  * }>} Draft, its state, handler, wrapper and component.
  */
-const renderComponent = async (props, { contained = true } = {}) => {
+const renderComponent = async (props, { contained = true, readonly = undefined } = {}) => {
   const draft = createMockDraft({
     fields: [{ name: 'body', widget: 'markdown' }],
     values: { _default: { body: '' } },
@@ -59,6 +61,11 @@ const renderComponent = async (props, { contained = true } = {}) => {
     wrapper.dataset.locale = '_default';
     wrapper.dataset.keyPath = 'body';
     wrapper.dataset.typedKeyPath = 'body';
+  }
+
+  if (readonly !== undefined) {
+    wrapper.setAttribute('role', 'textbox');
+    wrapper.setAttribute('aria-readonly', String(readonly));
   }
 
   document.body.appendChild(wrapper);
@@ -160,6 +167,43 @@ describe('EditorComponent', () => {
           expect.objectContaining({
             type: 'update',
             detail: expect.objectContaining({ title: 'Hi' }),
+          }),
+        ),
+      );
+    });
+
+    test('takes the values of the node, e.g. after an undo, without reporting them', async () => {
+      const { draft, onChange, component } = await renderComponent({
+        values: { title: 'Hello', url: 'https://example.com' },
+      });
+
+      const title = page.getByRole('group', { name: 'Card' }).getByRole('textbox', {
+        name: 'Title',
+      });
+
+      await expect.element(title).toHaveValue('Hello');
+      await vi.waitFor(() => expect(onChange).toHaveBeenCalled());
+      onChange.mockClear();
+
+      component.setValues({ title: 'Undone' });
+      // The same values passed again before they’re taken are ignored
+      component.setValues({ title: 'Undone' });
+
+      await expect.element(title).toHaveValue('Undone');
+      // The node’s data replaces the stored values as a whole
+      await expect.poll(() => getStoredValues(draft).title).toBe('Undone');
+      expect(getStoredValues(draft).url).not.toBe('https://example.com');
+      // The node already holds the values, so reporting them would add a step to the history
+      expect(onChange).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'update' }));
+
+      // Taking the node’s values again doesn’t keep a later edit from being reported
+      component.setValues({ title: 'Undone' });
+      await title.fill('Edited');
+      await vi.waitFor(() =>
+        expect(onChange).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            type: 'update',
+            detail: expect.objectContaining({ title: 'Edited' }),
           }),
         ),
       );
@@ -315,6 +359,30 @@ describe('EditorComponent', () => {
       expect(
         onChange.mock.calls.filter((/** @type {any[]} */ [event]) => event.type === 'remove'),
       ).toHaveLength(2);
+    });
+
+    test('can’t be removed, nor its fields edited, in a read-only field', async () => {
+      const { onChange, wrapper } = await renderComponent(
+        { values: { title: 'Hello' } },
+        { readonly: true },
+      );
+
+      const group = page.getByRole('group', { name: 'Card' });
+      const title = group.getByRole('textbox', { name: 'Title' });
+
+      await expect.element(title).toHaveAttribute('aria-readonly', 'true');
+      expect(group.getByRole('button', { name: 'Remove' }).elements()).toHaveLength(0);
+
+      wrapper
+        .querySelector('.component')
+        ?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }));
+      expect(onChange).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'remove' }));
+
+      // The field’s state is followed
+      wrapper.setAttribute('aria-readonly', 'false');
+      await expect.element(title).not.toHaveAttribute('aria-readonly', 'true');
+      await group.getByRole('button', { name: 'Remove' }).click();
+      expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'remove' }));
     });
 
     test('has no expander button without fields, but can be removed', async () => {
@@ -892,6 +960,90 @@ describe('EditorComponent', () => {
       expect(
         onChange.mock.calls.filter((/** @type {any[]} */ [event]) => event.type === 'remove'),
       ).toHaveLength(2);
+    });
+
+    test('can only be viewed in a read-only field', async () => {
+      const { onChange } = await renderComponent(
+        { mode: 'dialog', values: { title: 'Hello' } },
+        { readonly: true },
+      );
+
+      const placeholder = page.getByRole('button', { name: 'Card' });
+
+      await placeholder.click();
+
+      const dialog = page.getByRole('dialog', { name: 'Card' });
+
+      await expect
+        .element(dialog.getByRole('textbox', { name: 'Title' }))
+        .toHaveAttribute('aria-readonly', 'true');
+      expect(dialog.getByRole('button', { name: /^(Remove|Update)$/ }).elements()).toHaveLength(0);
+      await dialog.getByRole('button', { name: 'Cancel' }).click();
+      await expect.element(dialog).not.toBeInTheDocument();
+
+      placeholder
+        .element()
+        .dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }));
+      expect(onChange).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'remove' }));
+    });
+
+    test('does nothing once unmounted before the next frame', async () => {
+      // Hold the frames back, so the component can be unmounted before the next one comes
+      /** @type {Map<number, FrameRequestCallback>} */
+      const frames = new Map();
+      let lastFrame = 0;
+
+      vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+        lastFrame += 1;
+        frames.set(lastFrame, callback);
+
+        return lastFrame;
+      });
+      vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
+        frames.delete(id);
+      });
+
+      const draft = createMockDraft({
+        fields: [{ name: 'body', widget: 'markdown' }],
+        values: { _default: { body: '' } },
+      });
+
+      const entryDraft = new EntryDraftState();
+      const wrapper = document.createElement('div');
+
+      entryDraft.current = draft;
+      wrapper.dataset.locale = '_default';
+      wrapper.dataset.keyPath = 'body';
+      wrapper.setAttribute('role', 'textbox');
+      wrapper.setAttribute('aria-readonly', 'false');
+      document.body.appendChild(wrapper);
+      wrappers.push(wrapper);
+      setEntryDraftRoot(wrapper, entryDraft);
+
+      // A freshly inserted component, which would open the dialog in the next frame
+      const { unmount } = await render(EditorComponent, {
+        target: wrapper,
+        props: /** @type {any} */ ({
+          componentName: 'card',
+          label: 'Card',
+          fields,
+          mode: 'dialog',
+          onChange: vi.fn(),
+        }),
+      });
+
+      await unmount();
+
+      const closest = vi.spyOn(Element.prototype, 'closest');
+
+      frames.forEach((callback) => callback(performance.now()));
+      vi.restoreAllMocks();
+
+      // The component neither looks up the draft, the locale and the read-only state through the
+      // DOM, nor opens the dialog
+      expect(closest).not.toHaveBeenCalled();
+      expect(draft.extraValues._default).toEqual({});
+      expect(page.getByRole('dialog').elements()).toHaveLength(0);
     });
 
     test('opens the dialog with the Space key, which doesn’t reach the editor', async () => {

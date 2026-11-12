@@ -35,19 +35,20 @@ export const getProportionalScrollTop = ({
  * @param {number} args.y Top of the content area being scrolled, in the viewport.
  * @param {number} args.top Top of the field at the top of the content area, in the viewport.
  * @param {number} args.height Height of that field.
- * @param {number} args.targetOffsetTop Offset top of the matching field in the other pane.
- * @param {number} args.targetHeight Client height of the matching field.
+ * @param {number} args.targetTop Top of the matching field in the other pane’s scrollable content:
+ * the other pane’s scroll position that would bring it to the top of the pane.
+ * @param {number} args.targetHeight Height of the matching field.
  * @returns {number | undefined} Scroll position for the other pane, or `undefined` if the top of
  * the content area isn’t within the field.
  */
-export const getFieldAlignedScrollTop = ({ y, top, height, targetOffsetTop, targetHeight }) => {
+export const getFieldAlignedScrollTop = ({ y, top, height, targetTop, targetHeight }) => {
   const ratio = (y - top) / height;
 
   if (ratio < 0 || ratio > 1) {
     return undefined;
   }
 
-  return targetOffsetTop - y + targetHeight * ratio;
+  return targetTop + targetHeight * ratio;
 };
 
 /**
@@ -195,4 +196,62 @@ export const getRevealingScrollTop = ({
   }
 
   return Math.max(0, scrollTop + offset - (viewHeight - height) / 2);
+};
+
+/**
+ * Get how far down the bottom of a sticky toolbar is in the viewport, so that an item scrolled to
+ * can leave room for it, rather than scroll back for it, which shows as a bump. The toolbar sticks
+ * below the toolbars of the rich text editors the field is in, if any.
+ * @param {HTMLElement | undefined} toolbar Sticky toolbar, if it is rendered.
+ * @returns {number} Offset in pixels, or 0 without a toolbar.
+ */
+export const getStickyToolbarBottom = (toolbar) =>
+  toolbar
+    ? Number.parseFloat(getComputedStyle(toolbar).top) + toolbar.getBoundingClientRect().height
+    : 0;
+
+/**
+ * Scroll a newly added List field item into view. The fields above it are only rendered once the
+ * scroll brings them into view, which can push the item out of view again, so it’s followed until
+ * it stays in place. It’s not followed otherwise, as the editor pane doesn’t scroll smoothly, so
+ * every scroll shows as a jump, nor once the list is scrolled elsewhere.
+ * @param {object} args Arguments.
+ * @param {HTMLElement} args.item List item element, whose first child is its header.
+ * @param {HTMLElement} args.list Element containing the items.
+ * @param {() => boolean} [args.isOutdated] Function telling whether another item has been added
+ * since, in which case this one is no longer followed.
+ * @param {number} [args.maxAttempts] How many times to scroll to the item at most.
+ * @param {number} [args.interval] How long to wait for fields to render after scrolling, in
+ * milliseconds.
+ */
+export const scrollToAddedListItem = async ({
+  item,
+  list,
+  isOutdated = () => false,
+  maxAttempts = 5,
+  interval = 100,
+}) => {
+  const header = /** @type {Element} */ (item.firstElementChild);
+  /**
+   * Get the position of the item in the list, which changes as the items above it grow.
+   * @returns {number} Offset in pixels.
+   */
+  const getOffset = () => item.getBoundingClientRect().top - list.getBoundingClientRect().top;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    item.scrollIntoView();
+
+    const offset = getOffset();
+
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(interval);
+
+    if (
+      isOutdated() ||
+      getOffset() === offset ||
+      header.getBoundingClientRect().bottom <= window.innerHeight
+    ) {
+      return;
+    }
+  }
 };

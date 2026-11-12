@@ -18,6 +18,7 @@
 
   import PaneBody from '$lib/components/contents/details/pane-body.svelte';
   import PaneHeader from '$lib/components/contents/details/pane-header.svelte';
+  import PendingEditInfobar from '$lib/components/contents/details/pending-edit-infobar.svelte';
   import RemoteChangeInfobar from '$lib/components/contents/details/remote-change-infobar.svelte';
   import SidebarSheet from '$lib/components/contents/details/sidebar/sidebar-sheet.svelte';
   import Sidebar from '$lib/components/contents/details/sidebar/sidebar.svelte';
@@ -74,13 +75,7 @@
    */
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    entryDraft,
-    editorLocale = undefined,
-    loading = false,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { entryDraft, editorLocale = undefined, loading = false } = $props();
 
   // svelte-ignore state_referenced_locally
   setEntryDraftContext(entryDraft);
@@ -112,13 +107,18 @@
   const {
     isNew = true,
     canPreview = true,
+    canShowSecondPane = true,
     collection,
     collectionName,
     collectionFile,
     fileName,
     isIndexFile,
   } = $derived(/** @type {EntryDraft} */ (entryDraft.current ?? {}));
-  const { showPreview, showSecondPane = true } = $derived(entryEditorSettings.current ?? {});
+  const { showPreview, showSecondPane: secondPaneShown = true } = $derived(
+    entryEditorSettings.current ?? {},
+  );
+  // The user’s choice only applies where the `editor.second_pane` option allows the second pane
+  const showSecondPane = $derived(canShowSecondPane && secondPaneShown);
   const { i18nEnabled, allLocales, defaultLocale } = $derived(
     getDraftI18nConfig(entryDraft.current),
   );
@@ -364,7 +364,8 @@
       void $state.snapshot(draft.currentSlugs);
       // The files map holds `File` objects, which can’t be snapshotted; a file can be replaced
       Object.values(draft.files).forEach(({ file }) => void file);
-      void draft.pendingEntries.length;
+      // A pending entry opened again and changed takes the place of its earlier version
+      draft.pendingEntries.forEach((pendingEntry) => void pendingEntry);
       void draft.interacted;
     }
 
@@ -380,8 +381,11 @@
     }
   });
 
+  // The pane state key also changes between the files of a file/singleton collection, which share
+  // the collection
   watch(
     () => [
+      paneStateKey,
       collection,
       showSecondPane,
       showPreview,
@@ -510,6 +514,7 @@
       </EmptyState>
     {:else}
       <RemoteChangeInfobar />
+      <PendingEditInfobar />
       <div role="none" class="body" onpointerdown={markInteracted} onkeydown={markInteracted}>
         {#key `${collectionName}|${fileName}|${isIndexFile}`}
           <div role="none" class="content-area">
@@ -636,6 +641,8 @@
         border-radius: 50%;
         opacity: 0.5;
         translate: -50%;
+        /* Not `all`: the position would animate from the unmeasured width and lag behind a drag */
+        transition-property: opacity, color, background-color;
 
         &:dir(rtl) {
           translate: 50%;

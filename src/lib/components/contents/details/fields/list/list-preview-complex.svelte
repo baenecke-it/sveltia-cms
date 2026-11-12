@@ -7,8 +7,7 @@
 <script>
   import { VisibilityObserver } from '@sveltia/ui';
 
-  import Subsection from '$lib/components/contents/details/fields/object/subsection.svelte';
-  import FieldPreview from '$lib/components/contents/details/preview/field-preview.svelte';
+  import SubfieldPreviews from '$lib/components/contents/details/fields/object/subfield-previews.svelte';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
   import { getFieldValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
   import { getMemoizedSubtree } from '$lib/services/contents/entry/subtree';
@@ -22,7 +21,6 @@
    * ListFieldWithSubField,
    * ListFieldWithSubFields,
    * ListFieldWithTypes,
-   * VariableFieldType,
    * } from '$lib/types/public';
    */
 
@@ -35,14 +33,7 @@
   const entryDraft = getEntryDraftContext();
 
   /** @type {FieldPreviewProps & Props} */
-  let {
-    /* eslint-disable prefer-const */
-    locale,
-    keyPath,
-    typedKeyPath,
-    fieldConfig,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { locale, keyPath, typedKeyPath, fieldConfig } = $props();
 
   const { field } = $derived(/** @type {ListFieldWithSubField} */ (fieldConfig));
   const { fields } = $derived(/** @type {ListFieldWithSubFields} */ (fieldConfig));
@@ -81,34 +72,15 @@
     the item even before it’s rendered -->
   <div role="none" data-lazy-key-path={itemKeyPath}>
     <VisibilityObserver>
-      {@const typeConfig = type ? types?.find(({ name }) => name === type) : undefined}
-      {#if hasVariableTypes && !typeConfig}
-        <!-- Unknown type: a warning is displayed in the editor -->
-      {:else}
-        {@const label = typeConfig ? typeConfig.label || typeConfig.name : undefined}
-        {@const subFields = hasVariableTypes
-          ? /** @type {VariableFieldType} */ (typeConfig).fields
-          : singleSubFields}
-        <Subsection {label}>
-          {#each subFields as subField (subField.name)}
-            {@const subFieldKeyPath = hasSingleSubField
-              ? itemKeyPath
-              : `${itemKeyPath}.${subField.name}`}
-            <div role="none" data-lazy-key-path={subFieldKeyPath}>
-              <VisibilityObserver>
-                <FieldPreview
-                  keyPath={subFieldKeyPath}
-                  typedKeyPath={hasVariableTypes
-                    ? `${typedKeyPath}.*<${type}>.${subField.name}`
-                    : `${typedKeyPath}.*.${subField.name}`}
-                  {locale}
-                  fieldConfig={subField}
-                />
-              </VisibilityObserver>
-            </div>
-          {/each}
-        </Subsection>
-      {/if}
+      <SubfieldPreviews
+        {locale}
+        keyPath={itemKeyPath}
+        typedKeyPath="{typedKeyPath}.*"
+        types={hasVariableTypes ? types : undefined}
+        fields={singleSubFields}
+        {type}
+        single={hasSingleSubField}
+      />
     </VisibilityObserver>
   </div>
 {/each}

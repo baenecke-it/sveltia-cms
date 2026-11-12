@@ -1,4 +1,4 @@
-import { selectText } from '../../fixtures/rich-text.js';
+import { moveCaretToEnd, selectText } from '../../fixtures/rich-text.js';
 import { expect, test } from '../../fixtures/test.js';
 import { getEditor } from '../../fixtures/ui.js';
 
@@ -65,19 +65,6 @@ const openNote = async ({ cms, page, body }) => {
   await expect(editor.getByRole('textbox', { name: 'Title' }).first()).toHaveValue('Note');
 
   return { editor, field, body: field.getByRole('textbox', { name: 'Body' }) };
-};
-
-/**
- * Move the caret to the end of a rich text editor. The End key doesn’t do that on macOS, so set the
- * selection directly, which the editor picks up.
- * @param {Locator} textbox Editor.
- */
-const moveCaretToEnd = async (textbox) => {
-  await textbox.evaluate((element) => {
-    /** @type {HTMLElement} */ (element).focus();
-    window.getSelection()?.selectAllChildren(element);
-    window.getSelection()?.collapseToEnd();
-  });
 };
 
 /**
@@ -530,6 +517,125 @@ test.describe('minimal', () => {
       expect(await body.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(
         true,
       );
+    });
+
+    test('starts with the height of a single line', async ({ cms, page }) => {
+      const { body } = await openNote({ cms, page, body: 'Short.' });
+
+      await expect(body).toContainText('Short.');
+      // One line plus the padding, well below the 120 pixels a multiline editor starts with
+      expect((await body.boundingBox())?.height).toBeLessThan(80);
+    });
+  });
+});
+
+test.describe('multiline', () => {
+  test.describe('turned off', () => {
+    test.use({
+      config: noteConfig({
+        multiline: false,
+        buttons: ['bold', 'italic', 'link', 'heading-one', 'quote'],
+      }),
+    });
+
+    test('keeps the text on one line as the user types and pastes', async ({ cms, page }) => {
+      const { editor, field, body } = await openNote({ cms, page, body: 'One line.' });
+
+      await expect(body).toHaveAttribute('aria-multiline', 'false');
+      await expect(field.getByRole('button', { name: 'Bold' })).toBeVisible();
+      // The block-level buttons are left out
+      await expect(field.getByRole('button', { name: 'Show Text Style Options' })).toHaveCount(0);
+
+      await moveCaretToEnd(body);
+      await page.keyboard.press('Enter');
+      await page.keyboard.press('Shift+Enter');
+      await page.keyboard.type(' Two.');
+      await body.evaluate((element) => {
+        const clipboardData = new DataTransfer();
+
+        clipboardData.setData('text/plain', ' Three.\n\nFour.\nFive.');
+        element.dispatchEvent(new ClipboardEvent('paste', { clipboardData, bubbles: true }));
+      });
+      await expect(body.locator('p')).toHaveCount(1);
+      await saveAndExpect({ cms, editor, body: 'One line. Two. Three. Four. Five.' });
+    });
+
+    test('keeps the Markdown source on one line too', async ({ cms, page }) => {
+      const { editor, field, body } = await openNote({ cms, page, body: 'One line.' });
+
+      await field.getByRole('button', { name: 'Edit in Markdown' }).click();
+      await expect(body).toHaveValue('One line.');
+      await body.evaluate((/** @type {HTMLTextAreaElement} */ textarea) => {
+        textarea.focus();
+        textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+      });
+      await page.keyboard.press('Enter');
+      await page.keyboard.type(' **Two.**');
+      await expect(body).toHaveValue('One line. **Two.**');
+      await saveAndExpect({ cms, editor, body: 'One line. **Two.**' });
+    });
+
+    test('keeps a stored value with several paragraphs until it’s edited', async ({
+      cms,
+      page,
+    }) => {
+      const { editor, body } = await openNote({ cms, page, body: 'One.\n\nTwo.' });
+
+      await expect(body.locator('p')).toHaveText('One. Two.');
+      await moveCaretToEnd(body);
+      await page.keyboard.type(' Three.');
+      await saveAndExpect({ cms, editor, body: 'One. Two. Three.' });
+    });
+  });
+});
+
+test.describe('pattern', () => {
+  /** Options of a Markdown field limited to inline formatting, as in issue #1118. */
+  const INLINE_OPTIONS = {
+    widget: 'markdown',
+    minimal: true,
+    buttons: ['bold', 'italic', 'strikethrough', 'code', 'link'],
+    editor_components: [],
+    required: false,
+  };
+
+  test.describe('single line', () => {
+    test.use({
+      config: noteConfig({ ...INLINE_OPTIONS, pattern: ['^[^\\n]*$', 'Enter a single line'] }),
+    });
+
+    test('rejects a second paragraph', async ({ cms, page }) => {
+      const { editor, field, body } = await openNote({ cms, page, body: 'One line.' });
+      const error = field.getByRole('alert');
+
+      await moveCaretToEnd(body);
+      await page.keyboard.press('Enter');
+      await page.keyboard.type('Second.');
+      await editor.getByRole('button', { name: 'Save' }).click();
+      await expect(error).toContainText('Enter a single line');
+      expect((await cms.readRepo())[NOTE_PATH]).toBe(noteFile('One line.'));
+
+      // Remove the second paragraph and its break, then add the text to the first one
+      await selectText(body, 'Second.');
+      await page.keyboard.press('Backspace');
+      await page.keyboard.press('Backspace');
+      await page.keyboard.type(' Second.');
+      await expect(error).toHaveCount(0);
+      await saveAndExpect({ cms, editor, body: 'One line. Second.' });
+    });
+  });
+
+  test.describe('any pattern', () => {
+    test.use({ config: noteConfig({ ...INLINE_OPTIONS, pattern: ['^[^a]*$', 'No letter a'] }) });
+
+    test('rejects a value that doesn’t match', async ({ cms, page }) => {
+      const { editor, field, body } = await openNote({ cms, page, body: 'Sun.' });
+
+      await moveCaretToEnd(body);
+      await page.keyboard.type(' Moon and stars.');
+      await editor.getByRole('button', { name: 'Save' }).click();
+      await expect(field.getByRole('alert')).toContainText('No letter a');
+      expect((await cms.readRepo())[NOTE_PATH]).toBe(noteFile('Sun.'));
     });
   });
 });

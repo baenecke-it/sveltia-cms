@@ -1,10 +1,11 @@
 import { describe, expect, test, vi } from 'vitest';
 
-import { ESCAPED_PLACEHOLDER_REGEX } from '$lib/services/common/template/constants';
+import { getTemplatePattern } from '$lib/services/common/template/utils';
 import {
   createPath,
   createPathRegEx,
   encodeFilePath,
+  getBaseName,
   getBlob,
   getByteSize,
   getDirName,
@@ -54,6 +55,17 @@ describe('Test renameIfNeeded()', () => {
     expect(renameIfNeeded('photo.png', ['photo.png', 'photo-0.png'])).toEqual('photo-1.png');
     // A slug has no extension
     expect(renameIfNeeded('my-post', ['my-post-1', 'my-post'])).toEqual('my-post-2');
+  });
+
+  test('should number a name without an extension at the end', () => {
+    expect(
+      renameIfNeeded('release-2.0', ['release-2.0', 'release-2.0-1'], { hasExtension: false }),
+    ).toEqual('release-2.0-2');
+    expect(renameIfNeeded('example.com', ['Example.com'], { hasExtension: false })).toEqual(
+      'example.com-1',
+    );
+    // A file name keeps its extension by default
+    expect(renameIfNeeded('example.com', ['example.com'])).toEqual('example-1.com');
   });
 
   test('should keep a name that isn’t taken, even if numbered variants of it are', () => {
@@ -389,11 +401,14 @@ describe('Test resolvePath()', () => {
     expect(resolvePath('//folder/file.txt')).toBe('folder/file.txt'); // Leading empty segments are filtered
   });
 
-  test('should handle dots after all segments are removed', () => {
-    // When .. is encountered but no named segment exists before it (after first segment)
-    // This tests the case where lastIndex === -1 inside the .. handling
-    expect(resolvePath('file.txt/../..')).toBe(''); // .. after removing file.txt finds no segment
-    expect(resolvePath('a/file.txt/../../..')).toBe(''); // Going back 3 times removes all segments
+  test('should keep a `..` that goes up past the named segments', () => {
+    // The path points outside the starting folder, so the excess `..` can’t be dropped
+    expect(resolvePath('file.txt/../..')).toBe('..');
+    expect(resolvePath('a/file.txt/../../..')).toBe('..');
+    expect(resolvePath('a/../../b')).toBe('../b');
+    // A leading `..` isn’t cancelled out by a later one
+    expect(resolvePath('../a/../../b')).toBe('../../b');
+    expect(resolvePath('./a/../../b')).toBe('./../b');
     expect(resolvePath('a/b/file.txt/../..')).toBe('a'); // Going back twice: removes file.txt then b, a remains
     // Case where segment exists after going back
     expect(resolvePath('a/b/c/../../file.txt')).toBe('a/file.txt'); // Go back twice, then file.txt at same level
@@ -500,6 +515,21 @@ describe('Test getDirName()', () => {
 
   test('should return an empty string for a file at the root', () => {
     expect(getDirName('photo.jpg')).toBe('');
+  });
+});
+
+describe('Test getBaseName()', () => {
+  test('should return the last segment of a path', () => {
+    expect(getBaseName('static/images/photo.jpg')).toBe('photo.jpg');
+    expect(getBaseName('https://example.com/a/b_150.jpg')).toBe('b_150.jpg');
+  });
+
+  test('should return the path itself if it has no slash', () => {
+    expect(getBaseName('photo.jpg')).toBe('photo.jpg');
+  });
+
+  test('should return an empty string for a path ending with a slash', () => {
+    expect(getBaseName('static/images/')).toBe('');
   });
 });
 
@@ -639,14 +669,9 @@ describe('Test createPathRegEx()', () => {
   });
 
   test('should handle brackets with template tags', () => {
-    const regex = createPathRegEx('app/(pages)/{{slug}}.md', (segment) => {
-      // First escape special regex chars including parentheses
-      let escaped = segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-      // Then replace escaped template placeholders with wildcard
-      escaped = escaped.replace(ESCAPED_PLACEHOLDER_REGEX, '.+?');
-      return escaped;
-    });
+    const regex = createPathRegEx('app/(pages)/{{slug}}.md', (segment) =>
+      getTemplatePattern(segment, '.+?'),
+    );
 
     expect(regex.test('app/(pages)/my-post.md')).toBe(true);
     expect(regex.test('app/(pages)/another.md')).toBe(true);

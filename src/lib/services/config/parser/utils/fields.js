@@ -1,3 +1,5 @@
+import { METADATA_KEYS } from '$lib/services/contents/collection/view/table-keys';
+import { isCodeValueKey } from '$lib/services/contents/fields/code/helpers';
 import { DEFAULT_CANONICAL_SLUG } from '$lib/services/contents/i18n/config/constants';
 import { mergeI18nConfigs } from '$lib/services/contents/i18n/config/merge';
 import { isNumeric } from '$lib/services/utils/number';
@@ -6,6 +8,7 @@ import { isNumeric } from '$lib/services/utils/number';
  * @import { ConfigParserContext, InternalSingletonCollection } from '$lib/types/private';
  * @import {
  * CmsConfig,
+ * CodeField,
  * Collection,
  * CollectionDivider,
  * CollectionFile,
@@ -17,14 +20,6 @@ import { isNumeric } from '$lib/services/utils/number';
  * ListFieldWithSubField,
  * } from '$lib/types/public';
  */
-
-/**
- * Entry metadata property keys that can be used in the `filter`, `sortable_fields`, `view_groups`
- * and `view_filters` options in place of a field key path. These are resolved by
- * `getPropertyValue()` from the entry itself rather than the collection’s `fields`.
- * @type {string[]}
- */
-export const METADATA_KEYS = ['slug', 'commit_author', 'commit_date'];
 
 /**
  * Get the canonical slug key of the given collection or file. When i18n is enabled, the key —
@@ -89,10 +84,30 @@ export const getSubFields = (field) => {
 };
 
 /**
+ * Check if the given field stores its value as an object whose keys aren’t subfields, so a key path
+ * can point to one of its keys: any key of a KeyValue field, or the code or language key of a Code
+ * field without the `output_code_only` option, e.g. `meta.author` or `snippet.lang`.
+ * @param {Field} field Field configuration.
+ * @param {string} key Key.
+ * @returns {boolean} Result.
+ */
+const hasValueKey = (field, key) => {
+  const { widget: fieldType = 'string' } = field;
+
+  if (fieldType === 'keyvalue') {
+    return true;
+  }
+
+  return fieldType === 'code' && isCodeValueKey(/** @type {CodeField} */ (field), key);
+};
+
+/**
  * Find the fields the given key path can point to in the given field list. This is a lenient
  * version of `getField()`, which lives in the runtime module graph (stores, backends) this parser
  * runs before, and which needs entry values to resolve variable types. Without those values, a
- * name shared by the subfields of several variable types resolves to each of them.
+ * name shared by the subfields of several variable types resolves to each of them. A key path
+ * pointing to a key of a KeyValue or Code field’s value, e.g. `meta.author`, resolves to the field,
+ * as the value is stored under that key path.
  * @param {Field[]} fields Field list.
  * @param {FieldKeyPath} keyPath Field key path, e.g. `author.name` or `images.0.src`.
  * @returns {Field[]} Field configurations. An empty array if the field is not defined.
@@ -101,10 +116,16 @@ export const findFields = (fields, keyPath) => {
   /** @type {Field[]} */
   let matches = [];
   let isFirstSegment = true;
+  let isValueKey = false;
 
   const isResolved = keyPath.split('.').every((segment) => {
     // Strip the explicit variable type, which is not part of the field name
     const key = segment.replace(EXPLICIT_TYPE_REGEX, '');
+
+    // A key of a field’s value has nothing below it, not even a list item
+    if (isValueKey) {
+      return false;
+    }
 
     // A list item index (`authors.0`) or wildcard (`images.*.src`) doesn’t point to a field itself,
     // so stay at the same level
@@ -113,9 +134,15 @@ export const findFields = (fields, keyPath) => {
     }
 
     const candidates = isFirstSegment ? fields : matches.flatMap((field) => getSubFields(field));
+    const valueKeyFields = isFirstSegment ? [] : matches.filter((field) => hasValueKey(field, key));
 
     isFirstSegment = false;
     matches = candidates.filter(({ name }) => name === key);
+
+    if (!matches.length && valueKeyFields.length) {
+      matches = valueKeyFields;
+      isValueKey = true;
+    }
 
     return !!matches.length;
   });
@@ -156,3 +183,20 @@ export const getRootFields = ({ collection, collectionFile, isIndexFile }) => {
 
   return fields;
 };
+
+/**
+ * Check if the given sort key can be used without referring to a field, in the `sortable_fields`
+ * option of a collection or the `sort_by` option of a Relation field: an entry metadata key like
+ * `slug`, `_manual` for the manual order, the canonical slug key, which is part of the content
+ * without being a field, or the reorder field, which may not be defined under `fields`.
+ * @param {string} key Sort key.
+ * @param {object} args Arguments.
+ * @param {string | undefined} args.canonicalSlugKey Canonical slug key of the collection.
+ * @param {string | undefined} args.orderFieldKey Reorder field key of the collection.
+ * @returns {boolean} Result.
+ */
+export const isNonFieldSortKey = (key, { canonicalSlugKey, orderFieldKey }) =>
+  METADATA_KEYS.includes(key) ||
+  key === '_manual' ||
+  key === canonicalSlugKey ||
+  key === orderFieldKey;

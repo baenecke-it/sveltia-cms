@@ -21,7 +21,6 @@
   import { sortEntriesByOrderField } from '$lib/services/contents/collection/entries/reorder/sort';
   import {
     entryGroups,
-    listedEntryIndexMap,
     reorderDirty,
     reorderedEntries,
   } from '$lib/services/contents/collection/view';
@@ -87,17 +86,22 @@
   const getLocalEntries = (name, entries) => reorderGroups[name] ?? entries;
   /* v8 ignore stop */
 
-  /**
-   * Get the 1-based `aria-rowindex` of an entry, or `undefined` for an entry that isn’t in the
-   * listed index, so the attribute is omitted rather than set to an invalid value.
-   * @param {Entry} entry Entry.
-   * @returns {number | undefined} Row index.
-   */
-  const rowIndex = (entry) => {
-    const index = listedEntryIndexMap.current.get(entry.id);
+  // Map from entry ID to the entry’s 0-based row index, which follows the order being edited across
+  // the groups, as the rows of every group make up one grid
+  const rowIndexMap = $derived(
+    new Map(
+      entryGroups.current
+        .flatMap(({ name, entries }) => getLocalEntries(name, entries))
+        .map((entry, index) => [entry.id, index]),
+    ),
+  );
 
-    return index === undefined ? undefined : index + 1;
-  };
+  /**
+   * Get the 1-based `aria-rowindex` of a listed entry.
+   * @param {Entry} entry Entry.
+   * @returns {number} Row index.
+   */
+  const rowIndex = (entry) => /** @type {number} */ (rowIndexMap.get(entry.id)) + 1;
 
   /**
    * Move an entry within a group from one index to another, and mark the new order as unsaved.
@@ -185,7 +189,7 @@
           <div
             role="row"
             class="sui grid-row"
-            class:drag-source={draggedEntry?.id === entry.id}
+            class:drag-placeholder={draggedEntry?.id === entry.id}
             tabindex="0"
             aria-rowindex={rowIndex(entry)}
             aria-selected="false"
@@ -271,16 +275,12 @@
         height: var(--sui-primary-row-height);
       }
 
-      /* The dragged row is left as a faint placeholder marking the gap it would drop into. The
-        pointer already carries the browser’s own drag image of it, so showing it twice at full
-        strength would just be confusing. */
-
-      .grid-row.drag-source {
-        opacity: 0.25;
+      /* The dragged row is left as a faint placeholder by the global `drag-placeholder` rule */
+      .grid-row.drag-placeholder {
         cursor: grabbing;
       }
 
-      .grid-row[draggable='true']:not(.drag-source) {
+      .grid-row[draggable='true']:not(.drag-placeholder) {
         cursor: grab;
       }
     }

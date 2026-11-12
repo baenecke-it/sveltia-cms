@@ -39,7 +39,6 @@
 
   /** @type {Props} */
   let {
-    /* eslint-disable prefer-const */
     allItems,
     selectedItems,
     totalCount,
@@ -47,7 +46,6 @@
     groups = [],
     groupNames = [],
     searchTerms = undefined,
-    /* eslint-enable prefer-const */
   } = $props();
 
   const hasListedAssets = $derived(!!totalCount);
@@ -94,7 +92,7 @@
       iconic
       disabled={!hasListedAssets}
       pressed={!!currentView.current.showInfo}
-      aria-controls="asset-info"
+      aria-controls={currentView.current.showInfo ? 'asset-info' : undefined}
       aria-expanded={!!currentView.current.showInfo}
       aria-label={_(currentView.current.showInfo ? 'hide_info' : 'show_info')}
       onclick={() => {

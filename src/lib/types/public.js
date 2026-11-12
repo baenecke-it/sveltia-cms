@@ -8,8 +8,8 @@
  * externally, covering all the CMS configuration options and JavaScript method arguments available
  * on the `CMS` object. This file is automatically converted into a TypeScript type declaration file
  * (`public.d.ts`) and JSON schema (`sveltia-cms.json`) during the build process (see
- * `vite.config.js`), which are then distributed via npm. The outdated Netlify/Decap CMS equivalents
- * can be found below.
+ * `scripts/vite/schema.js`), which are then distributed via npm. The outdated Netlify/Decap CMS
+ * equivalents can be found below.
  * @see https://github.com/decaporg/decap-cms/blob/main/packages/decap-cms-core/index.d.ts
  * @see https://www.schemastore.org/netlify.json
  */
@@ -30,10 +30,15 @@
  */
 
 /**
+ * Name of a cloud media storage service with an S3-compatible API.
+ * @typedef {'aws_s3' | 'backblaze_b2' | 'bunny_storage' | 'cloudflare_r2' | 'digitalocean_spaces' |
+ * 'neon_object_storage' | 'scaleway_object_storage' | 'supabase_storage'} S3MediaLibraryName
+ */
+
+/**
  * Cloud media storage name.
- * @typedef {'cloudinary' | 'uploadcare' | 'aws_s3' | 'azure_blob_storage' | 'backblaze_b2' |
- * 'bunny_storage' | 'cloudflare_r2' | 'digitalocean_spaces' | 'scaleway_object_storage' |
- * 'supabase_storage'} CloudMediaLibraryName
+ * @typedef {'cloudinary' | 'uploadcare' | 'azure_blob_storage' | S3MediaLibraryName}
+ * CloudMediaLibraryName
  */
 
 /**
@@ -126,8 +131,9 @@
  * `{{filename}}` and `{{extension}}` for the original file name and extension. The extension is
  * always appended, so the template shouldn’t include it. The values of the tags are slugified, and
  * the entry tags are filled with the default locale’s content when the entry is saved. A file
- * uploaded in the asset library or to a cloud storage service is named right away, without an
- * entry, so only the other tags make sense there; Cloudinary keeps the name as the original file
+ * uploaded to a cloud storage service from an entry is named right away with the content at that
+ * time, and a tag with no value yet gets a random one. A file uploaded in the asset library has no
+ * entry, so only the other tags make sense there. Cloudinary keeps the name as the original file
  * name of an asset whose public ID is generated. A file renamed by hand before saving keeps that
  * name, and a file replacing an existing asset takes over its name. Default: `undefined`, meaning
  * that the original file name is kept, or slugified if the `slugify_filename` option is enabled.
@@ -205,13 +211,19 @@
 /**
  * Options for S3-compatible media libraries.
  * @typedef {object} S3MediaLibrary
+ * @property {string} [label] Name to show for the service in the Asset Library, the Select Assets
+ * dialog and the Settings dialog, instead of the default one, e.g. `Garage` for a self-hosted
+ * server configured as `aws_s3`. It’s not localized, and it’s only read from the site-level
+ * options, so it’s ignored in the `media_libraries` option of a field. Default: the service name,
+ * e.g. `Amazon S3`.
  * @property {string} [access_key_id] AWS access key ID or equivalent (safe to store in config).
  * Required for all services except Bunny Storage, where it defaults to `bucket`, as the storage
  * zone name serves as the access key ID.
  * @property {string} bucket Bucket name. For Bunny Storage, this is the storage zone name.
  * @property {string} [region] Region, e.g. `us-east-1`. Required for Amazon S3, Backblaze B2, Bunny
  * Storage (two-letter storage region code, e.g. `de`), DigitalOcean Spaces and Scaleway Object
- * Storage. For Supabase Storage, set it to the project’s region; it defaults to `us-east-1`.
+ * Storage. For Supabase Storage, set it to the project’s region; it defaults to `us-east-1`. For
+ * Neon Object Storage, it defaults to the region in the `endpoint` hostname.
  * Ignored for Cloudflare R2, which always uses `auto`. With a custom `endpoint`, it’s only used to
  * sign requests and must match the server’s region, e.g. Garage’s `s3_region` (`garage` by
  * default) or MinIO’s `us-east-1`; otherwise every request fails with a signature mismatch.
@@ -223,9 +235,14 @@
  * @property {string} [endpoint] Custom endpoint URL for another S3-compatible service, such as a
  * self-hosted Garage or MinIO server, configured as `aws_s3`, e.g. `https://s3.example.com`.
  * Objects are addressed with path-style URLs (`{endpoint}/{bucket}/{key}`), so no wildcard DNS is
- * needed. Ignored for the other services, whose endpoints are derived from their own options.
+ * needed. Required for Neon Object Storage; set it to the branch’s `AWS_ENDPOINT_URL_S3` shown in
+ * the Neon Console, e.g. `https://br-cool-darkness-a1b2c3d4.storage.c-1.us-east-2.aws.neon.tech`.
+ * Ignored for the other services, whose endpoints are derived from their own options.
  * @property {string} [prefix] Path prefix within the bucket, e.g. `uploads/`. A trailing slash is
- * added if missing.
+ * added if missing. In the `media_libraries` option of a field, it can contain template tags to
+ * keep the files of an entry in a folder of their own, e.g. `{{fields.release}}/`. Each value is
+ * slugified, and files can’t be listed or uploaded until the fields it depends on are filled in.
+ * The tags aren’t supported at the site level, where there’s no entry to read the values from.
  * @property {boolean} [force_path_style] Whether to use path-style URLs
  * (`https://s3.region.amazonaws.com/bucket/key`) instead of virtual-hosted-style URLs
  * (`https://bucket.s3.region.amazonaws.com/key`) for Amazon S3. Path-style URLs are always used
@@ -238,7 +255,9 @@
  * `https://my-zone.b-cdn.net`) or a custom domain. Optional for Amazon S3 and DigitalOcean Spaces —
  * use when serving assets through a CDN or custom domain (e.g. CloudFront or Route 53 for S3, CDN
  * endpoint for Spaces). Backblaze B2, DigitalOcean Spaces, Scaleway Object Storage and Supabase
- * Storage have a default public URL derived from the other options.
+ * Storage have a default public URL derived from the other options. For Neon Object Storage, the
+ * default `{endpoint}/{bucket}/{key}` URL only works with a `public_read` bucket; set `public_url`
+ * for a private bucket fronted by a CDN.
  */
 
 /**
@@ -252,12 +271,20 @@
  * that allows the `GET`, `PUT` and `OPTIONS` methods along with the `x-ms-blob-type` and
  * `content-type` headers from the CMS’s origin.
  * @typedef {object} AzureMediaLibrary
+ * @property {string} [label] Name to show for the service in the Asset Library, the Select Assets
+ * dialog and the Settings dialog, instead of the default one, e.g. the name of a server configured
+ * with `endpoint`. It’s not localized, and it’s only read from the site-level options, so
+ * it’s ignored in the `media_libraries` option of a field. Default: the service name, e.g.
+ * `Azure Blob Storage`.
  * @property {string} [account_name] Storage account name. Required unless `endpoint` is given.
  * @property {string} container Blob container name.
  * @property {string} [endpoint] Custom Blob service endpoint including the account, such as a
  * custom domain or the Azurite emulator URL. Overrides `account_name`.
  * @property {string} [prefix] Path prefix within the container, e.g. `uploads/`. A trailing slash
- * is added if missing.
+ * is added if missing. In the `media_libraries` option of a field, it can contain template tags to
+ * keep the files of an entry in a folder of their own, e.g. `{{fields.release}}/`. Each value is
+ * slugified, and files can’t be listed or uploaded until the fields it depends on are filled in.
+ * The tags aren’t supported at the site level, where there’s no entry to read the values from.
  * @property {string} [public_url] Base URL for public asset access. When set, asset download URLs
  * are constructed as `{public_url}/{blob_name}` instead of the Blob service URL. Required unless
  * the container allows anonymous read access, because the URL stored in an entry can’t contain the
@@ -289,6 +316,45 @@
  */
 
 /**
+ * Options of a named media storage in the legacy `media_library` option, identified by its `name`,
+ * so the options are checked against those of that storage.
+ * @typedef {(CloudinaryMediaLibrary & { name: 'cloudinary' }) |
+ * (UploadcareMediaLibrary & { name: 'uploadcare' }) |
+ * (S3MediaLibrary & { name: S3MediaLibraryName }) |
+ * (AzureMediaLibrary & { name: 'azure_blob_storage' }) |
+ * (StockMediaLibrary & { name: 'stock_assets' })} NamedLegacyMediaLibrary
+ */
+
+/**
+ * Global legacy media storage option, which applies to the default media storage without a `name`.
+ * @typedef {(DefaultMediaLibrary & { name?: 'default' }) | NamedLegacyMediaLibrary}
+ * GlobalLegacyMediaLibrary
+ */
+
+/**
+ * Field-level legacy media storage option without a `name`, which applies to the storage named in
+ * the global `media_library` option, so its options can be those of any storage.
+ * @typedef {MediaLibrary & { name?: undefined }} UnnamedLegacyMediaLibrary
+ */
+
+/**
+ * Options of a named media storage in the field-level legacy `media_library` option. They’re merged
+ * over the global options of the same storage, so the options the storage requires, such as an S3
+ * `bucket`, can be left to the global ones.
+ * @typedef {(CloudinaryMediaLibrary & { name: 'cloudinary' }) |
+ * (UploadcareMediaLibrary & { name: 'uploadcare' }) |
+ * (Partial<S3MediaLibrary> & { name: S3MediaLibraryName }) |
+ * (Partial<AzureMediaLibrary> & { name: 'azure_blob_storage' }) |
+ * (StockMediaLibrary & { name: 'stock_assets' })} FieldNamedLegacyMediaLibrary
+ */
+
+/**
+ * Field-level legacy media storage option.
+ * @typedef {(DefaultMediaLibrary & { name: 'default' }) | FieldNamedLegacyMediaLibrary |
+ * UnnamedLegacyMediaLibrary} FieldLegacyMediaLibrary
+ */
+
+/**
  * Unified media storage option that supports multiple storage providers. See the
  * [documentation](https://sveltiacms.app/en/docs/media#configuration) for details.
  * @typedef {object} MediaLibraries
@@ -315,12 +381,23 @@
  * to `false` to explicitly disable.
  * @property {S3MediaLibrary | false} [bunny_storage] Options for the Bunny Storage media storage.
  * Set to `false` to explicitly disable.
+ * @property {S3MediaLibrary | false} [neon_object_storage] Options for the Neon Object Storage
+ * media storage. Set to `false` to explicitly disable.
  * @property {S3MediaLibrary | false} [scaleway_object_storage] Options for the Scaleway Object
  * Storage media storage. Set to `false` to explicitly disable.
  * @property {S3MediaLibrary | false} [supabase_storage] Options for the Supabase Storage media
  * storage. Set to `false` to explicitly disable.
  * @property {StockMediaLibrary | false} [stock_assets] Options for the unified stock photo/video
  * media library. Set to `false` to explicitly disable.
+ */
+
+/**
+ * Field-level `media_libraries` option. The options of a storage are merged over the global options
+ * of the same storage, so the options the storage requires, such as an S3 `bucket`, can be left to
+ * the global ones.
+ * @typedef {Omit<MediaLibraries, S3MediaLibraryName | 'azure_blob_storage'> &
+ * { [K in S3MediaLibraryName]?: Partial<S3MediaLibrary> | false } &
+ * { azure_blob_storage?: Partial<AzureMediaLibrary> | false }} FieldMediaLibraries
  */
 
 /**
@@ -336,6 +413,10 @@
  * contain spaces, periods, asterisks, colons or angle brackets.
  * @property {string} [label] Label of the field to be displayed in the editor UI. Default: `name`
  * field value.
+ * @property {Record<LocaleCode, string>} [label_localized] Labels for specific locales, keyed by
+ * locale code, taking precedence over `label`. The editor shows the label for the locale being
+ * edited; elsewhere, the label for the UI locale is used. See the
+ * [documentation](https://sveltiacms.app/en/docs/i18n/options#localized-field-options) for details.
  * @property {string} [comment] Comment to be written before the field in a YAML file or YAML front
  * matter, for developers reading the file. It’s not displayed in the editor UI; use `hint` for
  * that. A line break can be given as `\n`. The comment on a subfield of an Object field is written
@@ -344,14 +425,22 @@
  */
 
 /**
+ * Field-level i18n strategy supported by every field type. Some field types support another
+ * strategy as well: see {@link KeyValueFieldI18nProps} and {@link SimpleFieldI18nProps}.
+ * @typedef {boolean | 'duplicate' | 'sync' | 'translate' | 'none'} FieldI18nStrategy
+ */
+
+/**
  * Field-level i18n option shared among most field types.
  * @typedef {object} FieldI18nProps
- * @property {boolean | 'duplicate' | 'translate' | 'none'} [i18n] Whether to enable the editor UI
- * in locales other than the default locale. Default: `false`, or `duplicate` for a subfield of a
- * field using `duplicate`. `duplicate` makes the field read-only in non-default locales and
- * automatically copies the default locale’s value to them. `translate` and `none` are aliases of
- * `true` and `false`, respectively. This option only works
- * when i18n is set up with the global and collection-level `i18n` option. See the
+ * @property {FieldI18nStrategy} [i18n] Whether to enable the editor UI in locales other than the
+ * default locale. Default: `false`, or the option of a field using `duplicate` or `sync` for its
+ * subfield. `duplicate` makes the field read-only in non-default locales and automatically copies
+ * the default locale’s value to them. `sync` keeps the value the same in every locale as well, but
+ * the field can be edited in any locale, and the value is copied from there to the others. In a
+ * rich text editor component, whose values are stored in each locale’s text, it works like
+ * `translate`. `translate` and `none` are aliases of `true` and `false`, respectively. This option
+ * only works when i18n is set up with the global and collection-level `i18n` option. See the
  * [documentation](https://sveltiacms.app/en/docs/i18n/options#field-level-configuration) for
  * details.
  */
@@ -360,14 +449,36 @@
  * Field-level i18n option for the KeyValue field, which supports the `duplicate_keys` strategy in
  * addition to the common ones.
  * @typedef {object} KeyValueFieldI18nProps
- * @property {boolean | 'duplicate' | 'duplicate_keys' | 'translate' | 'none'} [i18n] Whether to
- * enable the editor UI in locales other than the default locale. Default: `false`, or `duplicate`
- * for a subfield of a field using `duplicate`. `duplicate` makes the field read-only in non-default
- * locales and automatically copies the default locale’s key-value pairs to them. `duplicate_keys`
- * copies the keys only: the keys are read-only in non-default locales and kept in sync with the
- * default locale, while the values can be edited in each locale. `translate` and `none` are aliases
- * of `true` and `false`, respectively. This option only works when i18n is set up with the global
- * and collection-level `i18n` option. See the
+ * @property {FieldI18nStrategy | 'duplicate_keys'} [i18n] Whether to enable the editor UI in
+ * locales other than the default locale. Default: `false`, or the option of a field using
+ * `duplicate` or `sync` for its subfield. `duplicate` makes the field read-only in non-default
+ * locales and automatically copies the default locale’s key-value pairs to them. `sync` keeps the
+ * pairs the same in every locale as well, but the field can be edited in any locale, and the pairs
+ * are copied from there to the others, except in a rich text editor component, where it works like
+ * `translate`. `duplicate_keys` copies the keys only: the keys are read-only in non-default locales
+ * and kept in sync with the default locale, while the values can be edited in each locale.
+ * `translate` and `none` are aliases of `true` and `false`, respectively. This option only works
+ * when i18n is set up with the global and collection-level `i18n` option. See the
+ * [documentation](https://sveltiacms.app/en/docs/i18n/options#field-level-configuration) for
+ * details.
+ */
+
+/**
+ * Field-level i18n option for the fields holding a single, simple value, which support the
+ * `duplicate_if_empty` strategy in addition to the common ones.
+ * @typedef {object} SimpleFieldI18nProps
+ * @property {FieldI18nStrategy | 'duplicate_if_empty'} [i18n] Whether to enable the editor UI in
+ * locales other than the default locale. Default: `false`, or the option of a field using
+ * `duplicate` or `sync` for its subfield. `duplicate` makes the field read-only in non-default
+ * locales and automatically copies the default locale’s value to them. `sync` keeps the value the
+ * same in every locale as well, but the field can be edited in any locale, and the value is copied
+ * from there to the others, except in a rich text editor component, where it works like
+ * `translate`. `duplicate_if_empty` copies the default locale’s value to non-default locales only
+ * where the value is empty, or still the same as the default locale’s value, while the field can be
+ * edited in every locale. It’s not supported for a File, Image, Relation or Select field that
+ * accepts multiple values. `translate` and `none` are aliases of `true` and `false`, respectively.
+ * This option only works when i18n is set up with the global and collection-level `i18n` option.
+ * See the
  * [documentation](https://sveltiacms.app/en/docs/i18n/options#field-level-configuration) for
  * details.
  */
@@ -378,6 +489,11 @@
  */
 
 /**
+ * Common field properties that are shared among the fields holding a single, simple value.
+ * @typedef {BaseFieldProps & SimpleFieldI18nProps} SimpleCommonFieldProps
+ */
+
+/**
  * Properties for a field that is visible in the editor UI.
  * @typedef {object} VisibleFieldProps
  * @property {string} [hint] Help message to be displayed below the input UI. Limited Markdown
@@ -385,6 +501,9 @@
  * given as a literal backslash followed by `n`, e.g. `\n` in a plain or single-quoted YAML string;
  * in JSON or a double-quoted string, the backslash itself has to be escaped. The hint is not
  * displayed while the field is read-only.
+ * @property {Record<LocaleCode, string>} [hint_localized] Help messages for specific locales, keyed
+ * by locale code, taking precedence over `hint`. See the
+ * [documentation](https://sveltiacms.app/en/docs/i18n/options#localized-field-options) for details.
  * @property {boolean} [preview] Whether to show the preview of the field. Default: `true`.
  * @property {boolean | LocaleCode[]} [required] Whether to make data input on the field required.
  * Default: `true`. This option also affects data output if the `omit_empty_optional_fields` global
@@ -407,16 +526,14 @@
  */
 
 /**
- * Field-level media storage options.
- * @typedef {object} FieldMediaLibraryOptions
- * @property {MediaLibraryName} [name] Library name.
- */
-
-/**
  * Media field properties.
  * @typedef {object} MediaFieldProps
  * @property {string | string[]} [default] Default value. Accepts a file path or complete URL. If
  * the `multiple` option is set to `true`, it accepts an array of file paths or URLs.
+ * @property {Record<LocaleCode, string | string[]>} [default_localized] Default values for specific
+ * locales, keyed by locale code. A value given for a locale takes precedence over `default` in that
+ * locale. See the
+ * [documentation](https://sveltiacms.app/en/docs/i18n/options#localized-field-options) for details.
  * @property {boolean} [multiple] Whether to allow multiple file selection for the field. Default:
  * `false`, unless the `multiple` option is enabled in a media library’s `config`.
  * @property {number} [min] Minimum number of files that can be selected. Ignored unless the
@@ -433,15 +550,15 @@
  * collection-level `media_folder` value.
  * @property {string} [public_folder] Public media folder path for the field. Default:
  * `media_folder` option value.
- * @property {MediaLibrary & FieldMediaLibraryOptions} [media_library] Legacy media storage option
+ * @property {FieldLegacyMediaLibrary} [media_library] Legacy media storage option
  * that allows only one library. It overrides the global options of the same library in the same way
  * as `media_libraries`; without a `name`, it applies to the library named in the global
  * `media_library` option. Use `media_libraries` instead to support multiple libraries.
- * @property {MediaLibraries} [media_libraries] Unified media storage option that supports multiple
- * libraries. Each library’s options, including `all`, are merged over the same library’s global
- * options, one level deep, so a field only needs to set what it overrides: nested objects such as
- * `config` are merged key by key, while other values, including arrays, are replaced. `false`
- * disables the library for the field. Libraries not defined here fall back to the global
+ * @property {FieldMediaLibraries} [media_libraries] Unified media storage option that supports
+ * multiple libraries. Each library’s options, including `all`, are merged over the same library’s
+ * global options, one level deep, so a field only needs to set what it overrides: nested objects
+ * such as `config` are merged key by key, while other values, including arrays, are replaced.
+ * `false` disables the library for the field. Libraries not defined here fall back to the global
  * configuration.
  * @see https://decapcms.org/docs/widgets/#File
  * @see https://decapcms.org/docs/widgets/#Image
@@ -485,8 +602,17 @@
  * @property {string} name Unique identifier for the type.
  * @property {string} [label] Label of the type to be displayed in the editor UI. Default: `name`
  * field value.
+ * @property {Record<LocaleCode, string>} [label_localized] Labels of the type for specific
+ * locales, keyed by locale code, taking precedence over `label`.
  * @property {'object'} [widget] Field type. Only `object` is supported: another value is a
  * configuration error.
+ * @property {string} [description] Short description of the type to be displayed below its label
+ * in the menu of the Add button.
+ * @property {string} [hint] Help message to be displayed above the subfields of an object of the
+ * type. Limited Markdown formatting is supported, as with a field’s `hint` option. The hint is not
+ * displayed while the field is read-only.
+ * @property {Record<LocaleCode, string>} [hint_localized] Help messages of the type for specific
+ * locales, keyed by locale code, taking precedence over `hint`.
  * @property {string} [summary] Template of a label to be displayed on a collapsed object.
  * @property {Field[]} [fields] Set of subfields. This option can be omitted; in that case, only the
  * `type` property will be saved.
@@ -542,6 +668,10 @@
  * @typedef {object} BooleanFieldProps
  * @property {'boolean'} widget Field type.
  * @property {boolean} [default] Default value. Accepts `true` or `false`. Default: `false`.
+ * @property {Record<LocaleCode, boolean>} [default_localized] Default values for specific locales,
+ * keyed by locale code. A value given for a locale takes precedence over `default` in that locale.
+ * See the [documentation](https://sveltiacms.app/en/docs/i18n/options#localized-field-options) for
+ * details.
  * @see https://decapcms.org/docs/widgets/#Boolean
  * @see https://sveltiacms.app/en/docs/fields/boolean
  */
@@ -559,6 +689,10 @@
  * @property {string | Record<string, string>} [default] Default value. It must be a string if
  * `output_code_only` is `true`. Otherwise it should be an object that matches the `keys` option,
  * like `{ code: 'let x = 1;', lang: 'js' }`; a string is used as the code.
+ * @property {Record<LocaleCode, string | Record<string, string>>} [default_localized] Default
+ * values for specific locales, keyed by locale code. A value given for a locale takes precedence
+ * over `default` in that locale. See the
+ * [documentation](https://sveltiacms.app/en/docs/i18n/options#localized-field-options) for details.
  * @property {string} [default_language] Default language to be selected, like `js`. See the [Shiki
  * documentation](https://shiki.style/languages) for a list of supported languages. Default: empty
  * string, which is plaintext.
@@ -574,7 +708,8 @@
 
 /**
  * Code field definition.
- * @typedef {CommonFieldProps & VisibleFieldProps & FieldValidationProps & CodeFieldProps} CodeField
+ * @typedef {SimpleCommonFieldProps & VisibleFieldProps & FieldValidationProps & CodeFieldProps}
+ * CodeField
  */
 
 /**
@@ -583,6 +718,10 @@
  * @property {'color'} widget Field type.
  * @property {string} [default] Default value. Accepts a Hex color code in the six-value (`#RRGGBB`)
  * or eight-value (`#RRGGBBAA`) syntax.
+ * @property {Record<LocaleCode, string>} [default_localized] Default values for specific locales,
+ * keyed by locale code. A value given for a locale takes precedence over `default` in that locale.
+ * See the [documentation](https://sveltiacms.app/en/docs/i18n/options#localized-field-options) for
+ * details.
  * @property {boolean} [allowInput] Whether to show a textbox that allows users to manually edit the
  * value. Default: `false`.
  * @property {boolean} [enableAlpha] Whether to edit/save the alpha channel value. Default: `false`.
@@ -604,9 +743,23 @@
  * tags, which support transformations like `{{fields.title | upper}}`, `{{index}}` is the position
  * of the item in a list, which is saved as a number when used alone, and `{{uuid}}`,
  * `{{uuid_short}}` and `{{uuid_shorter}}` generate a UUID, which is kept once the value is saved.
- * The field is always hidden in the editor, and its value can’t be edited.
+ * In a list item, a `*` in a `fields.*` tag stands for the current item, so
+ * `{{fields.lines.*.price}}` is the price of the item the field is in. With a numeric
+ * `value_type`, it’s an arithmetic expression instead, like `{{fields.price}} *
+ * {{fields.quantity}}`, which can have numbers, template tags other than the UUID tags, the `+`,
+ * `-`, `*`, `/` and `%` operators, parentheses, the `abs`, `ceil`, `floor` and `round` functions
+ * and the `avg`, `count`, `max`, `min` and `sum` aggregate functions, in which the last `*` of a
+ * tag stands for every item of the list, like `sum({{fields.lines.*.amount}})`, and empty values
+ * are left out. The field is always hidden in the editor, and its value can’t be edited.
+ * @property {'string' | 'int' | 'float' | 'int/string' | 'float/string'} [value_type] Type of the
+ * value. `string` makes the `value` option a template and saves the result as a string. The other
+ * types make it an arithmetic expression: `int` and `float` save the result as an integer or a
+ * floating-point number, respectively, and `int/string` and `float/string` save it as a string.
+ * An integer is rounded to the nearest one, and the result is left empty if a template tag resolves
+ * to an empty value or something other than a number. Default: `string`.
  * @see https://github.com/sveltia/sveltia-cms/issues/111
  * @see https://github.com/sveltia/sveltia-cms/issues/122
+ * @see https://github.com/sveltia/sveltia-cms/discussions/1086
  */
 
 /**
@@ -625,6 +778,10 @@
  * @property {'datetime'} widget Field type.
  * @property {string} [default] Default value. Accepts a date/time string that matches the `format`,
  * or `{{now}}` to populate the current date/time. Default: empty string.
+ * @property {Record<LocaleCode, string>} [default_localized] Default values for specific locales,
+ * keyed by locale code. A value given for a locale takes precedence over `default` in that locale.
+ * See the [documentation](https://sveltiacms.app/en/docs/i18n/options#localized-field-options) for
+ * details.
  * @property {DateTimeInputType} [type] The
  * [`type`](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/input#input_types)
  * HTML attribute value for the date/time input. If `type` is set to `date`, the input will only
@@ -658,6 +815,15 @@
  * option is not defined. If `true`, ISO 8601 format is used unless the `format` option is defined.
  * If `false`, time input/output is disabled. This option is available for backward compatibility
  * with Netlify CMS; use the `format` or `type` option instead.
+ * @property {boolean | LocaleCode} [localize_format] Whether to write the month and weekday names,
+ * the AM/PM marker and other locale-dependent parts of the `format` in a language other than
+ * English. If `true`, the locale of the content the value belongs to is used, so each locale of an
+ * i18n-enabled entry gets the value in its own language, and a value copied to another locale, as
+ * with the `duplicate` i18n strategy, is written again in that locale. A locale code like `de` or
+ * `pt-BR` uses that locale for every value, which also works without i18n. The value is parsed in
+ * the same locale. The locale data is loaded from a CDN, or bundled with the npm package; a locale
+ * Day.js doesn’t support falls back to English. Ignored without a custom format, as an ISO 8601
+ * value doesn’t depend on the locale. Default: `false`.
  * @property {boolean} [picker_utc] Whether to make the date input/output UTC. Default: `false`.
  * This option is available for backward compatibility with Netlify/Decap CMS. The newer
  * `input_timezone` and `output_utc` options provide more flexibility and supersede this option when
@@ -682,7 +848,7 @@
  * added to an existing entry. `[create]` suits a creation date, and `true` a last modified date.
  * The value is formatted like the `{{now}}` default value, with seconds, but set at save time
  * rather than when a draft is created. The field is shown as text, isn’t validated, and is hidden
- * while an entry is being created. The value is shared by all locales. The option is ignored in a
+ * while an entry is being created. The time is shared by all locales. The option is ignored in a
  * rich text editor component. Default: `false`.
  * @see https://decapcms.org/docs/widgets/#Datetime
  * @see https://sveltiacms.app/en/docs/fields/datetime
@@ -696,8 +862,8 @@
 
 /**
  * DateTime field definition.
- * @typedef {CommonFieldProps & VisibleFieldProps & FieldValidationProps & DateTimeFieldProps &
- * UniqueValueProps} DateTimeField
+ * @typedef {SimpleCommonFieldProps & VisibleFieldProps & FieldValidationProps &
+ * DateTimeFieldProps & UniqueValueProps} DateTimeField
  */
 
 /**
@@ -714,7 +880,7 @@
 
 /**
  * File field definition.
- * @typedef {CommonFieldProps & VisibleFieldProps & MultiValueFieldValidationProps &
+ * @typedef {SimpleCommonFieldProps & VisibleFieldProps & MultiValueFieldValidationProps &
  * MediaFieldProps & FileFieldProps & UniqueValueProps} FileField
  */
 
@@ -726,6 +892,10 @@
  * configured file format. A string can contain the `{{locale}}`, `{{datetime}}`, `{{uuid}}`,
  * `{{uuid_short}}`, `{{uuid_shorter}}`, `{{author-email}}`, `{{author-login}}` and
  * `{{author-name}}` tags, which are filled when a new entry draft is created.
+ * @property {Record<LocaleCode, any>} [default_localized] Default values for specific locales,
+ * keyed by locale code. A value given for a locale takes precedence over `default` in that locale.
+ * See the [documentation](https://sveltiacms.app/en/docs/i18n/options#localized-field-options) for
+ * details.
  * @see https://decapcms.org/docs/widgets/#Hidden
  * @see https://sveltiacms.app/en/docs/fields/hidden
  */
@@ -745,7 +915,7 @@
 
 /**
  * Image field definition.
- * @typedef {CommonFieldProps & VisibleFieldProps & MultiValueFieldValidationProps &
+ * @typedef {SimpleCommonFieldProps & VisibleFieldProps & MultiValueFieldValidationProps &
  * MediaFieldProps & ImageFieldProps & UniqueValueProps} ImageField
  */
 
@@ -754,11 +924,18 @@
  * @typedef {object} KeyValueFieldProps
  * @property {'keyvalue'} widget Field type.
  * @property {Record<string, string>} [default] Default key-value pairs.
+ * @property {Record<LocaleCode, Record<string, string>>} [default_localized] Default values for
+ * specific locales, keyed by locale code. A value given for a locale takes precedence over
+ * `default` in that locale. See the
+ * [documentation](https://sveltiacms.app/en/docs/i18n/options#localized-field-options) for details.
  * @property {string} [key_label] Label for the key column. Default: Key or its localized version.
  * @property {string} [value_label] Label for the value column. Default: Value or its localized
  * version.
  * @property {string} [label_singular] Label to be displayed on the Add button. Default: `label`
  * field value.
+ * @property {Record<LocaleCode, string>} [label_singular_localized] Singular labels for specific
+ * locales, keyed by locale code, taking precedence over `label_singular`. See the
+ * [documentation](https://sveltiacms.app/en/docs/i18n/options#localized-field-options) for details.
  * @property {boolean} [root] Whether to save the field value at the top-level of the data file
  * without the field name. It only works if the field is the only field in the collection or file.
  * If the `single_file` i18n structure is enabled, the key-value pairs will still be saved under
@@ -779,11 +956,19 @@
  * List field properties.
  * @typedef {object} ListFieldProps
  * @property {'list'} widget Field type.
- * @property {string[] | Record<string, any>[]} [default] Default value. The format depends on how
- * the field is configured, with or without `field`, `fields` or `types`. See the
- * [documentation](https://sveltiacms.app/en/docs/fields/list) for details.
+ * @property {any[]} [default] Default value. The format depends on how the field is configured,
+ * with or without `field`, `fields` or `types`: strings for a simple list, values of the subfield
+ * for a list with `field`, e.g. numbers for a Number subfield, or objects for a list with `fields`
+ * or `types`. See the [documentation](https://sveltiacms.app/en/docs/fields/list) for details.
+ * @property {Record<LocaleCode, any[]>} [default_localized] Default values for specific locales,
+ * keyed by locale code. A value given for a locale takes precedence over `default` in that locale.
+ * See the
+ * [documentation](https://sveltiacms.app/en/docs/i18n/options#localized-field-options) for details.
  * @property {string} [label_singular] Label to be displayed on the Add button. Default: `label`
  * field value.
+ * @property {Record<LocaleCode, string>} [label_singular_localized] Singular labels for specific
+ * locales, keyed by locale code, taking precedence over `label_singular`. See the
+ * [documentation](https://sveltiacms.app/en/docs/i18n/options#localized-field-options) for details.
  * @see https://decapcms.org/docs/widgets/#List
  * @see https://sveltiacms.app/en/docs/fields/list
  */
@@ -839,8 +1024,9 @@
  * empty.
  * @property {boolean} [root] Whether to save the field value at the top-level of the data file
  * without the field name. It only works if the field is the only field in the collection or file,
- * and the file format is not TOML. If the `single_file` i18n structure is enabled, the lists will
- * still be saved under locale keys. Default: `false`. See the
+ * and the file format is not TOML, unless the `map_key_field` option stores the list as a map. If
+ * the `single_file` i18n structure is enabled, the lists will still be saved under locale keys.
+ * Default: `false`. See the
  * [documentation](https://sveltiacms.app/en/docs/fields/list#top-level-list) for details.
  */
 
@@ -867,13 +1053,30 @@
  */
 
 /**
+ * Properties for a List field whose items can be stored as a map rather than an array.
+ * @typedef {object} MapListFieldProps
+ * @property {string} [map_key_field] Name of the subfield whose value becomes the key of each
+ * item, so the list is stored as a map of the keys to the items, without the subfield, rather than
+ * as an array, e.g. `{ harry: { title: … }, ron: { title: … } }`. The subfield must be a String
+ * field, a Relation field or a Select field with string option values, without the `multiple`
+ * option, that is required in every locale, and with variable types, every type must have it. Its
+ * value must be unique within the list, and can’t be a whole number such as `1` or `2024`, as such
+ * keys don’t keep their order. The items are kept in the order of the map. An existing array is
+ * still loaded, and saved as a map. Default: none. See the
+ * [documentation](https://sveltiacms.app/en/docs/fields/list#keyed-list) for details.
+ * @see https://github.com/sveltia/sveltia-cms/issues/1077
+ * @see https://github.com/sveltia/sveltia-cms/issues/1082
+ */
+
+/**
  * List field definition with multiple subfields.
- * @typedef {ComplexListFieldProps & ListFieldSubFieldsProps} ListFieldWithSubFields
+ * @typedef {ComplexListFieldProps & ListFieldSubFieldsProps & MapListFieldProps}
+ * ListFieldWithSubFields
  */
 
 /**
  * List field definition with variable types.
- * @typedef {ComplexListFieldProps & VariableFieldProps} ListFieldWithTypes
+ * @typedef {ComplexListFieldProps & VariableFieldProps & MapListFieldProps} ListFieldWithTypes
  */
 
 /**
@@ -897,6 +1100,10 @@
  * @property {string} [default] Default value. Accepts a stringified single
  * [GeoJSON](https://geojson.org/) geometry object that contains `type` and `coordinates`
  * properties.
+ * @property {Record<LocaleCode, string>} [default_localized] Default values for specific locales,
+ * keyed by locale code. A value given for a locale takes precedence over `default` in that locale.
+ * See the [documentation](https://sveltiacms.app/en/docs/i18n/options#localized-field-options) for
+ * details.
  * @property {number} [decimals] Precision of coordinates to be saved. Default: `7`.
  * @property {'Point' | 'LineString' | 'Polygon'} [type] Geometry type. Default: `Point`.
  * @property {[number, number]} [center] Default center coordinates as `[longitude, latitude]`.
@@ -947,8 +1154,19 @@
  * RichText field base properties.
  * @typedef {object} RichTextFieldBaseProps
  * @property {string} [default] Default value.
- * @property {boolean} [minimal] Whether to limit the editor height to 240 pixels, making the
- * content scrollable. Default: `false`.
+ * @property {Record<LocaleCode, string>} [default_localized] Default values for specific locales,
+ * keyed by locale code. A value given for a locale takes precedence over `default` in that locale.
+ * See the [documentation](https://sveltiacms.app/en/docs/i18n/options#localized-field-options) for
+ * details.
+ * @property {boolean} [minimal] Whether to make the editor compact: it starts with the height of a
+ * single line and stops growing at 240 pixels, making the content scrollable. Default: `false`.
+ * @property {boolean} [multiline] Whether the content can span multiple paragraphs and lines.
+ * Default: `true`. With `false`, the editor keeps the content in a single paragraph, which suits a
+ * title or caption with inline formatting: the Enter key doesn’t start a new line, and the
+ * paragraphs and lines of pasted text are joined with spaces. Only the inline formatting buttons
+ * (`bold`, `italic`, `strikethrough`, `code` and `link`) and inline editor components, like
+ * `image`, can be used then, and the HTML output format has no raw mode. A stored value with
+ * several paragraphs is kept as is until the content is edited.
  * @property {RichTextEditorButtonName[]} [buttons] Names of formatting buttons and menu items to be
  * enabled in the editor UI. Default: all the supported button names except `align`.
  * @property {(RichTextEditorComponentName | string)[]} [editor_components] Names of components to
@@ -1004,8 +1222,9 @@
 
 /**
  * RichText field definition.
- * @typedef {CommonFieldProps & VisibleFieldProps & FieldValidationProps & RichTextFieldBaseProps &
- * RichTextFieldFormatProps & RichTextFieldProps & UniqueValueProps} RichTextField
+ * @typedef {SimpleCommonFieldProps & VisibleFieldProps & FieldValidationProps &
+ * RichTextFieldBaseProps & RichTextFieldFormatProps & RichTextFieldProps & UniqueValueProps}
+ * RichTextField
  */
 
 /**
@@ -1022,8 +1241,8 @@
 
 /**
  * Markdown field definition.
- * @typedef {CommonFieldProps & VisibleFieldProps & FieldValidationProps & RichTextFieldBaseProps &
- * MarkdownFieldProps & UniqueValueProps} MarkdownField
+ * @typedef {SimpleCommonFieldProps & VisibleFieldProps & FieldValidationProps &
+ * RichTextFieldBaseProps & MarkdownFieldProps & UniqueValueProps} MarkdownField
  */
 
 /**
@@ -1031,6 +1250,10 @@
  * @typedef {object} NumberFieldProps
  * @property {'number'} widget Field type.
  * @property {number | string} [default] Default value.
+ * @property {Record<LocaleCode, number | string>} [default_localized] Default values for specific
+ * locales, keyed by locale code. A value given for a locale takes precedence over `default` in that
+ * locale. See the
+ * [documentation](https://sveltiacms.app/en/docs/i18n/options#localized-field-options) for details.
  * @property {'int' | 'float' | 'int/string' | 'float/string'} [value_type] Type of the value. `int`
  * makes the input accept only an integer value and saves it as a number. `float` makes the input
  * accept only a floating-point value and saves it as a number. `int/string` and `float/string` make
@@ -1057,7 +1280,7 @@
 
 /**
  * Number field definition.
- * @typedef {CommonFieldProps & VisibleFieldProps & FieldValidationProps & NumberFieldProps &
+ * @typedef {SimpleCommonFieldProps & VisibleFieldProps & FieldValidationProps & NumberFieldProps &
  * AdjacentLabelProps & UniqueValueProps} NumberField
  */
 
@@ -1066,6 +1289,10 @@
  * @typedef {object} ObjectFieldProps
  * @property {'object'} widget Field type.
  * @property {Record<string, any>} [default] Default values.
+ * @property {Record<LocaleCode, Record<string, any>>} [default_localized] Default values for
+ * specific locales, keyed by locale code. A value given for a locale takes precedence over
+ * `default` in that locale. See the
+ * [documentation](https://sveltiacms.app/en/docs/i18n/options#localized-field-options) for details.
  * @property {boolean | 'auto'} [collapsed] Whether to collapse the object by default. Default:
  * `false`. If set to `auto`, the UI is collapsed if the object has any filled subfields and
  * expanded if all the subfields are empty.
@@ -1117,11 +1344,24 @@
  */
 
 /**
+ * Sort options for a Relation field, which define the order of the options.
+ * @typedef {object} RelationFieldSortOptions
+ * @property {FieldKeyPath} field Field name in the referenced collection to sort the entries by. It
+ * can also be `slug`, `commit_author`, `commit_date` or `_manual` (the manual order of a collection
+ * with the `reorder` option).
+ * @property {'ascending' | 'descending'} [direction] Sort direction. Default: `ascending`.
+ */
+
+/**
  * Relation field properties.
  * @typedef {object} RelationFieldProps
  * @property {'relation'} widget Field type.
  * @property {any | any[]} [default] Default value(s), which should match the options. When
  * `multiple` is `false`, it should be a single value that matches the `value_field` option.
+ * @property {Record<LocaleCode, any | any[]>} [default_localized] Default values for specific
+ * locales, keyed by locale code. A value given for a locale takes precedence over `default` in that
+ * locale. See the
+ * [documentation](https://sveltiacms.app/en/docs/i18n/options#localized-field-options) for details.
  * @property {string} collection Referenced collection name. Use `_singletons` for the singleton
  * collection.
  * @property {string} [file] Referenced file identifier for a file/singleton collection. Required if
@@ -1137,13 +1377,17 @@
  * @property {(FieldKeyPath | string)[]} [search_fields] Name of fields to be searched. It can
  * contain string templates. Default: `display_fields` field value.
  * @property {RelationFieldFilterOptions[]} [filters] Entry filter options.
+ * @property {RelationFieldSortOptions} [sort_by] Sort options for the referenced entries. Default:
+ * the manual order for a collection with the `reorder` option, the order of the list items for a
+ * referenced file, and the alphabetical order of the labels otherwise. Not applicable to a
+ * referenced file.
  * @see https://decapcms.org/docs/widgets/#Relation
  * @see https://sveltiacms.app/en/docs/fields/relation
  */
 
 /**
  * Relation field definition.
- * @typedef {CommonFieldProps & VisibleFieldProps & MultiValueFieldValidationProps &
+ * @typedef {SimpleCommonFieldProps & VisibleFieldProps & MultiValueFieldValidationProps &
  * RelationFieldProps & MultiOptionFieldProps & UniqueValueProps} RelationField
  */
 
@@ -1167,6 +1411,10 @@
  * [default] Default value that matches one of the options. An option object with the `label` and
  * `value` properties can also be given, in which case its `value` is used. When `multiple` is
  * `true`, it should be an array of valid values.
+ * @property {Record<LocaleCode, SelectFieldValue | SelectFieldOption | (SelectFieldValue |
+ * SelectFieldOption)[]>} [default_localized] Default values for specific locales, keyed by locale
+ * code. A value given for a locale takes precedence over `default` in that locale. See the
+ * [documentation](https://sveltiacms.app/en/docs/i18n/options#localized-field-options) for details.
  * @property {SelectFieldValue[] | SelectFieldOption[]} options Options to choose from, given as a
  * list of values, or a list of objects with the `label` and `value` properties. The list cannot be
  * empty or contain duplicate values.
@@ -1176,7 +1424,7 @@
 
 /**
  * Select field definition.
- * @typedef {CommonFieldProps & VisibleFieldProps & MultiValueFieldValidationProps &
+ * @typedef {SimpleCommonFieldProps & VisibleFieldProps & MultiValueFieldValidationProps &
  * SelectFieldProps & MultiOptionFieldProps & UniqueValueProps} SelectField
  */
 
@@ -1185,6 +1433,10 @@
  * @typedef {object} StringFieldProps
  * @property {'string'} [widget] Field type.
  * @property {string} [default] Default value.
+ * @property {Record<LocaleCode, string>} [default_localized] Default values for specific locales,
+ * keyed by locale code. A value given for a locale takes precedence over `default` in that locale.
+ * See the [documentation](https://sveltiacms.app/en/docs/i18n/options#localized-field-options) for
+ * details.
  * @property {'text' | 'url' | 'email'} [type] Data type. It’s useful when the input value needs a
  * validation. Default: `text`.
  * @property {string} [prefix] A string to be prepended to the value unless it’s empty. Default:
@@ -1200,7 +1452,7 @@
 
 /**
  * String field definition.
- * @typedef {CommonFieldProps & VisibleFieldProps & FieldValidationProps & StringFieldProps &
+ * @typedef {SimpleCommonFieldProps & VisibleFieldProps & FieldValidationProps & StringFieldProps &
  * AdjacentLabelProps & CharCountProps & UniqueValueProps} StringField
  */
 
@@ -1209,6 +1461,10 @@
  * @typedef {object} TextFieldProps
  * @property {'text'} widget Field type.
  * @property {string} [default] Default value.
+ * @property {Record<LocaleCode, string>} [default_localized] Default values for specific locales,
+ * keyed by locale code. A value given for a locale takes precedence over `default` in that locale.
+ * See the [documentation](https://sveltiacms.app/en/docs/i18n/options#localized-field-options) for
+ * details.
  * @property {boolean} [use_emoji_autocomplete] Whether to enable emoji autocomplete in the text
  * area. Default: `true`. When enabled, typing `:` followed by a few letters will show a list of
  * matching emojis that can be selected to insert into the text.
@@ -1218,7 +1474,7 @@
 
 /**
  * Text field definition.
- * @typedef {CommonFieldProps & VisibleFieldProps & FieldValidationProps & TextFieldProps &
+ * @typedef {SimpleCommonFieldProps & VisibleFieldProps & FieldValidationProps & TextFieldProps &
  * CharCountProps & UniqueValueProps} TextField
  */
 
@@ -1227,13 +1483,18 @@
  * @typedef {object} UuidFieldProps
  * @property {'uuid'} widget Field type.
  * @property {string} [default] Default value.
+ * @property {Record<LocaleCode, string>} [default_localized] Default values for specific locales,
+ * keyed by locale code. A value given for a locale takes precedence over `default` in that locale.
+ * See the [documentation](https://sveltiacms.app/en/docs/i18n/options#localized-field-options) for
+ * details.
  * @property {string} [prefix] A string to be prepended to the value. Default: empty string.
  * @property {boolean} [use_b32_encoding] Whether to encode the value with Base32, which makes a
  * 26-character lowercase ID instead of a 36-character UUID. Default: `false`.
- * @property {boolean} [read_only] Whether to make the field read-only. Default: `true`.
- * DEPRECATED: Use the `readonly` common field option instead, which defaults to `true` for the UUID
- * field type.
- * @see https://github.com/decaporg/decap-cms/pull/6675
+ * @property {boolean} [read_only] Whether to make the field read-only. Default: `true`. The
+ * `readonly` common field option, which also defaults to `true` for the UUID field type, takes
+ * precedence if both are set.
+ * @see https://decapcms.org/docs/widgets/uuid/
+ * @see https://sveltiacms.app/en/docs/fields/uuid
  */
 
 /**
@@ -1395,6 +1656,10 @@
  * icon](https://fonts.google.com/icons?icon.set=Material+Symbols) to be displayed in the collection
  * file list and other places. See the
  * [documentation](https://sveltiacms.app/en/docs/collections#icons) for details.
+ * @property {string} [summary] Summary template displayed in the file list of a file collection in
+ * place of the label, e.g. `Home Page ({{locales}})`. It can use the file’s fields and the same
+ * special tags and transformations as an entry collection’s `summary` option; `{{title}}` falls
+ * back to the label without a `title` field. Default: the `label` option value.
  * @property {string} file File path relative to the project root.
  * @property {Field[]} fields Set of fields to be included in the file.
  * @property {string} [media_folder] Internal media folder path for the collection. This overrides
@@ -1467,6 +1732,18 @@
  * @property {'ascending' | 'descending' | 'Ascending' | 'Descending' | 'None'} [direction] Default
  * sort direction. Title case values are supported for Static CMS compatibility. However, `None` is
  * the same as `ascending`. Default: `ascending`.
+ */
+
+/**
+ * A sortable field definition in the `sortable_fields` list, which is compatible with Decap CMS.
+ * It can be mixed with field names in the same list.
+ * @typedef {object} SortableField
+ * @property {FieldKeyPath} field A field name to be sorted by.
+ * @property {string} [label] Label of the field in the Sort menu. Default: the field’s label.
+ * @property {'asc' | 'desc' | boolean} [default_sort] Whether to sort the entries by this field by
+ * default, and in which direction: `asc` or `true` for ascending, `desc` for descending. Only one
+ * field can have this option. The user’s own sort choice, which is remembered, takes precedence.
+ * @see https://decapcms.org/docs/configuration-options/#sortable_fields
  */
 
 /**
@@ -1566,6 +1843,9 @@
  * @property {string | RegExp | boolean} [pattern] Regular expression matching pattern or exact
  * value. Entries are grouped by the matched part of the field value. Without a `pattern` or a
  * comparison option, entries are grouped by the field value itself.
+ * @property {boolean} [collapsed] Whether to collapse the groups by default. Default: `false`. If
+ * set to `true`, every group, including one that appears later, starts collapsed unless the user
+ * has expanded it. The user’s own choice to expand or collapse a group is remembered.
  * @see https://decapcms.org/docs/configuration-options/#view_groups
  * @see https://sveltiacms.app/en/docs/collections/entries/views#grouping
  */
@@ -1622,13 +1902,16 @@
  * Editor options.
  * @typedef {object} EditorOptions
  * @property {boolean} [preview] Whether to show the preview pane. Default: `true`.
+ * @property {boolean} [second_pane] Whether to show the second pane, which holds the preview or
+ * another locale’s editor next to the first pane. If `false`, the editor has a single pane, where
+ * the preview, if enabled, takes turns with the editor. Default: `true`.
  * @see https://decapcms.org/docs/configuration-options/#editor
  * @see https://sveltiacms.app/en/docs/ui/content-editor#disabling-previews
  */
 
 /**
- * Nested collection options.
- * @typedef {object} NestedCollectionOptions
+ * Nested entry options.
+ * @typedef {object} NestedEntryOptions
  * @property {number} [depth] Maximum number of path segments below the collection folder, which is
  * both the depth of the collection tree and the depth at which entry files are looked up. Default:
  * `Infinity`.
@@ -1637,7 +1920,7 @@
  * @property {boolean} [subfolders] Whether each entry is stored as an index file in its own
  * subfolder. If `false`, entries are regular files placed directly in the folders. Default: `true`.
  * @see https://decapcms.org/docs/collection-nested/
- * @see https://sveltiacms.app/en/docs/collections/entries/nested#nested-collection-options
+ * @see https://sveltiacms.app/en/docs/collections/entries/nested#nested-entry-options
  */
 
 /**
@@ -1679,6 +1962,11 @@
  * @property {string} [icon] Name of a [Material Symbols
  * icon](https://fonts.google.com/icons?icon.set=Material+Symbols) to be displayed in the editor UI.
  * Default: `home`.
+ * @property {string} [summary] Summary template displayed in place of the label in the entry list,
+ * search results and other places where the collection’s `summary` option applies to the entries,
+ * e.g. `{{title}} ({{locales}})`. It can use the index file’s fields and the same special tags and
+ * transformations as the collection’s `summary` option; `{{title}}` falls back to the label without
+ * a `title` field. Default: the `label` option value.
  * @property {Field[]} [fields] Set of fields for the index file. If omitted, the regular entry
  * collection `fields` will be used instead.
  * @property {EditorOptions} [editor] Editor view options.
@@ -1842,17 +2130,18 @@
  * @property {string} [summary] Entry summary template displayed in the entry list, e.g.
  * `{{title}} ({{date | date('YYYY-MM-DD')}})`. Default: the value of the `identifier_field`,
  * `title`, `name` or `label` field, or the first heading in the `body` field.
- * @property {FieldKeyPath[] | SortableFields} [sortable_fields] Custom sortable fields. Default:
- * `title`, `name`, `date`, `author` and `description`, or the `identifier_field` in place of
- * `title`, as long as the fields exist. For a Git backend, `commit_author` and `commit_date` are
- * also available, and added to the list if `author` and `date` are not included. See the
+ * @property {(FieldKeyPath | SortableField)[] | SortableFields} [sortable_fields] Custom sortable
+ * fields. Default: `title`, `name`, `date`, `author` and `description`, or the `identifier_field`
+ * in place of `title`, as long as the fields exist. For a Git backend, `commit_author` and
+ * `commit_date` are also available, and added to the list if `author` and `date` are not included.
+ * Each list item can be a field name or a {@link SortableField} object. See the
  * [documentation](https://sveltiacms.app/en/docs/collections/entries/views#sorting) for details.
  * @property {ViewFilter[] | ViewFilters} [view_filters] View filters to be used in the entry list.
  * @property {ViewGroup[] | ViewGroups} [view_groups] View groups to be used in the entry list.
- * @property {NestedCollectionOptions} [nested] Options for a nested collection, which shows the
- * entries in a folder tree and lets the user organize them in subfolders.
- * @property {CollectionMetaData} [meta] Meta data for a nested collection, which enables the entry
- * path editor. It has no effect without the `nested` option.
+ * @property {NestedEntryOptions} [nested] Options for a collection with nested entries, which shows
+ * the entries in a folder tree and lets the user organize them in subfolders.
+ * @property {CollectionMetaData} [meta] Meta data for a collection with nested entries, which
+ * enables the entry path editor. It has no effect without the `nested` option.
  * @property {CollectionIndexFile | boolean} [index_file] Index file inclusion options. If `true`,
  * the default index file name is `_index`, which is used for Hugo’s special index file. See the
  * [documentation](https://sveltiacms.app/en/docs/collections/entries/listings#managing-hugo-s-special-index-file)
@@ -1874,6 +2163,15 @@
  * effect unless the `preview_path` option is also defined, because that option is what tells the
  * CMS an entry’s path on the live site. It also has no effect if a field with the same name is
  * defined in the `fields` option, in which case the property is left to the editor to manage.
+ * @property {FieldKeyPath | boolean} [permalink_field] Property name used to store the entry’s path
+ * on the live site, filled from the `preview_path` option each time the entry is saved, so a static
+ * site generator can build the page at that path. Default: `false`. Set this to `true` to use
+ * `permalink`, which is what Eleventy reads; its value must then end with a slash or a file
+ * extension, e.g. `portfolio/{{slug}}/`. A value other than a string, such as `false`, which tells
+ * Eleventy not to build the page, is left untouched. It has no effect unless the `preview_path`
+ * option is also defined, or if a field with the same name is defined in the `fields` option, in
+ * which case the property is left to the editor to manage.
+ * @see https://www.11ty.dev/docs/permalinks/
  * @see https://decapcms.org/docs/collection-folder/
  * @see https://sveltiacms.app/en/docs/collections/entries
  */
@@ -1954,7 +2252,7 @@
 
 /**
  * Supported Git backend name.
- * @typedef {'github' | 'gitlab' | 'gitea'} GitBackendName
+ * @typedef {'github' | 'gitlab' | 'gitea' | 'forgejo'} GitBackendName
  */
 
 /**
@@ -2018,6 +2316,12 @@
  * with a space in between. The message made from the template is used as is if the text box is
  * left empty. Default: `false`. See the
  * [documentation](https://sveltiacms.app/en/docs/backends#commit-messages) for details.
+ * @property {boolean} [signoff_commits] Whether to add a `Signed-off-by: Name <email>` trailer
+ * to every commit the CMS makes, with the name and email of the signed-in user, as required by
+ * projects that enforce the [Developer Certificate of Origin](https://developercertificate.org/).
+ * The merge commit made when an Editorial Workflow entry is published doesn’t get the trailer. If
+ * the Git host doesn’t share the user’s email, e.g. on GitHub for a user without a public email,
+ * the trailer is left out with a warning in the browser console. Default: `false`.
  * @property {AuthMethodName[]} [auth_methods] Allowed authentication methods. Default: both `oauth`
  * and `token` are allowed. To restrict sign-in options, specify only the methods you want to
  * enable, e.g. `[oauth]` to disable access token sign-in, or `[token]` to disable OAuth sign-in. An
@@ -2063,9 +2367,14 @@
  * without write access to the repository propose changes from a fork. It requires the
  * `editorial_workflow` publish mode. Default: `false`. See the
  * [documentation](https://sveltiacms.app/en/docs/workflows/open) for details.
- * @property {'repo' | 'public_repo'} [auth_scope] OAuth scope to request when signing in. Default:
- * `repo`. With Open Authoring on a public repository, `public_repo` is enough and asks the
- * contributor for a narrower grant. A private repository always needs `repo`.
+ * @property {'repo' | 'public_repo' | ('repo' | 'public_repo' | 'workflow')[]} [auth_scope] OAuth
+ * scope to request when signing in, or a list of scopes, which must include `repo` or
+ * `public_repo`. Default: `repo`. With Open Authoring on a public repository, `public_repo` is
+ * enough and asks the contributor for a narrower grant. A private repository always needs `repo`.
+ * Adding `workflow` lets the CMS keep a contributor’s fork in sync when your GitHub Actions
+ * workflow files change, at the cost of letting the token change workflows in every repository
+ * the contributor can push to. See the
+ * [documentation](https://sveltiacms.app/en/docs/workflows/open#authentication-scope) for details.
  * @see https://decapcms.org/docs/github-backend/
  * @see https://decapcms.org/docs/editorial-workflows/
  * @see https://decapcms.org/docs/open-authoring/
@@ -2170,8 +2479,28 @@
  */
 
 /**
+ * Forgejo backend properties that differ from those of the Gitea/Forgejo backend.
+ * @typedef {object} ForgejoBackendProps
+ * @property {'forgejo'} name Backend name.
+ * @property {string} api_root REST API endpoint of the Forgejo instance, e.g.
+ * `https://codeberg.org/api/v1`.
+ * @property {string} [base_url] OAuth base URL, which is the URL of the Forgejo instance, including
+ * the subpath if it’s served under one. Default: `api_root` without the `/api/v1` path, e.g.
+ * `https://codeberg.org`.
+ * @see https://decapcms.org/docs/gitea-backend/#forgejo-backend
+ * @see https://sveltiacms.app/en/docs/backends/gitea-forgejo
+ */
+
+/**
+ * Forgejo backend, as named in Decap CMS. It’s the same as the Gitea/Forgejo backend, except that
+ * the `api_root` option is required and the OAuth base URL is derived from it.
+ * @typedef {GitBackendProps & Omit<GiteaBackendProps, 'name' | 'api_root' | 'base_url'> &
+ * ForgejoBackendProps} ForgejoBackend
+ */
+
+/**
  * Git-based backend.
- * @typedef {GitHubBackend | GitLabBackend | GiteaBackend} GitBackend
+ * @typedef {GitHubBackend | GitLabBackend | GiteaBackend | ForgejoBackend} GitBackend
  */
 
 /**
@@ -2190,12 +2519,6 @@
 /**
  * Backend options.
  * @typedef {GitBackend | TestBackend} Backend
- */
-
-/**
- * Global media storage options.
- * @typedef {object} GlobalMediaLibraryOptions
- * @property {MediaLibraryName} [name] Library name. Default: `default`, the internal media storage.
  */
 
 /**
@@ -2333,7 +2656,7 @@
  * public URL, e.g. `/images/uploads`. A leading slash is added if missing, while a relative path
  * starting with `./` or `../` and a full URL are not allowed. Default: `/` followed by the
  * `media_folder` option value.
- * @property {MediaLibrary & GlobalMediaLibraryOptions} [media_library] Legacy media storage option
+ * @property {GlobalLegacyMediaLibrary} [media_library] Legacy media storage option
  * that allows only one library. Use `media_libraries` instead to support multiple storage
  * providers. If both options define the same library, `media_libraries` takes precedence.
  * @property {MediaLibraries} [media_libraries] Unified media storage option that supports multiple
@@ -2358,8 +2681,8 @@
  * on deploy previews. Default: `true`.
  * @property {LinkCollection[]} [links] Link list to be shown when the Account Button is clicked.
  * @property {SlugOptions} [slug] Slug options, which apply to entry slugs and to the names of entry
- * folders created or renamed in a nested collection. They also apply to uploaded asset file names
- * and new asset folder names if the `slugify_filename` media library option is enabled.
+ * folders created or renamed in a collection with nested entries. They also apply to uploaded asset
+ * file names and new asset folder names if the `slugify_filename` media library option is enabled.
  * @property {(Collection | CollectionDivider)[]} [collections] Set of collections. The list can
  * also contain dividers, which are used to group collections in the collection list. Either
  * `collections` or `singletons` option must be defined.
@@ -2391,9 +2714,19 @@
  */
 
 /**
+ * Context passed to a custom file formatter.
+ * @typedef {object} FileFormatterContext
+ * @property {(value: any) => Promise<string>} serialize Function to format the given entry content
+ * with the built-in formatter for the format, using the same options as when no custom formatter
+ * is registered, e.g. the front matter delimiters and the `output` options. The given content
+ * isn’t modified. Only available for a custom format registered under a built-in name, such as
+ * `yaml-frontmatter`; otherwise it throws an error.
+ */
+
+/**
  * Entry file formatter for a custom file format. It receives the entry content as an object and
  * returns the file content. The output is trimmed and a trailing line break is added.
- * @typedef {(value: any) => string | Promise<string>} FileFormatter
+ * @typedef {(value: any, context: FileFormatterContext) => string | Promise<string>} FileFormatter
  * @see https://decapcms.org/docs/custom-formatters/
  * @see https://sveltiacms.app/en/docs/api/file-formats
  */
@@ -2511,6 +2844,78 @@
  * `CMS.renderRichText()` to render it within an `HTMLElement` preview.
  * @see https://decapcms.org/docs/custom-widgets/#registereditorcomponent
  * @see https://sveltiacms.app/en/docs/api/editor-components
+ */
+
+/**
+ * Context passed to the `onInsert` function of an inline editor component.
+ * @typedef {object} InlineEditorComponentInsertContext
+ * @property {string} selectedText Text selected in the rich text editor when the component is
+ * inserted, which the component replaces. An empty string if nothing is selected.
+ */
+
+/**
+ * Context passed to the `onEdit` function of an inline editor component.
+ * @typedef {object} InlineEditorComponentEditContext
+ * @property {Record<string, any>} data Current data of the component.
+ */
+
+/**
+ * Pattern-based inline editor component options, compatible with Decap CMS. Unlike the
+ * {@link EditorComponentDefinition}, the component has no fields to edit: its data comes from the
+ * Markdown it matches within a paragraph, and the editor shows its preview right within the text.
+ * The data can be changed with the `onInsert` and `onEdit` functions, e.g. to pick a page to link
+ * to in a custom dialog. Such a component is available in a RichText or Markdown field with the
+ * default `markdown` format, but not with the `html` format.
+ * @typedef {object} InlineEditorComponentDefinition
+ * @property {string} id Unique identifier for the component.
+ * @property {string} [label] Label of the component to be displayed in the editor UI. Default: the
+ * `id` value.
+ * @property {string} [icon] Name of a [Material Symbols
+ * icon](https://fonts.google.com/icons?icon.set=Material+Symbols) to be displayed in the editor UI.
+ * @property {'inline'} type Component type, which must be `inline`.
+ * @property {RegExp} pattern Regular expression to find the component within a paragraph, e.g.
+ * `/\[\[(?<page>[^\]]+)\]\]/` for a wikilink. A leading `^` is ignored, and so are the `g` and
+ * `y` flags. Use a non-greedy quantifier, like `.+?`, or a specific character class, so the match
+ * doesn’t run on to the next instance on the same line.
+ * @property {string} [trigger] Literal text every instance starts with, e.g. `[[` or `@`. If
+ * given, the editor finds the instances by looking for this text, and only matches the `pattern`
+ * where it’s found, instead of running the pattern across the paragraph. Unlike the `trigger`
+ * option of a {@link EditorComponentDefinition}, it doesn’t choose the toolbar UI: the component
+ * is always placed under the Insert menu.
+ * @property {(match: RegExpMatchArray) => Record<string, any>} [fromInline] Function to convert
+ * the matching result to the component data. This can be omitted if the `pattern` regex contains
+ * named capturing groups, which are then used as the data.
+ * @property {(data: Record<string, any>) => string} toInline Function to convert the component
+ * data to Markdown content. It’s called with an empty object for a component inserted without
+ * `onInsert`, so it must handle missing values.
+ * @property {(data: Record<string, any>, getAsset: GetAsset) => string | HTMLElement |
+ * ReactElement} [toPreview] Function to convert the component data to its preview, which is shown
+ * both within the text in the rich text editor and in the preview pane. A string is
+ * parsed as inline Markdown/HTML and sanitized in the editor; the preview pane handles the value
+ * like the one of an {@link EditorComponentDefinition}. Without this function, the editor shows the
+ * output of `toInline` as plain text.
+ * @property {(context: InlineEditorComponentInsertContext) => Promise<Record<string, any> | null |
+ * undefined> | Record<string, any> | null | undefined} [onInsert] Function called when the
+ * component is inserted from the toolbar in the rich text mode, returning the data of the new
+ * component. The component replaces the selected text. Return `null` or `undefined` to cancel the
+ * insertion, which leaves the selected text as is. Without this function, the component is
+ * inserted with empty data. In the plain text mode, the output of `toInline` for empty data is
+ * inserted instead.
+ * @property {(context: InlineEditorComponentEditContext) => Promise<Record<string, any> | null |
+ * undefined> | Record<string, any> | null | undefined} [onEdit] Function called when the component
+ * is clicked in the rich text editor, or activated with the Enter or Space key, returning the new
+ * data of the component. Return `null` or `undefined` to leave the component unchanged. Without
+ * this function, the component can’t be edited in the rich text mode, only removed.
+ * @see https://decapcms.org/docs/custom-widgets/#registereditorcomponent
+ * @see https://sveltiacms.app/en/docs/api/editor-components
+ */
+
+/**
+ * Custom rich text editor component options passed to `CMS.registerEditorComponent()`: either a
+ * field-based component, or a pattern-based inline component with the `type` option set to
+ * `inline`.
+ * @typedef {EditorComponentDefinition | InlineEditorComponentDefinition}
+ * CustomEditorComponentDefinition
  */
 
 /**
@@ -2642,9 +3047,15 @@
  * @property {GetAsset} getAsset Function that returns the asset item for a given path. Returns
  * `undefined` if the asset is not found.
  * @property {MapOf<Record<string, any>>} fieldsMetaData Immutable Map of metadata from all fields
- * in the entry, keyed by field key path, e.g. `author` or `details.author`. For a Relation field,
- * it contains the referenced entry content in the `{ [collectionName]: { [value]: content } }`
- * structure, where `content` is a flattened object with key paths like `address.city` as keys.
+ * in the entry, keyed by field name. The metadata of a field in an Object or List field is nested
+ * under the parent field’s name, merging all the List items, and the single subfield of a List
+ * field is keyed by its own name, e.g. `fieldsMetaData.getIn(['details', 'author'])`. For a
+ * Relation field, it contains the referenced entry content in the
+ * `{ [collectionName]: { [value]: content } }` structure, where `content` is a flattened object
+ * with key paths like `address.city` as keys. The metadata of a nested field is also available
+ * under its flattened key path without a trailing List item index, e.g. `details.author`,
+ * `books.0.author` or `tags` for the single subfield of a List field, but this is deprecated.
+ * @see https://decapcms.org/docs/customization/#accessing-metadata
  */
 
 /**
@@ -2809,11 +3220,10 @@
  * @property {MapOf<CustomField>} field Immutable Map of current field configuration. Use
  * `field.get('name')` to access properties.
  * @property {MapOf<any>} metadata Immutable Map of any available metadata for the current field,
- * extracted from `fieldsMetaData` using the field’s key path as key, e.g. `details.author` for a
- * field nested in an Object field or `authors.0.name` for one in a List item. A trailing index is
- * removed, so the subfield of a List field with a single `field` uses the List field’s key path,
- * e.g. `tags` instead of `tags.0`. For relation fields, contains referenced entry data. It’s an
- * empty Map if there is no metadata.
+ * extracted from `fieldsMetaData` with the names of the field and its parent fields, e.g.
+ * `['details', 'author']` for a field nested in an Object field, `['authors', 'name']` for one in
+ * a List item, or `['tags', 'tag']` for the subfield `tag` of a List field with a single `field`.
+ * For relation fields, contains referenced entry data. It’s an empty Map if there is no metadata.
  * @see https://decapcms.org/docs/custom-widgets/#registerwidget
  * @see https://sveltiacms.app/en/docs/api/field-types
  */

@@ -1,11 +1,8 @@
 import { describe, expect, test } from 'vitest';
 
-import {
-  GLOBAL_IMAGE_REGEX,
-  IMAGE_OR_LINKED_IMAGE_REGEX,
-  IMAGE_REGEX,
-  LINKED_IMAGE_REGEX,
-} from './constants.js';
+import { countMatches, expectLinearTime } from '$lib/test/complexity';
+
+import { IMAGE_OR_LINKED_IMAGE_REGEX, IMAGE_REGEX, LINKED_IMAGE_REGEX } from './constants.js';
 
 describe('Test IMAGE_REGEX', () => {
   test('matches simple image markdown syntax', () => {
@@ -235,7 +232,9 @@ describe('Test regex basic functionality', () => {
   });
 });
 
-describe('Test GLOBAL_IMAGE_REGEX', () => {
+describe('Test IMAGE_REGEX with the global flag', () => {
+  const GLOBAL_IMAGE_REGEX = new RegExp(IMAGE_REGEX, 'g');
+
   test('matches multiple images in a single string', () => {
     const markdown = `
 Here is the first image: ![first](image1.jpg)
@@ -468,25 +467,64 @@ describe('Test image regex performance and nesting', () => {
     });
   });
 
+  test('matches an alt text with balanced brackets', () => {
+    expect('![Photo [1]](a.jpg)'.match(IMAGE_REGEX)?.groups).toEqual({
+      alt: 'Photo [1]',
+      src: 'a.jpg',
+    });
+    expect('[![Photo [1]](a.jpg)](b)'.match(LINKED_IMAGE_REGEX)?.groups).toEqual({
+      alt2: 'Photo [1]',
+      src2: 'a.jpg',
+      link: 'b',
+    });
+    // An unbalanced bracket starts a link of its own, as in CommonMark
+    expect('![a [b](c.jpg)'.match(IMAGE_REGEX)).toBeNull();
+  });
+
+  test('matches a title in single quotes', () => {
+    expect("![a](my image.jpg 'It’s \\'t\\'')".match(IMAGE_REGEX)?.groups).toEqual({
+      alt: 'a',
+      src: 'my image.jpg',
+      singleQuotedTitle: "It’s \\'t\\'",
+    });
+    expect("[![a](b.jpg 't')](c)".match(LINKED_IMAGE_REGEX)?.groups).toEqual({
+      alt2: 'a',
+      src2: 'b.jpg',
+      singleQuotedTitle2: 't',
+      link: 'c',
+    });
+    // A quote within the file name isn’t a title
+    expect("![a](it's.jpg)".match(IMAGE_REGEX)?.groups?.src).toBe("it's.jpg");
+  });
+
   test('matches a link with an unclosed parenthesis', () => {
     expect('[![a](b)](c(d)'.match(LINKED_IMAGE_REGEX)?.groups?.link).toBe('c(d');
     expect('[![a](b)](c(d)e)'.match(LINKED_IMAGE_REGEX)?.groups?.link).toBe('c(d)e');
   });
 
-  test.each([
-    ['unclosed parentheses', '![](a('.repeat(20_000)],
-    ['image starts', '!['.repeat(60_000)],
-    ['escaped image starts', '\\!['.repeat(40_000)],
-    ['unclosed titles', '![](a "'.repeat(20_000)],
-    ['trailing spaces', `![](a${' '.repeat(100_000)}`],
-    ['spaces before an unclosed title', `![](a${' '.repeat(100_000)}"`],
-    ['unclosed link parentheses', `[![](a)](${'('.repeat(100_000)}`],
-    ['linked image starts', '[![](a)]('.repeat(20_000)],
-  ])('matches in linear time: %s', (_name, markdown) => {
-    const start = performance.now();
+  test.each(
+    /** @type {[string, (n: number) => string, number][]} */ ([
+      ['unclosed parentheses', (n) => '![](a('.repeat(n), 1000],
+      ['image starts', (n) => '!['.repeat(n), 1000],
+      ['escaped image starts', (n) => '\\!['.repeat(n), 1000],
+      ['unclosed titles', (n) => '![](a "'.repeat(n), 1000],
+      ['unclosed single-quoted titles', (n) => "![](a '".repeat(n), 1000],
+      ['unclosed brackets in alt texts', (n) => '![a ['.repeat(n), 1000],
+      ['nested brackets in an alt text', (n) => `![${'[a]'.repeat(n)}`, 4000],
+      ['spaces before an unclosed single-quoted title', (n) => `![](a${' '.repeat(n)}'`, 4000],
+      ['trailing spaces', (n) => `![](a${' '.repeat(n)}`, 4000],
+      ['spaces before an unclosed title', (n) => `![](a${' '.repeat(n)}"`, 4000],
+      ['unclosed link parentheses', (n) => `[![](a)](${'('.repeat(n)}`, 4000],
+      ['linked image starts', (n) => '[![](a)]('.repeat(n), 1000],
+    ]),
+  )('matches in linear time: %s', (_name, build, size) => {
+    const globalImageRegex = new RegExp(IMAGE_REGEX, 'g');
+    const globalRegex = new RegExp(IMAGE_OR_LINKED_IMAGE_REGEX, 'g');
 
-    Array.from(markdown.matchAll(GLOBAL_IMAGE_REGEX));
-    Array.from(markdown.matchAll(new RegExp(IMAGE_OR_LINKED_IMAGE_REGEX, 'g')));
-    expect(performance.now() - start).toBeLessThan(100);
+    expectLinearTime(
+      build,
+      (markdown) => countMatches(markdown, globalImageRegex) + countMatches(markdown, globalRegex),
+      size,
+    );
   });
 });

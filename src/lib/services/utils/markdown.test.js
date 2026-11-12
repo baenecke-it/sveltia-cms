@@ -1,6 +1,16 @@
-import { describe, expect, test } from 'vitest';
+import { sanitize } from 'isomorphic-dompurify';
+import { describe, expect, test, vi } from 'vitest';
+
+import { expectLinearTime } from '$lib/test/complexity';
 
 import { removeMarkdownSyntax, stripMarkdown } from './markdown';
+
+vi.mock('isomorphic-dompurify', async (importOriginal) => {
+  /** @type {typeof import('isomorphic-dompurify')} */
+  const original = await importOriginal();
+
+  return { ...original, sanitize: vi.fn(original.sanitize) };
+});
 
 describe('removeMarkdownSyntax', () => {
   test('should remove matching bold markdown characters', () => {
@@ -275,15 +285,10 @@ describe('removeMarkdownSyntax', () => {
     expect(removeMarkdownSyntax('~~~~strike~~~~')).toBe('strike');
   });
 
-  test('should finish quickly with a long run of alternating delimiters', () => {
+  test('should process a long run of alternating delimiters in linear time', () => {
     // A run of mixed delimiters with no closing run used to take minutes to process, because the
     // delimiter could be any length and every length was tried against the rest of the string
-    const input = `${'*_'.repeat(20000)}${'a'.repeat(20000)}`;
-    const start = performance.now();
-
-    removeMarkdownSyntax(input);
-
-    expect(performance.now() - start).toBeLessThan(200);
+    expectLinearTime((n) => `${'*_'.repeat(n)}${'a'.repeat(n)}`, removeMarkdownSyntax, 500);
   });
 });
 
@@ -346,5 +351,13 @@ describe('stripMarkdown', () => {
 
   test('should return an empty string for an empty value', () => {
     expect(stripMarkdown('')).toBe('');
+  });
+
+  test('should parse the same value only once', () => {
+    const value = 'A **value** that is only used by this test';
+
+    expect(stripMarkdown(value)).toBe('A value that is only used by this test');
+    expect(stripMarkdown(value)).toBe('A value that is only used by this test');
+    expect(sanitize).toHaveBeenCalledTimes(1);
   });
 });

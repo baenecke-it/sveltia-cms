@@ -6,11 +6,12 @@ import {
   filterNestedEntries,
   getEntryDirPath,
   getMetaPathConfig,
+  getNameInFolder,
   getNestedConfig,
   getNestedIndexFileName,
   getSharedEntryFileName,
+  hasNestedEntries,
   isDescendantPath,
-  isNestedCollection,
   isNestedFolder,
   nestedFilterPath,
   stripIndexFileName,
@@ -23,7 +24,7 @@ vi.mock('$lib/services/contents/collection/predicates', () => ({
 }));
 
 /**
- * Create an entry with only the properties the nested collection helpers read.
+ * Create an entry with only the properties the nested entry helpers read.
  * @param {string} subPath Entry’s sub path.
  * @returns {any} Entry.
  */
@@ -80,10 +81,10 @@ describe('getNestedConfig()', () => {
   });
 });
 
-describe('isNestedCollection()', () => {
+describe('hasNestedEntries()', () => {
   test('returns true only for a nested entry collection', () => {
-    expect(isNestedCollection({ name: 'pages', folder: 'content/pages', nested: {} })).toBe(true);
-    expect(isNestedCollection({ name: 'pages', folder: 'content/pages' })).toBe(false);
+    expect(hasNestedEntries({ name: 'pages', folder: 'content/pages', nested: {} })).toBe(true);
+    expect(hasNestedEntries({ name: 'pages', folder: 'content/pages' })).toBe(false);
   });
 });
 
@@ -181,7 +182,7 @@ describe('getMetaPathConfig()', () => {
 });
 
 describe('getNestedIndexFileName()', () => {
-  test('returns the shared file name of a nested collection', () => {
+  test('returns the shared file name of a collection with nested entries', () => {
     expect(
       getNestedIndexFileName({
         name: 'pages',
@@ -302,6 +303,22 @@ describe('getEntryDirPath()', () => {
 
   test('returns an empty string for an entry in the collection folder', () => {
     expect(getEntryDirPath('_index')).toBe('');
+  });
+});
+
+describe('getNameInFolder()', () => {
+  test('returns the name of an entry directly in the folder', () => {
+    expect(getNameInFolder('docs/intro', 'docs')).toBe('intro');
+    expect(getNameInFolder('a/b/c', 'a/b')).toBe('c');
+    expect(getNameInFolder('setup', '')).toBe('setup');
+  });
+
+  test('returns `undefined` for an entry elsewhere', () => {
+    expect(getNameInFolder('docs/guides/start', 'docs')).toBeUndefined();
+    expect(getNameInFolder('docs/intro', '')).toBeUndefined();
+    expect(getNameInFolder('setup', 'docs')).toBeUndefined();
+    // A folder whose name merely starts with the same characters isn’t the same folder
+    expect(getNameInFolder('docs-old/intro', 'docs')).toBeUndefined();
   });
 });
 

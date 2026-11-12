@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { cmsConfig } from '$lib/services/config';
-import { allEntries, allEntryFolders } from '$lib/services/contents';
+import { allEntryFolders, findEntryByPaths } from '$lib/services/contents';
 import { getCollection, getValidCollections } from '$lib/services/contents/collection';
 import {
   getCollectionFile,
@@ -17,8 +17,8 @@ vi.mock('$lib/services/config', () => ({
   cmsConfig: { current: undefined },
 }));
 vi.mock('$lib/services/contents', () => ({
-  allEntries: { current: undefined },
   allEntryFolders: { current: undefined },
+  findEntryByPaths: vi.fn(),
 }));
 vi.mock('$lib/services/contents/collection', () => ({
   getCollection: vi.fn(),
@@ -292,6 +292,45 @@ describe('getCollectionFilesByEntry()', () => {
     expect(result).toHaveLength(0);
   });
 
+  test('matches a file by any locale’s path of the entry', () => {
+    // Only the French file exists
+    const entry = {
+      slug: 'about',
+      subPath: '',
+      locales: { fr: { path: 'content/about.fr.md', slug: 'about', content: {} } },
+      id: 'about-id',
+    };
+
+    const _i18n = { defaultLocale: 'en', omitDefaultLocaleFromFilePath: false };
+
+    const aboutFile = {
+      name: 'about',
+      file: '/content/about.{{locale}}.md',
+      fields: [],
+      _file: { fullPath: 'content/about.en.md' },
+      _i18n,
+    };
+
+    const contactFile = {
+      name: 'contact',
+      file: 'content/contact.{{locale}}.md',
+      fields: [],
+      _file: { fullPath: 'content/contact.en.md' },
+      _i18n,
+    };
+
+    const collection = {
+      name: 'pages',
+      _type: 'file',
+      _i18n,
+      _fileMap: { about: aboutFile, contact: contactFile },
+    };
+
+    expect(
+      getCollectionFilesByEntry(/** @type {any} */ (collection), /** @type {any} */ (entry)),
+    ).toEqual([aboutFile]);
+  });
+
   test('returns empty array when no files match', () => {
     const entry = {
       slug: 'test-entry',
@@ -359,15 +398,17 @@ describe('getCollectionFileEntry()', () => {
         filePathMap: { en: 'content/test.md' },
       },
     ];
-    allEntries.current = /** @type {any} */ ([mockEntry]);
+    vi.mocked(findEntryByPaths).mockReturnValue(/** @type {any} */ (mockEntry));
 
     const result = getCollectionFileEntry('test-collection', 'test-file');
 
+    // The entry is looked up through the path index
+    expect(findEntryByPaths).toHaveBeenCalledExactlyOnceWith(['content/test.md']);
     expect(result).toBe(mockEntry);
   });
 
   test('returns undefined when no entry matches', () => {
-    // Folder found but allEntries empty
+    // Folder found but no entry has a file at its path
     allEntryFolders.current = [
       {
         collectionName: 'test-collection',
@@ -375,7 +416,7 @@ describe('getCollectionFileEntry()', () => {
         filePathMap: { en: 'content/test.md' },
       },
     ];
-    allEntries.current = [];
+    vi.mocked(findEntryByPaths).mockReturnValue(undefined);
 
     const result = getCollectionFileEntry('test-collection', 'test-file');
 

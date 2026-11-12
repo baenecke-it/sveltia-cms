@@ -7,37 +7,40 @@
 -->
 <script>
   import { _ } from '@sveltia/i18n';
-  import { Button, Menu, MenuButton, MenuItem, Spacer, VisibilityObserver } from '@sveltia/ui';
+  import { VisibilityObserver } from '@sveltia/ui';
   import { sleep } from '@sveltia/utils/misc';
-  import { getContext, onMount } from 'svelte';
+  import { onMount } from 'svelte';
   import { flip } from 'svelte/animate';
 
-  import ExpandIcon from '$lib/components/common/expand-icon.svelte';
   import RemoveButton from '$lib/components/common/remove-button.svelte';
   import ReorderControls from '$lib/components/common/reorder-controls.svelte';
   import CustomPreview from '$lib/components/contents/details/fields/custom/custom-preview.svelte';
-  import AddItemButton from '$lib/components/contents/details/fields/object/add-item-button.svelte';
+  import ListItemMenu from '$lib/components/contents/details/fields/list/list-item-menu.svelte';
+  import ListToolbar from '$lib/components/contents/details/fields/list/list-toolbar.svelte';
   import ObjectBody from '$lib/components/contents/details/fields/object/object-body.svelte';
   import ObjectHeader from '$lib/components/contents/details/fields/object/object-header.svelte';
+  import RemovedItemNotice from '$lib/components/contents/details/fields/object/removed-item-notice.svelte';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
-  import { updateListFieldForLocales } from '$lib/services/contents/draft/update/list';
   import { getFieldValueMapSnapshot } from '$lib/services/contents/draft/value-map.svelte';
-  import { isInEditorComponent } from '$lib/services/contents/editor/field-context';
-  import { isExpanded, syncExpanderStates } from '$lib/services/contents/editor/fields';
+  import {
+    getFieldEditorContext,
+    isInEditorComponent,
+  } from '$lib/services/contents/editor/field-context';
+  import { isExpanded } from '$lib/services/contents/editor/fields';
   import { getMemoizedSubtree } from '$lib/services/contents/entry/subtree';
   import { getCustomFieldSummary } from '$lib/services/contents/fields/custom/preview';
+  import {
+    createListActions,
+    LIST_RENDER_DELAY,
+  } from '$lib/services/contents/fields/list/actions.svelte';
   import {
     formatSummary,
     getListFieldInfo,
     getListItemKey,
     isPairedList,
     isSingleItemList,
-    tagListItems,
   } from '$lib/services/contents/fields/list/helpers';
-  import {
-    createListItem,
-    getInitialListExpanderStates,
-  } from '$lib/services/contents/fields/list/items';
+  import { createRemovedItemsState } from '$lib/services/contents/fields/list/removed-items-state.svelte';
   import {
     getTypedSubKeyPath,
     resolveVariableType,
@@ -45,17 +48,16 @@
   } from '$lib/services/contents/fields/object/helpers';
   import { getDraftObjectThumbnail } from '$lib/services/contents/fields/object/thumbnail';
   import { isFieldTranslatable } from '$lib/services/contents/i18n/fields';
-  import { focusAfterRemoval } from '$lib/services/utils/drag-sorting';
+  import { getFieldLabel, getLocalizedOption } from '$lib/services/contents/i18n/options';
+  import { isSyncedField } from '$lib/services/contents/i18n/shared-values';
   import { createDragSorter } from '$lib/services/utils/drag-sorting.svelte';
   import { createStableDerivedState } from '$lib/services/utils/state.svelte';
 
   /**
    * @import { SubtreeMemo } from '$lib/services/contents/entry/subtree';
    * @import {
-   * ExpanderStateList,
-   * FieldEditorContext,
    * FieldEditorProps,
-   * InternalLocaleCode,
+   * FlattenedEntryContent,
    * MediaFieldSource,
    * } from '$lib/types/private';
    * @import {
@@ -77,14 +79,11 @@
 
   const entryDraft = getEntryDraftContext();
 
-  /** @type {FieldEditorContext} */
-  const { valueStoreKey = 'currentValues', parentComponentNames = [] } =
-    getContext('field-editor') ?? {};
+  const { valueStoreKey = 'currentValues', parentComponentNames = [] } = getFieldEditorContext();
   const componentName = parentComponentNames.at(-1);
 
   /** @type {FieldEditorProps & Props} */
   let {
-    /* eslint-disable prefer-const */
     locale,
     keyPath,
     typedKeyPath,
@@ -92,28 +91,27 @@
     required = true,
     readonly = false,
     summaryId,
-    /* eslint-enable prefer-const */
   } = $props();
 
   const fieldId = $props.id();
 
   const {
     name: fieldName,
-    label,
     i18n,
     // Field type-specific options
     allow_add: allowAdd = true,
     allow_remove: allowRemove = true,
     allow_duplicate: allowDuplicate = true,
     allow_reorder: allowReorder = true,
-    collapsed,
     summary,
     thumbnail: thumbnailFieldName,
-    minimize_collapsed: minimizeCollapsed = false,
-    label_singular: labelSingular,
     max = Infinity,
     add_to_top: addToTop = false,
   } = $derived(/** @type {ComplexListField} */ (fieldConfig));
+  const label = $derived(getLocalizedOption({ config: fieldConfig, option: 'label', locale }));
+  const labelSingular = $derived(
+    getLocalizedOption({ config: fieldConfig, option: 'label_singular', locale }),
+  );
   const { field } = $derived(/** @type {ListFieldWithSubField} */ (fieldConfig));
   const { fields } = $derived(/** @type {ListFieldWithSubFields} */ (fieldConfig));
   const { types, typeKey = 'type' } = $derived(/** @type {ListFieldWithTypes} */ (fieldConfig));
@@ -162,6 +160,16 @@
   const valueMap = $derived(
     getFieldValueMapSnapshot(entryDraft.current, locale, keyPath, valueStoreKey),
   );
+  // A list using the `sync` i18n strategy, with its own option or along with an ancestor, is kept
+  // the same in every locale while it can be edited in any of them, subfields included
+  const synced = $derived(
+    !inEditorComponent &&
+      locale !== defaultLocale &&
+      isSyncedField({
+        fieldConfig,
+        getFieldArgs: { collectionName, fileName, isIndexFile, keyPath, valueMap },
+      }),
+  );
   const parentExpandedKeyPath = $derived(`${keyPath}#`);
   /**
    * What the items were last assembled from, so they’re only assembled again once they’ve changed.
@@ -184,7 +192,7 @@
     items.map((_item, index) => {
       const key = `${keyPath}.${index}`;
 
-      return [key, isExpanded(entryDraft.current, key)];
+      return /** @type {[string, boolean]} */ ([key, isExpanded(entryDraft.current, key)]);
     }),
   );
   /**
@@ -206,212 +214,85 @@
   const hasEditableSubFields = $derived(
     locale === defaultLocale ||
       inEditorComponent ||
+      synced ||
       allSubFields.some(({ i18n: subI18n }) => isFieldTranslatable(subI18n)),
   );
   const isAddDisabled = $derived(isLocked || !hasEditableSubFields);
+  const showReorderControls = $derived(allowReorder && !singleItem);
+  const isReorderDisabled = $derived(isLocked || items.length < 2);
+
+  /* eslint-disable jsdoc/require-jsdoc */
+  const removedItems = createRemovedItemsState({
+    getLocale: () => locale,
+    getItemKeys: () => itemKeys.current,
+  });
+  /* eslint-enable jsdoc/require-jsdoc */
 
   /**
    * @type {HTMLElement | undefined}
    */
   let itemList = $state();
-
   /**
-   * Update the expander states of the list and its items.
-   * @param {Record<string, boolean>} stateMap Map of key path and state.
+   * @type {HTMLElement | undefined}
    */
-  const updateExpanderStates = (stateMap) => {
-    // The controls are disabled once the draft is gone, so this is only a race with the editor
-    // closing
-    /* v8 ignore next 3 */
-    if (!entryDraft.current) {
-      return;
-    }
-
-    syncExpanderStates({ draft: entryDraft.current, stateMap });
-  };
-
-  /**
-   * Initialize the expander state.
-   */
-  const initializeExpanderState = () => {
-    const draft = entryDraft.current;
-
-    // The editor is mounted with a draft; this is only a race with the editor closing
-    /* v8 ignore next 3 */
-    if (!draft) {
-      return;
-    }
-
-    updateExpanderStates(
-      getInitialListExpanderStates({
-        draft,
-        keyPath,
-        itemCount: items.length,
-        locale,
-        collapsed,
-        minimizeCollapsed,
-      }),
-    );
-  };
-
-  /**
-   * Update the value for the List field with subfield(s).
-   * @param {(arg: {
-   * valueList: any[], expanderStateList: ExpanderStateList, locale: InternalLocaleCode
-   * }) => void} manipulate See {@link updateListFieldForLocales}.
-   */
-  const updateComplexList = (manipulate) => {
-    const draft = entryDraft.current;
-
-    // The items are gone along with the draft, so this is only a race with the editor closing
-    /* v8 ignore next 3 */
-    if (!draft) {
-      return;
-    }
-
-    updateListFieldForLocales({
-      draft,
+  let topToolbar = $state();
+  /* eslint-disable jsdoc/require-jsdoc */
+  const listActions = createListActions({
+    entryDraft,
+    fieldId,
+    valueStoreKey,
+    componentName,
+    inEditorComponent,
+    removedItems,
+    resolveType,
+    getListState: () => ({
       locale,
-      i18n,
-      pairedItems,
-      valueStoreKey,
       keyPath,
-      manipulate,
-    });
-  };
+      typedKeyPath,
+      fieldConfig,
+      pairedItems,
+    }),
+    getItemCount: () => items.length,
+    getListElement: () => itemList,
+    getTopToolbar: () => topToolbar,
+  });
+  /* eslint-enable jsdoc/require-jsdoc */
+
+  const {
+    updateExpanderStates,
+    initializeExpanderStates,
+    addItem,
+    copyItem,
+    pasteItem,
+    removeItem,
+    restoreItem,
+    moveItem,
+  } = listActions;
 
   /**
-   * Get the list item element at the specified index.
-   * @param {number} index Target index.
-   * @returns {HTMLElement | undefined} List item element.
+   * Get the values to summarize a list item with. Called from the item’s markup, this only depends
+   * on the item’s own values, so typing in one item doesn’t make every collapsed item work out its
+   * summary and thumbnail again; a summary only ever reads the values of its item.
+   * @param {number} index List index.
+   * @returns {FlattenedEntryContent} Entry values.
    */
-  const getItem = (index) => /** @type {HTMLElement} */ (itemList?.children[index]);
-
-  /**
-   * Add a new subfield to the list.
-   * @param {object} [args] Arguments.
-   * @param {number} [args.index] List index where a new item will be inserted.
-   * @param {number} [args.dupIndex] List index of an item to be duplicated.
-   * @param {string} [args.type] Variable type name. If the field doesn’t have variable types, it
-   * will be `undefined`.
-   */
-  const addItem = async ({ index = addToTop ? 0 : items.length, dupIndex, type } = {}) => {
-    const draft = entryDraft.current;
-
-    // The controls are disabled once the draft is gone, so this is only a race with the editor
-    // closing
-    /* v8 ignore next 3 */
-    if (!draft) {
-      return;
-    }
-
-    // Shared by the locales, so a duplicated UUID that is the same in each gets the same new one
-    /** @type {Map<string, string>} */
-    const renewedUuids = new Map();
-
-    updateComplexList(({ valueList, expanderStateList, locale: targetLocale }) => {
-      const { subFields } = resolveType(type);
-
-      const newItem = createListItem({
-        valueList,
-        keyPath,
-        dupIndex,
-        subFields,
-        hasSingleSubField,
-        field,
-        type,
-        types,
-        typeKey,
-        renewedUuids,
-        locale: targetLocale,
-        defaultLocale: inEditorComponent ? targetLocale : draft.defaultLocale,
-      });
-
-      valueList.splice(index, 0, newItem);
-      expanderStateList.splice(index, 0, true);
-    });
-
-    // Expand the parent if it is collapsed to show the newly added item
-    updateExpanderStates({ [parentExpandedKeyPath]: true });
-
-    await sleep(50);
-    // Move the placeholder into view
-    getItem(index)?.scrollIntoView();
-    // Wait until the placeholder is replaced with the actual content
-    await sleep(100);
-    // Scroll again for the sticky toolbar
-    itemList?.closest('.content')?.scrollBy({ top: -50, behavior: 'instant' });
-    // Move focus to the expander button
-    getItem(index)?.querySelector('button')?.focus();
-  };
-
-  /**
-   * Remove a subfield.
-   * @param {number} index Target index.
-   */
-  const removeItem = async (index) => {
-    updateComplexList(({ valueList, expanderStateList }) => {
-      if (!hasSingleSubField) {
-        // Track original key paths for existing items before they shift due to the removal
-        tagListItems(valueList, keyPath);
-      }
-
-      valueList.splice(index, 1);
-      expanderStateList.splice(index, 1);
-    });
-
-    await sleep(50);
-    // Move focus to the expander button of the item now at the same position, the previous item if
-    // the last one was removed, or the list’s own button if no item is left
-    focusAfterRemoval({
-      index,
-      /**
-       * Get the expander button of an item.
-       * @param {number} _index Item index.
-       * @returns {HTMLButtonElement | null | undefined} Button.
-       */
-      getTarget: (_index) => getItem(_index)?.querySelector('button'),
-      /**
-       * Focus the list’s own button.
-       */
-      fallback: () => {
-        itemList?.closest('[role="group"]')?.querySelector('button')?.focus();
-      },
-    });
-  };
-
-  /**
-   * Move a subfield to another position in the list.
-   * @param {number} from Source index.
-   * @param {number} to Destination index.
-   */
-  const moveItem = (from, to) => {
-    updateComplexList(({ valueList, expanderStateList }) => {
-      if (!hasSingleSubField) {
-        // Ensure the IDs are unique before reordering, so that the `each` block below keeps
-        // following each item rather than its position, and track original key paths for correct
-        // revert after reordering
-        tagListItems(valueList, keyPath, { assignIds: true });
-      }
-
-      valueList.splice(to, 0, ...valueList.splice(from, 1));
-      // The expander states are only manipulated with the default locale, so this list may be empty
-      expanderStateList.splice(to, 0, ...expanderStateList.splice(from, 1));
-    });
-  };
+  const getItemValueMap = (index) =>
+    getFieldValueMapSnapshot(entryDraft.current, locale, `${keyPath}.${index}`, valueStoreKey);
 
   /**
    * Format the summary template.
    * @param {number} index List index.
    * @param {string} [summaryTemplate] Summary template, e.g. `{{fields.slug}}`.
+   * @param {FlattenedEntryContent} [itemValueMap] Entry values to read the item’s values from.
+   * Defaults to those of the whole list.
    * @returns {string} Formatted summary.
    */
-  const _formatSummary = (index, summaryTemplate) =>
+  const _formatSummary = (index, summaryTemplate, itemValueMap = valueMap) =>
     formatSummary({
       collectionName,
       fileName,
       keyPath,
-      valueMap,
+      valueMap: itemValueMap,
       locale,
       summaryTemplate,
       hasSingleSubField,
@@ -445,7 +326,15 @@
      * Wait for the moved item to be rendered in its new position.
      * @returns {Promise<void>} Promise.
      */
-    settle: () => sleep(50),
+    settle: () => sleep(LIST_RENDER_DELAY),
+    /**
+     * Get the bounding rectangle of the item in a wrapper, leaving out the removed items shown
+     * before it.
+     * @param {HTMLElement} element Item wrapper.
+     * @returns {DOMRect} Rectangle.
+     */
+    getItemRect: (element) =>
+      /** @type {Element} */ (element.lastElementChild).getBoundingClientRect(),
   });
 
   /**
@@ -463,7 +352,7 @@
       type,
       hasSingleSubField,
       componentName,
-      valueMap,
+      valueMap: getItemValueMap(index),
       locale,
     });
 
@@ -490,28 +379,43 @@
     });
   };
 
+  /** The props the top and bottom toolbars share. */
+  const toolbarProps = $derived({
+    fieldId,
+    summaryId,
+    fieldConfig,
+    locale,
+    items,
+    fieldName,
+    label,
+    labelSingular,
+    singleItem,
+    parentExpanded,
+    parentExpandedKeyPath,
+    itemExpanderStates,
+    allowAdd,
+    addToTop,
+    isAddDisabled,
+    hasMaxItems,
+    addItem,
+    pasteItem,
+    updateExpanderStates,
+  });
+
   onMount(() => {
-    initializeExpanderState();
+    initializeExpanderStates();
     warnUnknownTypes();
   });
 </script>
 
-{#snippet addPositionItems(/** @type {number} */ insertIndex, /** @type {string} */ position)}
-  {#if hasVariableTypes}
-    <MenuItem label={_(`add_item_${position}`)}>
-      <!-- eslint-disable-next-line no-shadow -->
-      {#snippet items()}
-        {#each variableTypes as { name, label: itemLabel } (name)}
-          <MenuItem
-            label={itemLabel || name}
-            onclick={() => addItem({ index: insertIndex, type: name })}
-          />
-        {/each}
-      {/snippet}
-    </MenuItem>
-  {:else}
-    <MenuItem label={_(`add_item_${position}`)} onclick={() => addItem({ index: insertIndex })} />
-  {/if}
+{#snippet removedItemNotices(/** @type {number} */ index)}
+  {#each removedItems.byIndex.get(index) ?? [] as removedItem (removedItem.id)}
+    <RemovedItemNotice
+      id="list-{fieldId}-restore-{removedItem.id}"
+      disabled={isLocked || hasMaxItems}
+      onRestore={() => restoreItem(removedItem)}
+    />
+  {/each}
 {/snippet}
 
 {#if singleItem}
@@ -519,50 +423,7 @@
   <div role="none" id={summaryId} hidden>{labelSingular || label || fieldName}</div>
 {/if}
 {#if !singleItem || !items.length}
-  <div role="none" class="toolbar top" class:single={singleItem}>
-    {#if !singleItem}
-      <div role="none" class="label">
-        <Button
-          iconic
-          disabled={!items.length}
-          aria-label={parentExpanded ? _('collapse') : _('expand')}
-          aria-expanded={parentExpanded}
-          aria-controls="list-{fieldId}-item-list"
-          onclick={() => {
-            updateExpanderStates({ [parentExpandedKeyPath]: !parentExpanded });
-          }}
-        >
-          {#snippet startIcon()}
-            <ExpandIcon expanded={parentExpanded} />
-          {/snippet}
-        </Button>
-        <div role="none" class="summary" id={summaryId}>
-          {items.length}
-          {(items.length === 1 ? labelSingular : undefined) || label || fieldName}
-        </div>
-      </div>
-    {/if}
-    <div role="none" class="actions">
-      {#if allowAdd && (addToTop || !items.length || !parentExpanded)}
-        <AddItemButton disabled={isAddDisabled} {fieldConfig} {items} {addItem} />
-      {/if}
-      {#if parentExpanded && items.length > 1}
-        {#each [true, false] as expanded (expanded)}
-          <Button
-            variant="tertiary"
-            size="small"
-            label={_(expanded ? 'expand_all' : 'collapse_all')}
-            disabled={itemExpanderStates.every(([, value]) => value === expanded)}
-            onclick={() => {
-              updateExpanderStates(
-                Object.fromEntries(itemExpanderStates.map(([key]) => [key, expanded])),
-              );
-            }}
-          />
-        {/each}
-      {/if}
-    </div>
-  </div>
+  <ListToolbar position="top" bind:element={topToolbar} {...toolbarProps} />
 {/if}
 <div
   role="none"
@@ -570,8 +431,7 @@
   class="item-list"
   class:collapsed={!parentExpanded}
   bind:this={itemList}
-  ondragovercapture={sorter.onDragOver}
-  ondropcapture={sorter.onDrop}
+  {...sorter.listProps}
 >
   <!-- The display index is the position on screen, which follows a drag preview as well -->
   {#each sorter.displayOrder as index, displayIndex (itemKeys.current[index])}
@@ -581,11 +441,14 @@
       level of a keyed `each` block, and the item itself sits inside `VisibilityObserver`.
     -->
     <div role="none" class="item-wrapper" animate:flip={{ duration: 200 }}>
-      <VisibilityObserver>
+      <!-- The items removed from this position are shown before the item now there -->
+      {@render removedItemNotices(displayIndex)}
+      <VisibilityObserver eager={index === listActions.addedItemIndex}>
         {@const itemKeyPath = `${keyPath}.${index}`}
         {@const type = hasVariableTypes ? item[typeKey] : undefined}
         {@const { typeConfig, unknownType, subFields, summaryTemplate } = resolveType(type)}
         {@const expanded = isExpanded(entryDraft.current, itemKeyPath)}
+        {@const reorderControlProps = sorter.reorderControlProps(index)}
         <div
           role="group"
           aria-label={singleItem
@@ -594,70 +457,63 @@
                 values: { position: displayIndex + 1, count: items.length },
               })}
           class="item"
-          class:unknown-type={unknownType}
-          class:dragging={sorter.dragIndex === index}
+          class:object-unknown-type={unknownType}
+          class:drag-placeholder={sorter.dragIndex === index}
           {...sorter.itemProps(index, {
             // A nested sortable list starts its own drag; the event just bubbles through here
             ownEventsOnly: true,
           })}
         >
           <ObjectHeader
-            label={hasVariableTypes ? typeConfig?.label || typeConfig?.name : ''}
+            label={hasVariableTypes && typeConfig
+              ? getFieldLabel({ config: typeConfig, locale })
+              : ''}
             position={singleItem ? undefined : displayIndex + 1}
             controlId="list-{fieldId}-item-{index}-body"
             {expanded}
-            toggleExpanded={subFields.length
-              ? () => updateExpanderStates({ [itemKeyPath]: !expanded })
-              : undefined}
+            expandable={subFields.length > 0}
+            toggleExpanded={() => updateExpanderStates({ [itemKeyPath]: !expanded })}
           >
             {#snippet centerContent()}
-              {#if allowReorder && !singleItem}
+              {#if showReorderControls}
                 <ReorderControls
                   {index}
                   itemCount={items.length}
-                  disabled={isLocked || items.length < 2}
+                  disabled={isReorderDisabled}
                   icon="drag_handle"
                   part="handle"
-                  onGrab={() => sorter.grab(index)}
-                  onRelease={sorter.release}
-                  onMove={(to, action) => sorter.move(index, to, action)}
+                  {...reorderControlProps}
                 />
               {/if}
             {/snippet}
             {#snippet endContent()}
-              {#if allowReorder && !singleItem}
+              {#if showReorderControls}
                 <ReorderControls
                   {index}
                   itemCount={items.length}
-                  disabled={isLocked || items.length < 2}
+                  disabled={isReorderDisabled}
                   part="buttons"
-                  onMove={(to, action) => sorter.move(index, to, action)}
+                  menu={false}
+                  onMove={reorderControlProps.onMove}
                 />
               {/if}
-              {#if allowAdd && !hasMaxItems}
-                <MenuButton
-                  variant="ghost"
-                  size="small"
-                  iconic
-                  popupPosition="bottom-right"
-                  aria-label={_('list_item_options')}
-                  disabled={isAddDisabled}
-                >
-                  {#snippet popup()}
-                    <Menu ariaLabel={_('list_item_options')}>
-                      {#if allowDuplicate}
-                        <MenuItem
-                          label={_('duplicate')}
-                          disabled={unknownType}
-                          onclick={() => addItem({ index: index + 1, dupIndex: index })}
-                        />
-                      {/if}
-                      {@render addPositionItems(index, 'above')}
-                      {@render addPositionItems(index + 1, 'below')}
-                    </Menu>
-                  {/snippet}
-                </MenuButton>
-              {/if}
+              <ListItemMenu
+                {index}
+                {locale}
+                variableTypes={hasVariableTypes ? variableTypes : undefined}
+                {unknownType}
+                {allowAdd}
+                {allowRemove}
+                {allowDuplicate}
+                {hasMaxItems}
+                {isAddDisabled}
+                itemCount={items.length}
+                canReorder={showReorderControls && !isLocked}
+                moveItem={reorderControlProps.onMove}
+                {copyItem}
+                {pasteItem}
+                {addItem}
+              />
               {#if canRemoveItem}
                 <RemoveButton
                   variant="ghost"
@@ -694,7 +550,9 @@
               })}
               {expanded}
               {unknownType}
-              getSummary={() => _formatSummary(index, summaryTemplate)}
+              {typeConfig}
+              {readonly}
+              getSummary={() => _formatSummary(index, summaryTemplate, getItemValueMap(index))}
               getThumbnail={() => getThumbnail(index, type)}
               summaryContent={customSummary ? customSummaryContent : undefined}
             />
@@ -704,49 +562,17 @@
     </div>
   {/each}
 </div>
-{#if allowAdd && !addToTop && items.length && parentExpanded && !hasMaxItems}
-  <div role="none" class="toolbar bottom add">
-    <Spacer flex />
-    <AddItemButton disabled={isAddDisabled} {fieldConfig} {items} {addItem} />
+{#if removedItems.byIndex.has(items.length) && (parentExpanded || !items.length)}
+  <!-- The items removed from the end of the list -->
+  <div role="none" class="removed-item-list">
+    {@render removedItemNotices(items.length)}
   </div>
+{/if}
+{#if allowAdd && !addToTop && items.length && parentExpanded && !hasMaxItems}
+  <ListToolbar position="bottom" {...toolbarProps} />
 {/if}
 
 <style>
-  .toolbar {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 0 8px;
-    position: sticky;
-    z-index: 10;
-    background-color: var(--sui-primary-background-color);
-    min-height: var(--sui-secondary-toolbar-size);
-
-    &.top {
-      top: 0;
-    }
-
-    &.bottom {
-      bottom: 0;
-    }
-
-    & > div {
-      display: flex;
-      align-items: center;
-
-      &.actions {
-        flex-wrap: wrap;
-        margin-block: 8px;
-        margin-inline-start: auto;
-      }
-    }
-
-    &.single > div.actions {
-      /* With no item count on the left, the Add button goes where the item would be */
-      margin-inline-start: 0;
-    }
-  }
-
   .item-list {
     display: flex;
     flex-direction: column;
@@ -757,6 +583,17 @@
     }
   }
 
+  .item-wrapper,
+  .removed-item-list {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .removed-item-list {
+    margin-block-start: 16px;
+  }
+
   .item {
     flex: none;
     position: relative;
@@ -764,23 +601,6 @@
     border-color: var(--sui-secondary-border-color);
     border-radius: var(--sui-control-medium-border-radius);
     background-color: var(--sui-primary-background-color); /* for dragging opacity */
-
-    &.unknown-type {
-      overflow: hidden;
-
-      :global(.alert) {
-        border-width: 0;
-        border-radius: 0;
-      }
-    }
-
-    /* The dragged item is left as a faint placeholder marking the gap it would drop into. The
-      pointer already carries the browser’s own drag image of it, so showing it twice at full
-      strength would just be confusing. */
-
-    &.dragging {
-      opacity: 0.25;
-    }
 
     /* Like the field menus, the buttons at the end of the header (Move Up/Down, options and
       remove) are shown on hover, and kept visible while a keyboard user is in the item, so the

@@ -8,6 +8,7 @@ import {
   COMPONENT_NAME_PREFIX_REGEX,
   stripComponentNamePrefix,
 } from '$lib/services/contents/fields/rich-text';
+import { getFieldLabel } from '$lib/services/contents/i18n/options';
 
 /**
  * @import { EntryDraft, EntryValidityState, InternalLocaleCode } from '$lib/types/private';
@@ -19,7 +20,6 @@ import {
  * MinMaxValueField,
  * StringField,
  * TextField,
- * VisibleField,
  * } from '$lib/types/public';
  */
 
@@ -157,6 +157,14 @@ export const getFieldValidationMessages = ({ validity, fieldConfig }) => {
     messages.push(_('validation.value_not_unique'));
   }
 
+  if (validity.mapKeyDuplicate) {
+    messages.push(_('validation.key_not_unique'));
+  }
+
+  if (validity.mapKeyNumeric) {
+    messages.push(_('validation.key_numeric'));
+  }
+
   if (validity.customError) {
     messages.push(validity.customErrorMessage ?? _('validation.invalid_value'));
   }
@@ -235,7 +243,7 @@ export const getInvalidFields = ({ draft, locale }) => {
 
         return {
           keyPath,
-          label: /** @type {VisibleField | undefined} */ (field)?.label || field?.name || '',
+          label: field ? getFieldLabel({ config: field, locale }) : '',
           messages,
         };
       })

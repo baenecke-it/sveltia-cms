@@ -2,9 +2,10 @@
  * Simple regex to check if a string contains template tags. This can be used for a quick check
  * before performing more expensive operations like regex replacement. The `g` flag should not be
  * used here because we only need to know if at least one match exists, and using `test()` with a
- * global regex can lead to unexpected results due to the internal state of the regex engine.
+ * global regex can lead to unexpected results due to the internal state of the regex engine. A tag
+ * escaped with a backslash, e.g. `\{{title}}`, isn’t matched; see `replaceTemplateTags()`.
  */
-export const TEMPLATE_TAG_REGEX = /{{(.+?)}}/;
+export const TEMPLATE_TAG_REGEX = /(?<!\\){{(.+?)}}/;
 
 /**
  * Regex to match and replace template tags like {{slug}}.
@@ -12,9 +13,10 @@ export const TEMPLATE_TAG_REGEX = /{{(.+?)}}/;
 export const TEMPLATE_TAG_REPLACE_REGEX = new RegExp(TEMPLATE_TAG_REGEX.source, 'g');
 
 /**
- * Regex to match escaped `{{variable}}` placeholders.
+ * Placeholder standing in for a template tag in the literal text of a template; see
+ * `splitTemplateTags()`. It can’t appear in a template.
  */
-export const ESCAPED_PLACEHOLDER_REGEX = /\\\{\\\{.+?\\\}\\\}/g;
+export const TAG_PLACEHOLDER = '\0';
 
 /**
  * Date-time field names that are supported as template tags.
@@ -40,11 +42,16 @@ export const FIELD_TAG_PREFIX_REGEX = /^fields\./;
 export const DEFAULT_TRANSFORMATION_REGEX = /\|\s*default\s*\(/;
 
 /**
- * UUID generator functions mapped by tag name.
- * Note: Functions are called dynamically to generate UUIDs on demand.
+ * UUID tags, keyed by tag name, with the length argument of `generateUUID()` from
+ * `@sveltia/utils/crypto` for each one and the source of a regular expression matching the value it
+ * generates.
+ * @type {Record<string, { length: 'short' | 'shorter' | undefined, pattern: string }>}
  */
 export const UUID_TYPES = {
-  uuid: 'uuid',
-  uuid_short: 'uuid_short',
-  uuid_shorter: 'uuid_shorter',
+  uuid: {
+    length: undefined,
+    pattern: '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+  },
+  uuid_short: { length: 'short', pattern: '[0-9a-f]{12}' },
+  uuid_shorter: { length: 'shorter', pattern: '[0-9a-f]{8}' },
 };

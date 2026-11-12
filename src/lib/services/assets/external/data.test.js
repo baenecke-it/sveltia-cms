@@ -67,6 +67,10 @@ vi.mock('$lib/services/config', () => ({
   cmsConfig: { current: undefined },
 }));
 
+vi.mock('$lib/services/contents/draft/slugs', () => ({
+  getSlugs: vi.fn(() => ({ defaultLocaleSlug: 'hello' })),
+}));
+
 /**
  * Create a test asset.
  * @param {string} id Asset ID.
@@ -311,6 +315,46 @@ describe('assets/external/data', () => {
 
       expect(processFile).toHaveBeenCalledWith(file, options, {
         nameTemplate: '{{filename}}-{{uuid_short}}',
+      });
+    });
+
+    it('should fill the file name template with the values of the entry draft', async () => {
+      const file = new File(['x'], 'ok.png', { type: 'image/png' });
+      const options = { filename_template: 'guestpic{{release}}' };
+      const content = { release: 521 };
+      const collection = { name: 'posts' };
+
+      const draft = /** @type {any} */ ({
+        collection,
+        fileName: undefined,
+        isIndexFile: false,
+        defaultLocale: 'en',
+        currentValues: { en: content, fr: {} },
+      });
+
+      await prepareExternalUploads([file], options, { draft });
+
+      expect(processFile).toHaveBeenCalledWith(file, options, {
+        nameTemplate: 'guestpic{{release}}',
+        nameContext: {
+          collection,
+          collectionFileName: undefined,
+          content,
+          slug: 'hello',
+          isIndexFile: false,
+        },
+      });
+    });
+
+    it('should work out no entry values without a file name template', async () => {
+      const file = new File(['x'], 'ok.png', { type: 'image/png' });
+      const options = {};
+
+      await prepareExternalUploads([file], options, { draft: /** @type {any} */ ({}) });
+
+      expect(processFile).toHaveBeenCalledWith(file, options, {
+        nameTemplate: undefined,
+        nameContext: undefined,
       });
     });
 
@@ -589,6 +633,16 @@ describe('assets/external/data', () => {
       expect(focusedExternalSubfolder.current).toEqual({ name: '2024', path: '2024' });
     });
 
+    it('should refuse to rename a folder onto an existing one', async () => {
+      // `other` is an empty folder kept by a placeholder, and `2024` holds files
+      expect(await renameExternalFolder({ name: '2024', path: '2024' }, 'other')).toBe(false);
+      expect(await renameExternalFolder({ name: 'other', path: 'other' }, '2024')).toBe(false);
+      expect(service.move).not.toHaveBeenCalled();
+      expect(service.createFolder).not.toHaveBeenCalled();
+      expect(service.deleteFolder).not.toHaveBeenCalled();
+      expect(externalAssetsToast.current.message).toBe('renaming_folder_failed');
+    });
+
     it('should report a failure to rename a folder and reload the list', async () => {
       vi.mocked(service.move).mockRejectedValue(new Error('denied'));
 
@@ -635,10 +689,12 @@ describe('assets/external/data', () => {
       const unlisted = { ...createAsset('2024/unlisted.png'), fileName: 'unlisted.png' };
 
       beforeEach(() => {
-        service.listFolder = vi.fn(async () => ({
-          assets: [spring, nested, unlisted],
-          folders: ['2024/empty', '2024/unlisted-empty'],
-        }));
+        // Only the folder being renamed or deleted holds anything
+        service.listFolder = vi.fn(async (dirPath) =>
+          dirPath === '2024'
+            ? { assets: [spring, nested, unlisted], folders: ['2024/empty', '2024/unlisted-empty'] }
+            : { assets: [], folders: [] },
+        );
       });
 
       it('should rename every file below the folder, listed or not', async () => {
@@ -649,6 +705,31 @@ describe('assets/external/data', () => {
         expect(service.move).toHaveBeenCalledWith(unlisted, '2025/unlisted.png', fetchOptions);
         expect(service.createFolder).toHaveBeenCalledWith('2025/unlisted-empty', fetchOptions);
         expect(service.deleteFolder).toHaveBeenCalledWith('2024/unlisted-empty', fetchOptions);
+      });
+
+      it('should refuse to rename a folder onto an existing one the list left out', async () => {
+        // A file or an empty folder kept by a placeholder at the destination, which the list the
+        // new name was picked against doesn’t have
+        const existing = { ...createAsset('2025/x.png'), fileName: 'x.png' };
+
+        vi.mocked(service.listFolder).mockImplementation(async (/** @type {string} */ dirPath) =>
+          dirPath === '2025'
+            ? { assets: [existing], folders: [] }
+            : { assets: [spring], folders: dirPath === 'else' ? ['else'] : [] },
+        );
+
+        expect(await renameExternalFolder({ name: '2024', path: '2024' }, '2025')).toBe(false);
+        expect(service.listFolder).toHaveBeenCalledWith('2025', fetchOptions);
+        expect(externalAssetsToast.current.message).toBe('renaming_folder_failed');
+
+        expect(await renameExternalFolder({ name: '2024', path: '2024' }, 'else')).toBe(false);
+        expect(service.listFolder).toHaveBeenCalledWith('else', fetchOptions);
+
+        expect(service.move).not.toHaveBeenCalled();
+        expect(service.createFolder).not.toHaveBeenCalled();
+        expect(service.deleteFolder).not.toHaveBeenCalled();
+        // The list is reloaded either way
+        expect(service.browse).toHaveBeenCalledTimes(2);
       });
 
       it('should delete every file below the folder, listed or not', async () => {

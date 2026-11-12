@@ -10,8 +10,10 @@ import {
   createSyntheticDraft,
 } from '$lib/services/contents/entry/changes';
 import { getListItemKeys } from '$lib/services/contents/entry/key-paths';
+import { refreshPermalinks } from '$lib/services/contents/entry/permalink';
 import { isEntryReadonly } from '$lib/services/contents/entry/readonly';
 import { getEntrySummary } from '$lib/services/contents/entry/summary';
+import { getFieldLabel } from '$lib/services/contents/i18n/options';
 
 /**
  * @import { IndexedDB } from '@sveltia/utils/storage';
@@ -27,11 +29,6 @@ import { getEntrySummary } from '$lib/services/contents/entry/summary';
  * } from '$lib/types/private';
  * @import { Field, FieldKeyPath } from '$lib/types/public';
  */
-
-/**
- * Matches the index suffix of a multi-value field’s item key path, e.g. `.1` in `tags.1`.
- */
-export const ITEM_INDEX_SUFFIX_REGEX = /\.\d+$/;
 
 /**
  * Remove some items from a multi-value field, which stores each of its values under its own index,
@@ -127,7 +124,7 @@ export const getFieldBlockers = ({
       /** @type {CascadeDeleteBlocker} */ ({
         collectionName,
         collectionLabel: collection.label || collectionName,
-        fieldLabel: fieldConfig.label || fieldConfig.name,
+        fieldLabel: getFieldLabel({ config: fieldConfig }),
         entry,
         summary: getEntrySummary(collection, entry),
         locale,
@@ -177,17 +174,25 @@ export const buildTargetChanges = async ({ targets, cacheDB }) => {
 
   const db = resolveCacheDB(cacheDB);
 
+  const savingTargets = targets.map(({ entry, collection, collectionFile }) => {
+    const isIndexFile = isCollectionIndexFile(collection, entry);
+
+    return {
+      collection,
+      collectionFile,
+      isIndexFile,
+      // A field referenced by the `preview_path` option may have changed
+      entry: refreshPermalinks({ collection, isIndexFile, entry }),
+    };
+  });
+
   const perEntryChanges = await Promise.all(
-    targets.map(({ entry, collection, collectionFile }) =>
+    savingTargets.map(({ entry, collection, collectionFile, isIndexFile }) =>
       buildEntryUpdateChanges({
         collection,
         collectionFile,
         entry,
-        draft: createSyntheticDraft({
-          collection,
-          collectionFile,
-          isIndexFile: isCollectionIndexFile(collection, entry),
-        }),
+        draft: createSyntheticDraft({ collection, collectionFile, isIndexFile }),
         cacheDB: db,
       }),
     ),
@@ -195,6 +200,6 @@ export const buildTargetChanges = async ({ targets, cacheDB }) => {
 
   return {
     changes: perEntryChanges.flat(),
-    savingEntries: targets.map(({ entry }) => entry),
+    savingEntries: savingTargets.map(({ entry }) => entry),
   };
 };

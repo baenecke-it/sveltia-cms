@@ -1,9 +1,21 @@
 import { createElement } from 'react';
-import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  onTestFinished,
+  test,
+  vi,
+} from 'vitest';
 import { page, userEvent } from 'vitest/browser';
 
 import { customFieldTypeRegistry } from '$lib/services/api/registries';
 import { globalAssetFolder } from '$lib/services/assets/folders';
+import { listItemClipboardToast } from '$lib/services/contents/editor';
+import { resetCopiedListItem } from '$lib/services/contents/fields/list/clipboard';
 import { env } from '$lib/services/user/env.svelte';
 import { createMockAsset, createMockImageFile, initTestConfig, setAssets } from '$lib/test/config';
 import { createMockDraft, renderWithDraft } from '$lib/test/draft';
@@ -129,6 +141,33 @@ describe('ListEditorComplex', () => {
       .toEqual([{ name: 'Melvin' }, { name: 'Anonymous', role: '' }]);
   });
 
+  test('scrolls an item added out of view into view, moving focus to it', async () => {
+    await renderEditor(
+      authorsField,
+      Object.fromEntries(Array.from({ length: 30 }, (_, index) => [`authors.${index}.name`, 'a'])),
+    );
+
+    // Scroll instantly like the editor pane, which the item is followed in as the items above it
+    // grow, once their fields come into view
+    document.documentElement.style.scrollBehavior = 'auto';
+    onTestFinished(() => {
+      document.documentElement.style.scrollBehavior = '';
+    });
+    // Click the button without scrolling to it, as a sticky one is clicked, so the item is added
+    // far below the fold, past the items that aren’t rendered yet either
+    window.scrollTo({ top: 0 });
+    /** @type {HTMLElement} */ (
+      page.getByRole('button', { name: /Add\W+Author/ }).element()
+    ).click();
+
+    const expander = page
+      .getByRole('group', { name: 'Item 31 of 31' })
+      .getByRole('button', { name: 'Collapse' });
+
+    await expect.element(expander).toHaveFocus();
+    await expect.element(expander).toBeInViewport();
+  });
+
   test('duplicates and removes an item', async () => {
     const { draft } = await renderEditor(authorsField, {
       'authors.0.name': 'Melvin',
@@ -150,35 +189,193 @@ describe('ListEditorComplex', () => {
       .toEqual([{ name: 'Melvin', role: 'Editor' }]);
   });
 
-  test('moves focus to the next item, or the previous one, after removing an item', async () => {
-    const { draft, container } = await renderEditor(authorsField, {
-      'authors.0.name': 'Melvin',
-      'authors.1.name': 'Elsie',
-      'authors.2.name': 'Sarah',
-    });
+  describe('restoring a removed item', () => {
+    /**
+     * Get the names of the items stored in the draft.
+     * @param {any} draft Draft.
+     * @returns {string[]} Names.
+     */
+    const getNames = (draft) => getStoredItems(draft, 'authors').map(({ name }) => name);
 
     /**
-     * Get the expander button of the item at the given position.
-     * @param {number} index Item index.
-     * @returns {HTMLButtonElement | null | undefined} Button.
+     * Get what the list shows, in order: the name of each item, or `removed` for a removed item.
+     * @param {HTMLElement} container Container.
+     * @returns {string[]} Names and removed items.
      */
-    const getExpander = (index) =>
-      container.querySelectorAll('.item-wrapper')[index]?.querySelector('button');
+    const getShownItems = (container) =>
+      [...container.querySelectorAll('.item, [role="status"]')].map((element) =>
+        element.matches('.item')
+          ? /** @type {HTMLInputElement} */ (element.querySelector('input')).value
+          : 'removed',
+      );
 
-    // Removing the middle item focuses the one that takes its place
-    await page.getByRole('button', { name: 'Remove' }).nth(1).click();
-    await expect
-      .poll(() => getStoredItems(draft, 'authors').map(({ name }) => name))
-      .toEqual(['Melvin', 'Sarah']);
-    await expect.poll(() => document.activeElement).toBe(getExpander(1));
+    const restoreButtons = page.getByRole('button', { name: 'Restore' });
 
-    // Removing the last item focuses the previous one
-    await page.getByRole('button', { name: 'Remove' }).nth(1).click();
-    await expect
-      .poll(() => getStoredItems(draft, 'authors').map(({ name }) => name))
-      .toEqual(['Melvin']);
-    await expect.poll(() => document.activeElement).toBe(getExpander(0));
-    expect(getExpander(0)).toBeInstanceOf(HTMLButtonElement);
+    test('shows a removed item with a Restore button that puts it back in place', async () => {
+      const { draft, container } = await renderEditor(authorsField, {
+        'authors.0.name': 'Melvin',
+        'authors.1.name': 'Elsie',
+        'authors.2.name': 'Sarah',
+      });
+
+      await page.getByRole('button', { name: 'Remove' }).nth(1).click();
+      await expect.poll(() => getNames(draft)).toEqual(['Melvin', 'Sarah']);
+      await expect.element(page.getByRole('status')).toMatchTextContent('Item removed.');
+      expect(getShownItems(container)).toEqual(['Melvin', 'removed', 'Sarah']);
+      // The focus moves to the Restore button, so the item can be restored right away
+      await expect.element(restoreButtons).toHaveFocus();
+
+      await restoreButtons.click();
+      await expect.poll(() => getNames(draft)).toEqual(['Melvin', 'Elsie', 'Sarah']);
+      expect(page.getByRole('status').elements()).toHaveLength(0);
+      // The focus moves to the expander button of the restored item
+      await expect
+        .poll(() => document.activeElement)
+        .toBe(container.querySelectorAll('.item')[1].querySelector('button'));
+    });
+
+    test('keeps the removed items in the order they were in', async () => {
+      const { draft, container } = await renderEditor(authorsField, {
+        'authors.0.name': 'Melvin',
+        'authors.1.name': 'Elsie',
+        'authors.2.name': 'Sarah',
+      });
+
+      // Remove the first two items, the second one after the first
+      await page.getByRole('button', { name: 'Remove' }).nth(0).click();
+      await expect.poll(() => getNames(draft)).toEqual(['Elsie', 'Sarah']);
+      await page.getByRole('button', { name: 'Remove' }).nth(0).click();
+      await expect.poll(() => getNames(draft)).toEqual(['Sarah']);
+      expect(getShownItems(container)).toEqual(['removed', 'removed', 'Sarah']);
+
+      // Restoring the second one puts it before the remaining item, after the first removed one
+      await restoreButtons.nth(1).click();
+      await expect.poll(() => getNames(draft)).toEqual(['Elsie', 'Sarah']);
+      expect(getShownItems(container)).toEqual(['removed', 'Elsie', 'Sarah']);
+
+      await restoreButtons.click();
+      await expect.poll(() => getNames(draft)).toEqual(['Melvin', 'Elsie', 'Sarah']);
+
+      // An item removed after a removed one goes after it
+      await page.getByRole('button', { name: 'Remove' }).nth(2).click();
+      await expect.poll(() => getNames(draft)).toEqual(['Melvin', 'Elsie']);
+      await page.getByRole('button', { name: 'Remove' }).nth(0).click();
+      await expect.poll(() => getNames(draft)).toEqual(['Elsie']);
+      expect(getShownItems(container)).toEqual(['removed', 'Elsie', 'removed']);
+      await restoreButtons.nth(1).click();
+      await expect.poll(() => getNames(draft)).toEqual(['Elsie', 'Sarah']);
+      await restoreButtons.click();
+      await expect.poll(() => getNames(draft)).toEqual(['Melvin', 'Elsie', 'Sarah']);
+    });
+
+    test('keeps the removed items in place while the items are moved', async () => {
+      const { draft, container } = await renderEditor(authorsField, {
+        'authors.0.name': 'Melvin',
+        'authors.1.name': 'Elsie',
+        'authors.2.name': 'Sarah',
+      });
+
+      await page.getByRole('button', { name: 'Remove' }).nth(1).click();
+      await expect.poll(() => getNames(draft)).toEqual(['Melvin', 'Sarah']);
+      await page.getByRole('button', { name: 'Move Down' }).nth(0).click();
+      await expect.poll(() => getNames(draft)).toEqual(['Sarah', 'Melvin']);
+      expect(getShownItems(container)).toEqual(['Sarah', 'removed', 'Melvin']);
+
+      await restoreButtons.click();
+      await expect.poll(() => getNames(draft)).toEqual(['Sarah', 'Elsie', 'Melvin']);
+    });
+
+    test('shows the items removed from the end after the list', async () => {
+      const { draft, container } = await renderEditor(authorsField, {
+        'authors.0.name': 'Melvin',
+        'authors.1.name': 'Elsie',
+      });
+
+      await page.getByRole('button', { name: 'Remove' }).nth(1).click();
+      await expect.poll(() => getNames(draft)).toEqual(['Melvin']);
+      expect(getShownItems(container)).toEqual(['Melvin', 'removed']);
+
+      // It’s hidden along with the items while the list is collapsed
+      await page.getByRole('button', { name: 'Collapse' }).first().click();
+      await expect.poll(() => page.getByRole('status').elements()).toHaveLength(0);
+      await page.getByRole('button', { name: 'Expand' }).first().click();
+
+      // An item added at the end goes after it
+      await page.getByRole('button', { name: /Add\W+Author/ }).click();
+      await expect.poll(() => getNames(draft)).toEqual(['Melvin', 'Anonymous']);
+      expect(getShownItems(container)).toEqual(['Melvin', 'removed', 'Anonymous']);
+
+      await restoreButtons.click();
+      await expect.poll(() => getNames(draft)).toEqual(['Melvin', 'Elsie', 'Anonymous']);
+    });
+
+    test('shows the removed items while no item is left', async () => {
+      const { draft } = await renderEditor(authorsField, { 'authors.0.name': 'Melvin' });
+
+      await page.getByRole('button', { name: 'Remove' }).click();
+      await expect.poll(() => getNames(draft)).toEqual([]);
+      await expect.element(page.getByText('0 Authors')).toBeInTheDocument();
+      await restoreButtons.click();
+      await expect.poll(() => getNames(draft)).toEqual(['Melvin']);
+    });
+
+    test('keeps the expander states of the item', async () => {
+      const { draft } = await renderEditor(authorsField, {
+        'authors.0.name': 'Melvin',
+        'authors.1.name': 'Elsie',
+      });
+
+      draft.expanderStates._['authors.1'] = false;
+      draft.expanderStates._['authors.1.details#'] = false;
+      await page.getByRole('button', { name: 'Remove' }).nth(1).click();
+      await expect.poll(() => getNames(draft)).toEqual(['Melvin']);
+      expect(draft.expanderStates._['authors.1.details#']).toBeUndefined();
+
+      await restoreButtons.click();
+      await expect.poll(() => draft.expanderStates._['authors.1.details#']).toBe(false);
+      expect(draft.expanderStates._['authors.1']).toBe(false);
+    });
+
+    test('can’t restore an item once the list is full', async () => {
+      const { draft } = await renderEditor(
+        { ...authorsField, max: 2 },
+        { 'authors.0.name': 'Melvin', 'authors.1.name': 'Elsie' },
+      );
+
+      await page.getByRole('button', { name: 'Remove' }).nth(0).click();
+      await expect.poll(() => getNames(draft)).toEqual(['Elsie']);
+      await expect.element(restoreButtons).toBeEnabled();
+      await page.getByRole('button', { name: /Add\W+Author/ }).click();
+      await expect.poll(() => getNames(draft)).toEqual(['Elsie', 'Anonymous']);
+      await expect.element(restoreButtons).toBeDisabled();
+    });
+
+    test('drops the removed items once the list is changed elsewhere', async () => {
+      const { draft } = await renderEditor(authorsField, {
+        'authors.0.name': 'Melvin',
+        'authors.1.name': 'Elsie',
+      });
+
+      await page.getByRole('button', { name: 'Remove' }).nth(0).click();
+      await expect.poll(() => getNames(draft)).toEqual(['Elsie']);
+      await page.getByRole('button', { name: /Add\W+Author/ }).click();
+      await expect.poll(() => getNames(draft)).toEqual(['Elsie', 'Anonymous']);
+      await expect.element(restoreButtons).toBeInTheDocument();
+
+      // The list is reverted, so the removed item is back, while the item count stays the same
+      const values = draft.currentValues._default;
+
+      Object.keys(values).forEach((key) => {
+        delete values[key];
+      });
+      Object.assign(values, { 'authors.0.name': 'Melvin', 'authors.1.name': 'Elsie' });
+      await expect.poll(() => restoreButtons.elements()).toHaveLength(0);
+
+      // Another removal doesn’t bring the removed item back either
+      await page.getByRole('button', { name: 'Remove' }).nth(1).click();
+      await expect.poll(() => getNames(draft)).toEqual(['Melvin']);
+      expect(restoreButtons.elements()).toHaveLength(1);
+    });
   });
 
   test('doesn’t take the original position of the item it duplicates', async () => {
@@ -241,6 +438,101 @@ describe('ListEditorComplex', () => {
         page.getByRole('group', { name: 'Item 2 of 3' }).getByRole('button', { name: 'Move Down' }),
       )
       .toHaveFocus();
+  });
+
+  test('moves the focus to the other button once an item has been moved to either end', async () => {
+    const { draft } = await renderEditor(authorsField, {
+      'authors.0.name': 'a',
+      'authors.1.name': 'b',
+      'authors.2.name': 'c',
+    });
+
+    await page
+      .getByRole('group', { name: 'Item 2 of 3' })
+      .getByRole('button', { name: 'Move Up' })
+      .click();
+
+    await expect
+      .poll(() => getStoredItems(draft, 'authors').map(({ name }) => name))
+      .toEqual(['b', 'a', 'c']);
+
+    const first = page.getByRole('group', { name: 'Item 1 of 3' });
+
+    // The Move Up button is disabled at the top, so the focus goes to Move Down rather than being
+    // lost
+    await expect.element(first.getByRole('button', { name: 'Move Up' })).toBeDisabled();
+    await expect.element(first.getByRole('button', { name: 'Move Down' })).toHaveFocus();
+
+    await page
+      .getByRole('group', { name: 'Item 2 of 3' })
+      .getByRole('button', { name: 'Move Down' })
+      .click();
+
+    await expect
+      .poll(() => getStoredItems(draft, 'authors').map(({ name }) => name))
+      .toEqual(['b', 'c', 'a']);
+    await expect
+      .element(
+        page.getByRole('group', { name: 'Item 3 of 3' }).getByRole('button', { name: 'Move Up' }),
+      )
+      .toHaveFocus();
+  });
+
+  test('moves an item to the bottom from its options menu, which has no second menu', async () => {
+    const { draft } = await renderEditor(authorsField, {
+      'authors.0.name': 'a',
+      'authors.1.name': 'b',
+      'authors.2.name': 'c',
+    });
+
+    const first = page.getByRole('group', { name: 'Item 1 of 3' });
+
+    await expect
+      .element(first.getByRole('button', { name: 'Reorder Options' }))
+      .not.toBeInTheDocument();
+    await first.getByRole('button', { name: 'List Item Options' }).click();
+    await expect.element(page.getByRole('menuitem', { name: 'Move to Top' })).toBeDisabled();
+    await expect.element(page.getByRole('menuitem', { name: 'Move to…' })).toBeInTheDocument();
+    await page.getByRole('menuitem', { name: 'Move to Bottom' }).click();
+
+    await expect
+      .poll(() => getStoredItems(draft, 'authors').map(({ name }) => name))
+      .toEqual(['b', 'c', 'a']);
+    // The focus follows the item to the options button
+    await expect
+      .element(
+        page
+          .getByRole('group', { name: 'Item 3 of 3' })
+          .getByRole('button', { name: 'List Item Options' }),
+      )
+      .toHaveFocus();
+  });
+
+  test('moves an item to a typed position from its options menu', async () => {
+    const { draft } = await renderEditor(
+      authorsField,
+      Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`authors.${i}.name`, `n${i}`])),
+    );
+
+    await page
+      .getByRole('group', { name: 'Item 1 of 20' })
+      .getByRole('button', { name: 'List Item Options' })
+      .click();
+    await page.getByRole('menuitem', { name: 'Move to…' }).click();
+
+    const position = page.getByRole('spinbutton', { name: 'Position' });
+
+    await expect.element(position).toHaveValue('1');
+    await position.fill('4');
+    await page.getByRole('button', { name: 'OK' }).click();
+
+    await expect
+      .poll(() =>
+        getStoredItems(draft, 'authors')
+          .map(({ name }) => name)
+          .slice(0, 5),
+      )
+      .toEqual(['n1', 'n2', 'n3', 'n0', 'n4']);
   });
 
   test('hides the header end buttons until the item is hovered or has focus', async () => {
@@ -372,6 +664,8 @@ describe('ListEditorComplex', () => {
           'warning Warning This item can’t be displayed due to an unknown type. Check the browser console for details.',
         );
       expect(warn).toHaveBeenCalledOnce();
+      // There are no subfields to collapse, so only the list has an expander, not the item
+      expect(page.getByRole('button', { name: /^(Collapse|Expand)$/ }).elements()).toHaveLength(1);
     } finally {
       warn.mockRestore();
     }
@@ -391,8 +685,14 @@ describe('ListEditorComplex', () => {
 
     expect(page.getByRole('button', { name: /Add\W+Author/ }).elements()).toHaveLength(0);
     expect(page.getByRole('button', { name: 'Remove' }).elements()).toHaveLength(0);
-    expect(page.getByRole('button', { name: 'List Item Options' }).elements()).toHaveLength(0);
+    expect(page.getByRole('button', { name: 'Paste Item' }).elements()).toHaveLength(0);
     expect(page.getByRole('button', { name: 'Reorder Item' }).elements()).toHaveLength(0);
+
+    // The item can still be copied
+    await page.getByRole('button', { name: 'List Item Options' }).click();
+    await expect.element(page.getByRole('menuitem', { name: 'Copy' })).toBeEnabled();
+    expect(page.getByRole('menuitem').elements()).toHaveLength(1);
+    await userEvent.keyboard('{Escape}');
   });
 });
 
@@ -446,7 +746,7 @@ describe('ListEditorComplex (more)', () => {
     expect(draft.currentValues._default['pairs.0.foo']).toBe('bar');
   });
 
-  test('removes and reorders the items of a list with a single subfield', async () => {
+  test('removes, restores and reorders the items of a list with a single subfield', async () => {
     const { draft } = await renderEditor(tagsField, {
       'tags.0': 'a',
       'tags.1': 'b',
@@ -461,6 +761,10 @@ describe('ListEditorComplex (more)', () => {
     await page.getByRole('button', { name: 'Remove' }).nth(0).click();
     await expect.poll(() => draft.currentValues._default['tags.2']).toBeUndefined();
     expect(draft.currentValues._default['tags.0']).toBe('a');
+
+    await page.getByRole('button', { name: 'Restore' }).click();
+    await expect.poll(() => draft.currentValues._default['tags.0']).toBe('c');
+    expect(draft.currentValues._default['tags.2']).toBe('b');
   });
 
   test('can’t add items in another locale to a single-subfield list that isn’t translated', async () => {
@@ -513,11 +817,20 @@ describe('ListEditorComplex (more)', () => {
       .poll(() => getStoredItems(draft, 'authors').map(({ name }) => name))
       .toEqual(['Anonymous', 'Melvin']);
 
-    // The limit is reached, so the add button and the item options are gone
+    // The limit is reached, so the add button and the options to add an item are gone
     await expect
       .poll(() => page.getByRole('button', { name: /Add\W+Author/ }).elements())
       .toHaveLength(0);
-    expect(page.getByRole('button', { name: 'List Item Options' }).elements()).toHaveLength(0);
+    expect(page.getByRole('button', { name: 'Paste Item' }).elements()).toHaveLength(0);
+    await page.getByRole('button', { name: 'List Item Options' }).nth(0).click();
+    expect(
+      page
+        .getByRole('menuitem')
+        .elements()
+        .map((item) => item.textContent?.trim()),
+      // An item can still be replaced, which doesn’t add one
+    ).toEqual(['Copy', 'Paste to Replace']);
+    await userEvent.keyboard('{Escape}');
   });
 
   test('starts minimized when configured, expanding once an item is added', async () => {
@@ -610,7 +923,7 @@ describe('ListEditorComplex (more)', () => {
     inner.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer }));
     inner.dispatchEvent(new DragEvent('dragend', { bubbles: true }));
     expect(dataTransfer.getData('text/plain')).toBe('');
-    expect(item).not.toHaveClass('dragging');
+    expect(item).not.toHaveClass('drag-placeholder');
   });
 
   test('offers the types to add around an item, and warns about a missing type key', async () => {
@@ -637,6 +950,68 @@ describe('ListEditorComplex (more)', () => {
     }
   });
 
+  test('localizes the labels and hints in the UI locale without a content locale', async () => {
+    /** @type {ComplexListField} */
+    const fieldConfig = {
+      ...sectionsField,
+      label: 'Sections',
+      label_localized: { en: 'Blocks' },
+      label_singular: 'Section',
+      label_singular_localized: { en: 'Block' },
+      types: [
+        {
+          ...sectionsField.types[0],
+          label_localized: { en: 'Banner' },
+          hint: 'Keep it short.',
+          hint_localized: { en: 'Keep it brief.' },
+        },
+        sectionsField.types[1],
+      ],
+    };
+
+    const { container } = await renderEditor(fieldConfig, {
+      'sections.0.type': 'hero',
+      'sections.0.heading': '',
+    });
+
+    await expect.element(page.getByRole('button', { name: /Add\W+Block\W*$/ })).toBeVisible();
+    await expect
+      .poll(() => container.querySelector('.type-hint')?.textContent)
+      .toBe('Keep it brief.');
+    // The list with one item is labelled with the singular label, and the item with its type
+    expect(container.querySelector('.toolbar .label')).toMatchTextContent(/Block/);
+    await expect.element(page.getByText('Banner', { exact: true })).toBeVisible();
+
+    await page.getByRole('button', { name: 'List Item Options' }).click();
+    await page.getByRole('menuitem', { name: 'Add Item Below' }).click();
+    await expect.element(page.getByRole('menuitem', { name: 'Banner' })).toBeVisible();
+  });
+
+  test('shows the hint of each item’s type unless read-only', async () => {
+    /** @type {ComplexListField} */
+    const fieldConfig = {
+      ...sectionsField,
+      types: [{ ...sectionsField.types[0], hint: 'Keep it **short**.' }, sectionsField.types[1]],
+    };
+
+    const values = {
+      'sections.0.type': 'hero',
+      'sections.0.heading': '',
+      'sections.1.type': 'quote',
+      'sections.1.text': '',
+    };
+
+    const { container } = await renderEditor(fieldConfig, values);
+
+    await expect
+      .poll(() => [...container.querySelectorAll('.type-hint')].map((hint) => hint.textContent))
+      .toEqual(['Keep it short.']);
+
+    const { container: readonly } = await renderEditor(fieldConfig, values, { readonly: true });
+
+    expect(readonly.querySelector('.type-hint')).toBeNull();
+  });
+
   test('has nothing to expand for an item of a type without subfields', async () => {
     const { draft, container } = await renderEditor(
       { ...sectionsField, types: [{ name: 'divider', label: 'Divider' }] },
@@ -647,11 +1022,11 @@ describe('ListEditorComplex (more)', () => {
     expect(container.querySelector('.item-body')).toHaveTextContent('');
     expect(draft.expanderStates._['sections.0']).toBe(true);
 
-    await page.getByRole('button', { name: 'Collapse' }).nth(1).click();
-    // The item’s state isn’t tracked, unlike the list’s own
-    expect(draft.expanderStates._['sections.0']).toBe(true);
+    // The item header has no expander, unlike the list
+    expect(page.getByRole('button', { name: 'Collapse' }).elements()).toHaveLength(1);
+    await expect.element(page.getByText('Divider', { exact: true })).toBeVisible();
 
-    await page.getByRole('button', { name: 'Collapse' }).nth(0).click();
+    await page.getByRole('button', { name: 'Collapse' }).click();
     await expect.poll(() => draft.expanderStates._['sections#']).toBe(false);
   });
 
@@ -770,9 +1145,54 @@ describe('ListEditorComplex (more)', () => {
     });
 
     await expect.element(page.getByRole('button', { name: /Add\W+Author/ })).toBeDisabled();
-    await expect.element(page.getByRole('button', { name: 'List Item Options' })).toBeDisabled();
+    await expect.element(page.getByRole('button', { name: 'Paste Item' })).toBeDisabled();
+    // The item can only be copied
+    await page.getByRole('button', { name: 'List Item Options' }).click();
+    await expect.element(page.getByRole('menuitem', { name: 'Copy' })).toBeEnabled();
+    await expect.element(page.getByRole('menuitem', { name: 'Paste to Replace' })).toBeDisabled();
+    await expect.element(page.getByRole('menuitem', { name: 'Paste Item Below' })).toBeDisabled();
+    await expect.element(page.getByRole('menuitem', { name: 'Duplicate' })).toBeDisabled();
+    await expect.element(page.getByRole('menuitem', { name: 'Add Item Below' })).toBeDisabled();
+    await userEvent.keyboard('{Escape}');
     // Removing the item would remove it from the default locale as well
     await expect.element(page.getByRole('button', { name: 'Remove' })).toBeDisabled();
+  });
+
+  test('can be edited in another locale and writes a change to every locale when synced', async () => {
+    // https://github.com/sveltia/sveltia-cms/issues/1128
+    const syncedField = { ...authorsField, i18n: /** @type {const} */ ('sync') };
+
+    const draft = createMockDraft({
+      fields: [syncedField],
+      i18n: {
+        i18nEnabled: true,
+        allLocales: ['en', 'fr'],
+        initialLocales: ['en', 'fr'],
+        defaultLocale: 'en',
+        structure: /** @type {const} */ ('multiple_folders'),
+      },
+      values: {
+        en: { 'authors.0.name': 'Melvin' },
+        fr: { 'authors.0.name': 'Melvin' },
+      },
+    });
+
+    await renderWithDraft(ListEditorComplex, {
+      draft,
+      props: {
+        locale: 'fr',
+        keyPath: 'authors',
+        typedKeyPath: 'authors',
+        fieldId: 'authors',
+        fieldLabel: 'Authors',
+        fieldConfig: syncedField,
+      },
+    });
+
+    await expect.element(page.getByRole('button', { name: /Add\W+Author/ })).toBeEnabled();
+    await page.getByRole('button', { name: 'Remove' }).click();
+    await expect.poll(() => draft.currentValues.fr['authors.0.name']).toBeUndefined();
+    expect(draft.currentValues.en['authors.0.name']).toBeUndefined();
   });
 
   test('locks the items of a read-only field', async () => {
@@ -893,6 +1313,74 @@ describe('ListEditorComplex (more)', () => {
       expect(draft.currentValues.en['residences.0.name']).toBe('B');
       expect(draft.currentValues.en['residences.0.description']).toBe('B (en)');
       expect(draft.currentValues.en['residences.1.name']).toBeUndefined();
+    });
+
+    test('restores a removed item to every locale', async () => {
+      const draft = await renderResidences('fr');
+
+      await page.getByRole('button', { name: 'Remove' }).nth(0).click();
+      await expect.poll(() => draft.currentValues.fr['residences.1.name']).toBeUndefined();
+      await page.getByRole('button', { name: 'Restore' }).click();
+      await expect.poll(() => draft.currentValues.fr['residences.1.name']).toBe('B');
+      expect(draft.currentValues.fr['residences.0.description']).toBe('A (fr)');
+      expect(draft.currentValues.en['residences.0.name']).toBe('A');
+      expect(draft.currentValues.en['residences.0.description']).toBe('A (en)');
+      expect(draft.currentValues.en['residences.1.description']).toBe('B (en)');
+    });
+
+    test('hides the removed items once the editor is switched to another locale', async () => {
+      const draft = createMockDraft({
+        fields: [{ ...residencesField, fields: [{ name: 'name', widget: 'string', i18n: true }] }],
+        i18n: {
+          i18nEnabled: true,
+          allLocales: ['fr', 'en'],
+          initialLocales: ['fr', 'en'],
+          defaultLocale: 'fr',
+          structure: /** @type {const} */ ('single_file'),
+        },
+        values: {
+          fr: { 'residences.0.name': 'A (fr)', 'residences.1.name': 'B (fr)' },
+          en: { 'residences.0.name': 'A (en)' },
+        },
+      });
+
+      const props = {
+        locale: 'fr',
+        keyPath: 'residences',
+        typedKeyPath: 'residences',
+        fieldId: 'residences',
+        fieldLabel: 'Residences',
+        fieldConfig: {
+          ...residencesField,
+          fields: [{ name: 'name', widget: 'string', i18n: true }],
+        },
+      };
+
+      const { rerender } = await renderWithDraft(ListEditorComplex, { draft, props });
+
+      await page.getByRole('button', { name: 'Remove' }).nth(0).click();
+      await expect.poll(() => draft.currentValues.fr['residences.1.name']).toBeUndefined();
+      await expect.element(page.getByRole('button', { name: 'Restore' })).toBeInTheDocument();
+
+      // The English list has as many items, but the removed item isn’t from there
+      await rerender({ ...props, locale: 'en' });
+      await expect
+        .poll(() => page.getByRole('button', { name: 'Restore' }).elements())
+        .toHaveLength(0);
+    });
+
+    test('restores an item only to the locales it was removed from', async () => {
+      const draft = await renderResidences('fr');
+
+      // The English content lacks the second item
+      delete draft.currentValues.en['residences.1.name'];
+      delete draft.currentValues.en['residences.1.description'];
+      await page.getByRole('button', { name: 'Remove' }).nth(1).click();
+      await expect.poll(() => draft.currentValues.fr['residences.1.name']).toBeUndefined();
+      await page.getByRole('button', { name: 'Restore' }).click();
+      await expect.poll(() => draft.currentValues.fr['residences.1.description']).toBe('B (fr)');
+      expect(draft.currentValues.en['residences.1.name']).toBeUndefined();
+      expect(draft.currentValues.en['residences.0.description']).toBe('A (en)');
     });
 
     test('adds an item to every locale', async () => {
@@ -1280,5 +1768,164 @@ describe('ListEditorComplex with a custom field type', () => {
     );
 
     await expect.poll(() => getSummaries(container)).toEqual(['a/1.jpg']);
+  });
+});
+
+describe('ListEditorComplex clipboard', () => {
+  let clipboardText = '';
+
+  /**
+   * Put a list item copied elsewhere to the clipboard.
+   * @param {Record<string, any>} data Clipboard data to override.
+   */
+  const setClipboardItem = (data) => {
+    clipboardText = JSON.stringify({
+      format: 'sveltia-cms/list-item',
+      version: 1,
+      id: 'elsewhere',
+      locale: 'en',
+      assets: {},
+      ...data,
+    });
+  };
+
+  beforeEach(() => {
+    resetCopiedListItem();
+    listItemClipboardToast.current = { id: 0, show: false, status: 'success', message: '' };
+    clipboardText = '';
+    vi.spyOn(navigator.clipboard, 'writeText').mockImplementation(async (text) => {
+      clipboardText = text;
+    });
+    vi.spyOn(navigator.clipboard, 'readText').mockImplementation(async () => clipboardText);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Wait for the editor’s toast to show a message.
+   * @param {string} message Message.
+   */
+  const expectToast = async (message) => {
+    await expect
+      .poll(() => listItemClipboardToast.current)
+      .toEqual(expect.objectContaining({ show: true, message }));
+  };
+
+  test('copies an item, and pastes it above or below another item', async () => {
+    const { draft } = await renderEditor(authorsField, {
+      'authors.0.name': 'Melvin',
+      'authors.0.role': 'Editor',
+      'authors.1.name': 'Elsie',
+    });
+
+    await page.getByRole('button', { name: 'List Item Options' }).nth(0).click();
+    await page.getByRole('menuitem', { name: 'Copy' }).click();
+    await expectToast('Item copied.');
+    expect(JSON.parse(clipboardText).values).toEqual({
+      _default: { name: 'Melvin', role: 'Editor' },
+    });
+
+    await page.getByRole('button', { name: 'List Item Options' }).nth(1).click();
+    await page.getByRole('menuitem', { name: 'Paste Item Below' }).click();
+    await expect
+      .poll(() => getStoredItems(draft, 'authors'))
+      .toEqual([
+        { name: 'Melvin', role: 'Editor' },
+        { name: 'Elsie' },
+        { name: 'Melvin', role: 'Editor' },
+      ]);
+
+    await page.getByRole('button', { name: 'List Item Options' }).nth(1).click();
+    await page.getByRole('menuitem', { name: 'Paste Item Above' }).click();
+    await expect
+      .poll(() => getStoredItems(draft, 'authors').map(({ name }) => name))
+      .toEqual(['Melvin', 'Melvin', 'Elsie', 'Melvin']);
+  });
+
+  test('replaces an item with a copied one, even in a full list', async () => {
+    const { draft } = await renderEditor(
+      { ...authorsField, max: 2 },
+      { 'authors.0.name': 'Melvin', 'authors.0.role': 'Editor', 'authors.1.name': 'Elsie' },
+    );
+
+    await page.getByRole('button', { name: 'List Item Options' }).nth(0).click();
+    await page.getByRole('menuitem', { name: 'Copy' }).click();
+    await page.getByRole('button', { name: 'List Item Options' }).nth(1).click();
+    await page.getByRole('menuitem', { name: 'Paste to Replace' }).click();
+    await expect
+      .poll(() => getStoredItems(draft, 'authors'))
+      .toEqual([
+        { name: 'Melvin', role: 'Editor' },
+        { name: 'Melvin', role: 'Editor' },
+      ]);
+  });
+
+  test('pastes an item copied in another list, leaving out the values it doesn’t take', async () => {
+    setClipboardItem({ values: { en: { name: 'Ada', email: 'ada@example.com' } } });
+
+    const { draft } = await renderEditor(authorsField, {});
+
+    await page.getByRole('button', { name: 'Paste Item' }).click();
+    await expect.poll(() => getStoredItems(draft, 'authors')).toEqual([{ name: 'Ada', role: '' }]);
+    await expectToast('Item pasted. A value this list doesn’t take was left out.');
+  });
+
+  test('pastes an item at the top with `add_to_top`, until the list is full', async () => {
+    setClipboardItem({ values: { en: { name: 'Ada', role: 'Writer' } } });
+
+    const { draft } = await renderEditor(
+      { ...authorsField, add_to_top: true, max: 2 },
+      { 'authors.0.name': 'Melvin' },
+    );
+
+    await page.getByRole('button', { name: 'Paste Item' }).click();
+    await expect
+      .poll(() => getStoredItems(draft, 'authors').map(({ name }) => name))
+      .toEqual(['Ada', 'Melvin']);
+    await expect
+      .poll(() => page.getByRole('button', { name: 'Paste Item' }).elements())
+      .toHaveLength(0);
+  });
+
+  test('pastes an item of a variable type, reporting the files that can’t be found', async () => {
+    setClipboardItem({
+      type: 'photo',
+      values: { en: { src: 'photo.jpg' } },
+      assets: { en: { 'photo.jpg': 'content/posts/gone/photo.jpg' } },
+    });
+
+    const { draft } = await renderEditor(
+      {
+        name: 'blocks',
+        widget: 'list',
+        types: [{ name: 'photo', fields: [{ name: 'src', widget: 'image' }] }],
+      },
+      {},
+    );
+
+    await page.getByRole('button', { name: 'Paste Item' }).click();
+    await expect
+      .poll(() => getStoredItems(draft, 'blocks'))
+      .toEqual([{ type: 'photo', src: 'photo.jpg' }]);
+    await expectToast(
+      'Item pasted, but a file it uses couldn’t be found. Check the file fields in the item.',
+    );
+  });
+
+  test('reports an item that doesn’t fit, or nothing to paste', async () => {
+    const { draft } = await renderEditor(sectionsField, {});
+
+    setClipboardItem({ type: 'gallery', values: { en: { images: [] } } });
+    await page.getByRole('button', { name: 'Paste Item' }).click();
+    await expectToast('The copied item doesn’t fit in this list.');
+
+    vi.mocked(navigator.clipboard.readText).mockRejectedValue(new Error('Denied'));
+    await page.getByRole('button', { name: 'Paste Item' }).click();
+    await expectToast(
+      'There’s no copied item to paste. To copy one, open an item’s ⋮ (List Item Options) menu and select Copy.',
+    );
+    expect(getStoredItems(draft, 'sections')).toEqual([]);
   });
 });

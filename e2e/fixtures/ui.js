@@ -2,6 +2,7 @@ import { expect } from '@playwright/test';
 
 /**
  * @import { Locator, Page } from '@playwright/test';
+ * @import { CMS } from './test.js';
  */
 
 /**
@@ -10,6 +11,30 @@ import { expect } from '@playwright/test';
  * @returns {Locator} Editor.
  */
 export const getEditor = (page) => page.getByRole('group', { name: 'Content Editor' });
+
+/**
+ * Save the entry open in the editor, which takes us back to the entry list.
+ * @param {Locator} editor Content editor.
+ */
+export const saveEntry = async (editor) => {
+  await editor.getByRole('button', { name: 'Save' }).click();
+  await expect(editor).toBeHidden();
+};
+
+/**
+ * Wait for a file to be written with the given content, and check that the old one is gone.
+ * @param {CMS} cms CMS fixture.
+ * @param {string} path Path of the file to wait for.
+ * @param {string} content Expected content.
+ * @param {string} [oldPath] Path of the file that should be gone.
+ */
+export const expectFile = async (cms, path, content, oldPath) => {
+  await expect.poll(async () => (await cms.readRepo())[path]).toBe(content);
+
+  if (oldPath) {
+    expect(await cms.readRepo()).not.toHaveProperty(oldPath);
+  }
+};
 
 /**
  * Get the group of a field in the editor.
@@ -28,6 +53,43 @@ export const getField = (scope, label, { exact = false } = {}) =>
       ? { name: `“\u2068${label}\u2069” Field`, exact: true }
       : { name: new RegExp(`${label}.*Field`) },
   );
+
+/**
+ * Get the radio buttons of a field, which a Select or Relation field with a few options shows.
+ * @param {Page} page Page.
+ * @param {string} label Field label.
+ * @returns {Locator} Radio buttons.
+ */
+export const getRadioOptions = (page, label) =>
+  getEditor(page).getByRole('radiogroup', { name: label, exact: true }).getByRole('radio');
+
+/**
+ * Check the options a field shows as radio buttons, in order. A radio button’s label is its
+ * accessible name, not its text content.
+ * @param {Page} page Page.
+ * @param {string} label Field label.
+ * @param {string[]} names Option labels.
+ */
+export const expectRadioOptions = async (page, label, names) => {
+  const options = getRadioOptions(page, label);
+
+  await expect(options).toHaveCount(names.length);
+  await Promise.all(
+    names.map((name, index) => expect(options.nth(index)).toHaveAccessibleName(name)),
+  );
+};
+
+/**
+ * Pick an option of a field that shows its options as radio buttons.
+ * @param {Page} page Page.
+ * @param {string} label Field label.
+ * @param {string} name Option label.
+ */
+export const pickRadioOption = async (page, label, name) => {
+  await getRadioOptions(page, label)
+    .and(page.getByRole('radio', { name, exact: true }))
+    .click();
+};
 
 /**
  * Open a collection from the sidebar.

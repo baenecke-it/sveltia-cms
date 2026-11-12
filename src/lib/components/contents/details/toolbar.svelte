@@ -30,16 +30,22 @@
   import EntryStatusMenu from '$lib/components/workflow/entry-status-menu.svelte';
   import PublishEntryButton from '$lib/components/workflow/publish-entry-button.svelte';
   import { getEntryEditorBackPath, goBack, goto, overlayTitle } from '$lib/services/app/navigation';
+  import { saveProgress } from '$lib/services/backends/commit-progress';
   import { skipCIConfigured, skipCIEnabled } from '$lib/services/backends/git/shared/integration';
   import { isDraftReadonly } from '$lib/services/config/readonly';
   import { getCollectionLabel, selectedCollection } from '$lib/services/contents/collection';
   import { getCollectionFileLabel } from '$lib/services/contents/collection/files';
-  import { isNestedCollection, nestedFilterPath } from '$lib/services/contents/collection/nested';
+  import { hasNestedEntries, nestedFilterPath } from '$lib/services/contents/collection/nested';
   import { collectionState } from '$lib/services/contents/collection/view';
   import { createDraft } from '$lib/services/contents/draft/create';
+  import { getReferencedPendingEntrySet } from '$lib/services/contents/draft/pending-entries';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
   import { canResetEntry } from '$lib/services/contents/draft/update/reset';
-  import { activeInlineEditors, copyFromLocaleToast } from '$lib/services/contents/editor';
+  import {
+    activeInlineEditors,
+    copyFromLocaleToast,
+    listItemClipboardToast,
+  } from '$lib/services/contents/editor';
   import { fieldUpdatePending } from '$lib/services/contents/editor/pending';
   import { createResetMenuState } from '$lib/services/contents/editor/reset-menu.svelte';
   import { duplicateEntryDraft, saveEntryDraftFlow } from '$lib/services/contents/editor/save';
@@ -56,9 +62,11 @@
   import { env } from '$lib/services/user/env.svelte';
   import { prefs } from '$lib/services/user/prefs.svelte';
   import {
+    canSkipReviewAlong,
     checkPublishedVersion,
     getUnpublishedEntryByDraft,
     isDirectPublishAllowed,
+    isDiscardableDraft,
     isPendingDeletion,
     isWorkflowEnabled,
     workflowEnabled,
@@ -81,11 +89,7 @@
   const entryDraft = getEntryDraftContext();
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    disabled = false,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { disabled = false } = $props();
 
   let showValidationToast = $state(false);
   // Number of invalid fields when the last save failed validation. A snapshot rather than a live
@@ -184,11 +188,13 @@
   const controlsDisabled = $derived(disabled || busy);
   // A change still on its way to the draft counts, so a save can be started right after it
   const modified = $derived(isNew || entryDraft.modified || fieldUpdatePending.current);
+  /* v8 ignore start -- only read in the deletion dialog, which a new entry doesn’t offer */
   const associatedAssets = $derived(
     collectionName && originalEntry
       ? getEntryRelativeAssets({ entry: originalEntry, collectionName, fileName })
       : [],
   );
+  /* v8 ignore stop */
   // Look the entry up in the store rather than using `originalEntry` directly, so the status button
   // stays in sync when the status is changed elsewhere, e.g. on the Editorial Workflow page
   const unpublishedEntry = $derived(
@@ -208,6 +214,9 @@
       hasPullRequest: !!unpublishedEntry,
       workflowEnabled: isWorkflowEnabled(collection),
       publishedVersionExists,
+      // Deleting an entry that was never published just throws the draft away; anything else takes
+      // an entry off the site
+      discardsDraft: isDiscardableDraft(unpublishedEntry),
       pendingDeletion,
       readonly,
       openAuthoring: openAuthoring.current,
@@ -217,6 +226,18 @@
   // A workflow draft can also be saved and published in one go, if the publish mode allows it
   const directPublish = $derived(
     useWorkflow && isDirectPublishAllowed(collection, unpublishedEntry),
+  );
+  // The entries created or edited from the Relation fields would be published along with it, and
+  // one in a collection whose review can’t be skipped would miss its review
+  const directPublishBlocked = $derived(
+    directPublish &&
+      !canSkipReviewAlong([
+        // A deselected entry isn’t saved at all
+        ...(entryDraft.current?.pendingEntries.length
+          ? getReferencedPendingEntrySet(entryDraft.current)
+          : []),
+        ...(unpublishedEntry?.workflow.companions ?? []),
+      ]),
   );
   // The review prompt hands the entry over for review, or marks it ready when there’s no review
   const reviewDialogLabel = $derived(
@@ -269,7 +290,7 @@
    * path given by `getEntryEditorBackPath()` otherwise.
    */
   const _goBack = () => {
-    const dirPath = collection && isNestedCollection(collection) ? nestedFilterPath.current : '';
+    const dirPath = collection && hasNestedEntries(collection) ? nestedFilterPath.current : '';
 
     goBack(getEntryEditorBackPath({ collectionName, dirPath }), {
       returnTo: isSearchResultsPath,
@@ -434,6 +455,14 @@
   {#if unpublishedEntry && !locked}
     <EntryStatusMenu entry={unpublishedEntry} disabled={controlsDisabled} />
   {/if}
+  <!-- Announced politely as the count changes, for a save that takes a while -->
+  <span class="save-progress" aria-live="polite">
+    {#if saving && saveProgress.current}
+      {_(`save_progress.${saveProgress.current.phase}`, {
+        values: { done: saveProgress.current.done, total: saveProgress.current.total },
+      })}
+    {/if}
+  </span>
   {#if locked}
     <!-- Nothing to save: the entry is read-only, or shown for reference until the deletion is
     carried out -->
@@ -475,7 +504,8 @@
       {#snippet popup()}
         <Menu>
           <MenuItem
-            label={_('save_and_publish')}
+            label={_(directPublishBlocked ? 'save_and_publish_needs_review' : 'save_and_publish')}
+            disabled={directPublishBlocked}
             onclick={() => {
               // A change published directly has to be deployed, whatever the `skip_ci` option says
               save({ publish: true, skipCI: false });
@@ -632,6 +662,12 @@
         source: sourceLanguage ? (getLocaleLabel(sourceLanguage) ?? sourceLanguage) : '',
       },
     })}
+  </Alert>
+</Toast>
+
+<Toast id={listItemClipboardToast.current.id} bind:show={listItemClipboardToast.current.show}>
+  <Alert status={listItemClipboardToast.current.status}>
+    {listItemClipboardToast.current.message}
   </Alert>
 </Toast>
 
@@ -795,6 +831,15 @@
 </AlertDialog>
 
 <style>
+  .save-progress {
+    color: var(--sui-secondary-foreground-color);
+    font-size: var(--sui-font-size-small);
+    white-space: nowrap;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   .error {
     margin-top: 8px;
     border-radius: var(--sui-control-medium-border-radius);

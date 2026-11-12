@@ -6,6 +6,7 @@ import {
   isHttpURL,
   isNonEmptyString,
   makeLink,
+  sanitizeHelpText,
   sanitizeInlineMarkdown,
 } from '$lib/services/utils/string';
 
@@ -164,7 +165,7 @@ describe('makeLink', () => {
     const result = makeLink('Link <a>here</a>', url);
 
     expect(result).toContain(
-      'href="https://example.com/path?q=&quot;test&quot;&amp;other=<value>"',
+      'href="https://example.com/path?q=&quot;test&quot;&amp;other=&lt;value&gt;"',
     );
   });
 
@@ -251,5 +252,13 @@ describe('sanitizeInlineMarkdown', () => {
 describe('escapeHTML()', () => {
   it('should escape the characters read as markup, but not quotes', () => {
     expect(escapeHTML('Q&A <b> &amp; "x"')).toBe('Q&amp;A &lt;b&gt; &amp;amp; "x"');
+  });
+});
+
+describe('sanitizeHelpText', () => {
+  it('should parse inline Markdown and turn a literal `\\n` into a line break', () => {
+    expect(sanitizeHelpText('**a**\\n[b](/b) <i>c</i><script>alert(1)</script>')).toBe(
+      '<strong>a</strong><br><a href="/b">b</a> c',
+    );
   });
 });

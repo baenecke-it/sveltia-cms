@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { isDraftModified } from '$lib/services/contents/draft';
-import { createProxy, isDuplicatedField } from '$lib/services/contents/draft/create/proxy.svelte';
+import { createProxy, getListItemMatcher } from '$lib/services/contents/draft/create/proxy.svelte';
 import { getDefaultValues } from '$lib/services/contents/draft/defaults';
 import { getField } from '$lib/services/contents/entry/fields';
+import { getLocalizedDateTimeValue } from '$lib/services/contents/fields/date-time/value';
+import { isDuplicatedField } from '$lib/services/contents/i18n/shared-values';
 import { useActualDraftFieldArgs } from '$lib/test/fields';
 
 import {
@@ -13,8 +15,22 @@ import {
 } from './locale';
 
 vi.mock('$lib/services/contents/draft/create/proxy.svelte');
+vi.mock('$lib/services/contents/i18n/shared-values', async (importOriginal) => ({
+  .../** @type {any} */ (await importOriginal()),
+  isDuplicatedField: vi.fn(),
+}));
 vi.mock('$lib/services/contents/draft/defaults');
+// A Hidden field’s default can take the signed-in user’s details
+vi.mock('$lib/services/user/account.svelte', () => ({
+  user: { account: { email: 'jane@example.com', login: 'jane', name: 'Jane' } },
+}));
 vi.mock('$lib/services/contents/entry/fields');
+vi.mock('$lib/services/contents/fields/date-time/value', async (importOriginal) => ({
+  .../** @type {object} */ (await importOriginal()),
+  getLocalizedDateTimeValue: vi.fn(({ fieldConfig, value, targetLocale }) =>
+    fieldConfig.widget === 'datetime' ? `${value} (${targetLocale})` : value,
+  ),
+}));
 
 await useActualDraftFieldArgs();
 
@@ -108,15 +124,20 @@ describe('draft/update/locale', () => {
       expect(visited).toEqual(['ja']);
     });
 
-    it('should visit every locale for a duplicate field', () => {
-      /** @type {string[]} */
-      const visited = [];
+    it('should visit every locale for a duplicate or sync field', () => {
+      ['duplicate', 'sync'].forEach((i18n) => {
+        /** @type {string[]} */
+        const visited = [];
 
-      forEachTargetLocale({ valueStore, locale: 'ja', i18n: 'duplicate' }, (_valueMap, _locale) => {
-        visited.push(_locale);
+        forEachTargetLocale(
+          { valueStore, locale: 'ja', i18n: /** @type {any} */ (i18n) },
+          (_valueMap, _locale) => {
+            visited.push(_locale);
+          },
+        );
+
+        expect(visited).toEqual(['en', 'ja', 'fr']);
       });
-
-      expect(visited).toEqual(['en', 'ja', 'fr']);
     });
 
     it('should visit every locale for a field in a duplicated List or Object field', () => {
@@ -153,6 +174,7 @@ describe('draft/update/locale', () => {
       };
 
       vi.mocked(isDuplicatedField).mockReturnValue(true);
+      vi.mocked(getListItemMatcher).mockReturnValue(() => true);
 
       // The field configuration is looked up, so the `false` the caller defaulted to is ignored
       const tagsField = { name: 'tags', widget: 'list' };
@@ -183,6 +205,52 @@ describe('draft/update/locale', () => {
       run({ store: { en: {}, ja: {} } });
       expect(visited).toEqual(['en']);
       expect(isDuplicatedField).not.toHaveBeenCalled();
+      vi.mocked(isDuplicatedField).mockReset();
+    });
+
+    it('should skip a locale without the list item the field belongs to', () => {
+      // https://github.com/sveltia/sveltia-cms/issues/1075
+      const draft = {
+        collectionName: 'posts',
+        fileName: undefined,
+        isIndexFile: false,
+        currentValues: valueStore,
+      };
+
+      const limitField = { name: 'limit', widget: 'number', i18n: 'duplicate' };
+      /** @type {string[]} */
+      const visited = [];
+
+      vi.mocked(getField).mockReturnValue(/** @type {any} */ (limitField));
+      vi.mocked(isDuplicatedField).mockReturnValue(true);
+      vi.mocked(getListItemMatcher).mockReturnValue((content) => content === valueStore.fr);
+
+      forEachTargetLocale(
+        {
+          valueStore,
+          locale: 'en',
+          i18n: 'duplicate',
+          draft: /** @type {any} */ (draft),
+          keyPath: 'blocks.1.limit',
+        },
+        (_valueMap, _locale) => {
+          visited.push(_locale);
+        },
+      );
+
+      expect(visited).toEqual(['en', 'fr']);
+      expect(getListItemMatcher).toHaveBeenCalledOnce();
+      expect(getListItemMatcher).toHaveBeenCalledWith({
+        fieldConfig: limitField,
+        getFieldArgs: {
+          collectionName: 'posts',
+          fileName: undefined,
+          isIndexFile: false,
+          keyPath: 'blocks.1.limit',
+          valueMap: valueStore.en,
+        },
+      });
+      vi.mocked(getListItemMatcher).mockReset();
       vi.mocked(isDuplicatedField).mockReset();
     });
 
@@ -225,6 +293,16 @@ describe('draft/update/locale', () => {
       const result = copyDefaultLocaleValues(content, 'en');
 
       expect(result.title).toBe('');
+    });
+
+    it('keeps the default locale’s value of a `duplicate_if_empty` text field', () => {
+      vi.mocked(getField).mockImplementation(({ keyPath }) =>
+        keyPath === 'title'
+          ? { name: 'title', widget: 'string', i18n: 'duplicate_if_empty' }
+          : undefined,
+      );
+
+      expect(copyDefaultLocaleValues({ title: '' }, 'fr').title).toBe('English Title');
     });
 
     it('should not copy non-translatable fields to other locales', () => {
@@ -281,6 +359,59 @@ describe('draft/update/locale', () => {
       // A Compute field generating UUIDs is cleared to be resolved again, but not any other one
       expect(result.key).toBe('');
       expect(result.label).toBe('English Title');
+    });
+
+    it('replaces the locale prefix of a Relation field value copied from the default locale', () => {
+      /** @type {Record<string, any>} */
+      const fieldMap = {
+        author: {
+          name: 'author',
+          widget: 'relation',
+          i18n: 'duplicate',
+          collection: 'authors',
+          value_field: '{{locale}}/{{slug}}',
+        },
+        'tags.0': {
+          name: 'tags',
+          widget: 'relation',
+          i18n: 'duplicate',
+          multiple: true,
+          collection: 'tags',
+          value_field: '{{locale}}/{{slug}}',
+        },
+        title: { name: 'title', widget: 'string', i18n: true },
+      };
+
+      vi.mocked(getField).mockImplementation(({ keyPath }) => fieldMap[keyPath]);
+      mockEntryDraft.currentValues.en = { author: 'en/jane', 'tags.0': 'en/news', title: 'Launch' };
+
+      const result = copyDefaultLocaleValues({}, 'fr');
+
+      expect(result.author).toBe('fr/jane');
+      expect(result['tags.0']).toBe('fr/news');
+      expect(result.title).toBe('');
+    });
+
+    it('writes a DateTime field value copied from the default locale in the target locale', () => {
+      /** @type {Record<string, any>} */
+      const fieldMap = {
+        date: { name: 'date', widget: 'datetime', i18n: 'duplicate', localize_format: true },
+        title: { name: 'title', widget: 'string', i18n: true },
+      };
+
+      vi.mocked(getField).mockImplementation(({ keyPath }) => fieldMap[keyPath]);
+      mockEntryDraft.currentValues.en = { date: '1 March 2026', title: 'Launch' };
+
+      const result = copyDefaultLocaleValues({}, 'fr');
+
+      expect(result.date).toBe('1 March 2026 (fr)');
+      expect(result.title).toBe('');
+      expect(getLocalizedDateTimeValue).toHaveBeenCalledWith({
+        fieldConfig: fieldMap.date,
+        value: '1 March 2026',
+        sourceLocale: 'en',
+        targetLocale: 'fr',
+      });
     });
 
     it('should remove i18n disabled fields', () => {
@@ -496,6 +627,38 @@ describe('draft/update/locale', () => {
 
       // Hidden field with default: '{{locale}}' should be replaced with target language
       expect(result.locale_code).toBe('fr');
+    });
+
+    it('should fill in a templated Hidden default again but copy a static one', () => {
+      /** @type {Record<string, any>} */
+      const hiddenFields = {
+        ref: { name: 'ref', widget: 'hidden', i18n: true, default: '{{uuid}}' },
+        created_by: {
+          name: 'created_by',
+          widget: 'hidden',
+          i18n: true,
+          default: '{{author-login}}',
+        },
+        // A template tag escaped with a backslash isn’t one
+        literal: { name: 'literal', widget: 'hidden', i18n: true, default: '\\{{uuid}}' },
+        kind: { name: 'kind', widget: 'hidden', i18n: true, default: 'post' },
+      };
+
+      vi.mocked(getField).mockImplementation(({ keyPath }) => hiddenFields[keyPath]);
+      mockEntryDraft.currentValues.en = {
+        ref: 'old-uuid',
+        created_by: 'someone',
+        literal: '{{uuid}}',
+        kind: 'page',
+      };
+
+      const result = copyDefaultLocaleValues({}, 'fr');
+
+      expect(result.ref).toMatch(/^[\da-f]{8}-[\da-f]{4}-/);
+      expect(result.created_by).toBe('jane');
+      expect(result.literal).toBe('{{uuid}}');
+      // An entry keeps a value saved with an older configuration
+      expect(result.kind).toBe('page');
     });
 
     it('should replace {{locale}} placeholder for hidden field with i18n: "translate" (lines 53-63)', () => {

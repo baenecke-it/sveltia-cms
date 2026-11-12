@@ -8,15 +8,13 @@
   import { Alert, Menu, MenuButton, MenuItemRadio, Toast } from '@sveltia/ui';
 
   import StatusBadge from '$lib/components/workflow/status-badge.svelte';
-  import { getCollection } from '$lib/services/contents/collection';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
   import { env } from '$lib/services/user/env.svelte';
   import { WORKFLOW_STATUS_LABELS } from '$lib/services/workflow/constants';
-  import { handleEntryAlreadyPublished } from '$lib/services/workflow/editor';
+  import { runWorkflowEditorAction } from '$lib/services/workflow/editor';
   import { updateWorkflowStatus } from '$lib/services/workflow/save';
-  import { getEntryStage, getWorkflowStages } from '$lib/services/workflow/stages';
+  import { getStageOfEntry, getStagesOfEntry } from '$lib/services/workflow/stages';
   import { canMoveToStatus } from '$lib/services/workflow/validate';
-  import { getWorkflowErrorMessage } from '$lib/services/workflow/verify';
 
   /**
    * @import { UnpublishedEntry, WorkflowStatus } from '$lib/types/private';
@@ -31,23 +29,23 @@
   const entryDraft = getEntryDraftContext();
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    entry,
-    disabled = false,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { entry, disabled = false } = $props();
 
   let updating = $state(false);
   let showErrorToast = $state(false);
   let errorMessage = $state('');
   let showValidationToast = $state(false);
+  /**
+   * Incremented when a status change fails or is blocked, to render the menu items again: a menu
+   * item checks itself once clicked, and would otherwise stay checked, so the stage couldn’t be
+   * picked again to retry.
+   */
+  let itemsVersion = $state(0);
 
-  const collection = $derived(getCollection(entry.workflow.collectionName));
   // The stages the collection is configured with, and the one the entry is in. A pull request whose
   // label isn’t among the stages is shown in the nearest earlier one
-  const stages = $derived(getWorkflowStages(collection));
-  const status = $derived(getEntryStage(entry, collection));
+  const stages = $derived(getStagesOfEntry(entry));
+  const status = $derived(getStageOfEntry(entry));
   const statusName = $derived(_(WORKFLOW_STATUS_LABELS[status]));
   // The status name alone doesn’t say what it refers to, so spell it out where there’s room. A
   // small screen only gets the name, but the accessible name keeps the prefix for context
@@ -64,35 +62,35 @@
       return;
     }
 
-    // An entry can be saved as a draft with its required fields left empty, so it has to be checked
-    // before it moves towards being published
-    if (!canMoveToStatus({ entry, status: newStatus, draft: entryDraft.current })) {
-      showValidationToast = true;
+    const { blocked, errorMessage: message } = await runWorkflowEditorAction({
+      entry,
+      entryDraft,
+      valid: canMoveToStatus({ entry, status: newStatus, draft: entryDraft.current }),
+      /**
+       * Change the status, flagging the change as under way.
+       * @returns {Promise<UnpublishedEntry>} Updated entry.
+       */
+      action: () => {
+        updating = true;
 
+        return updateWorkflowStatus(entry, newStatus);
+      },
+      failure: 'workflow.status_change_failed',
+      handleAlreadyPublished: true,
+    });
+
+    updating = false;
+
+    if (blocked) {
+      showValidationToast = true;
+    } else if (message) {
+      errorMessage = message;
+      showErrorToast = true;
+    } else {
       return;
     }
 
-    updating = true;
-
-    // Read these up front: an entry that turns out to have been published leaves
-    // `unpublishedEntries`, and the `entry` prop is derived from that store
-    const { collectionName, pullRequest } = entry.workflow;
-
-    try {
-      await updateWorkflowStatus(entry, newStatus);
-    } catch (/** @type {any} */ ex) {
-      // An entry published since it was opened closes the editor instead
-      if (
-        !handleEntryAlreadyPublished(ex, { entryDraft, branch: pullRequest.branch, collectionName })
-      ) {
-        errorMessage = getWorkflowErrorMessage(ex, 'workflow.status_change_failed');
-        showErrorToast = true;
-        // eslint-disable-next-line no-console
-        console.error(ex);
-      }
-    } finally {
-      updating = false;
-    }
+    itemsVersion += 1;
   };
 </script>
 
@@ -112,15 +110,17 @@
   >
     {#snippet popup()}
       <Menu ariaLabel={_('workflow.change_entry_status')}>
-        {#each stages as _status (_status)}
-          <MenuItemRadio
-            label={_(WORKFLOW_STATUS_LABELS[_status])}
-            checked={_status === status}
-            onChange={() => {
-              changeStatus(_status);
-            }}
-          />
-        {/each}
+        {#key itemsVersion}
+          {#each stages as _status (_status)}
+            <MenuItemRadio
+              label={_(WORKFLOW_STATUS_LABELS[_status])}
+              checked={_status === status}
+              onChange={() => {
+                changeStatus(_status);
+              }}
+            />
+          {/each}
+        {/key}
       </Menu>
     {/snippet}
   </MenuButton>

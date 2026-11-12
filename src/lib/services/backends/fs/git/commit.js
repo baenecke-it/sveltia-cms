@@ -1,21 +1,31 @@
 /* eslint-disable no-await-in-loop */
 /* eslint-disable no-restricted-syntax */
 
-import { DIR, INDEX_PATH, ZERO_OID } from '$lib/services/backends/fs/git/constants';
-import { exists } from '$lib/services/backends/fs/git/file-system';
+import {
+  DIR,
+  EXECUTABLE_FILE_MODE,
+  INDEX_PATH,
+  REGULAR_FILE_MODE,
+  ZERO_OID,
+} from '$lib/services/backends/fs/git/constants';
+import { exists, splitPath } from '$lib/services/backends/fs/git/file-system';
 import {
   createIndexEntry,
-  EXECUTABLE_FILE_MODE,
   findIndexEntry,
-  REGULAR_FILE_MODE,
   serializeIndex,
   updateIndexEntries,
 } from '$lib/services/backends/fs/git/index-file';
 import { writeLooseObject } from '$lib/services/backends/fs/git/objects';
-import { getIndexChecksum, setIndexCache } from '$lib/services/backends/fs/git/repository';
+import {
+  getIndexChecksum,
+  resolveBranchHead,
+  setIndexCache,
+} from '$lib/services/backends/fs/git/repository';
 import { buildTree, serializeTree, writeChangedTrees } from '$lib/services/backends/fs/git/tree';
+import { hasOtherSpellings, pickEntryName } from '$lib/services/backends/fs/shared/handles';
 import { createCommitMessage } from '$lib/services/backends/git/shared/commits';
 import { mapConcurrently } from '$lib/services/backends/git/shared/concurrency';
+import { textEncoder } from '$lib/services/utils/bytes';
 
 /**
  * @import {
@@ -83,6 +93,39 @@ const getIndexPathResolver = (entries) => {
 };
 
 /**
+ * Get the path a saved file that isn’t in the index has in the working tree. The file the CMS has
+ * saved keeps the name it has on the disk, which can be in Unicode normalization form D, as can the
+ * name of a folder on its path, and a file system that compares names byte for byte, like ext4,
+ * doesn’t find it by the path in form C. Git adds a file with the name it has on the disk there.
+ * On macOS, which ignores the normalization, the path is kept as it is, the way Git adds it there
+ * by default.
+ * @param {GitFileSystem} fs File system.
+ * @param {GitIndexEntry[]} entries Index entries.
+ * @param {string} path Path, as spelled in the index if the file or a folder on its path is there.
+ * @returns {Promise<string>} Path in the working tree, or the given path if it can’t be found.
+ */
+const getWorkingTreePath = async (fs, entries, path) => {
+  if (!hasOtherSpellings(path) || findIndexEntry(entries, path).found || (await exists(fs, path))) {
+    return path;
+  }
+
+  /** @type {string[]} */
+  const names = [];
+
+  for (const segment of splitPath(path)) {
+    const name = pickEntryName(await fs.readdir(names.join('/')), segment);
+
+    if (!name) {
+      return path;
+    }
+
+    names.push(name);
+  }
+
+  return names.join('/');
+};
+
+/**
  * Get the paths of the files a list of changes adds or updates.
  * @param {FileChange[]} changes Changes, with paths relative to the repository root.
  * @returns {string[]} Paths.
@@ -126,7 +169,7 @@ export const convertToLF = (content) => {
     return content;
   }
 
-  return new TextEncoder().encode(text.replaceAll('\r\n', '\n'));
+  return textEncoder.encode(text.replaceAll('\r\n', '\n'));
 };
 
 /**
@@ -229,7 +272,13 @@ const stageAndCommit = async (repository, changes, options) => {
   let { index, indexTree: tree } = repository;
   const toIndexPath = getIndexPathResolver(index.entries);
   const removedPaths = new Set(getRemovedPaths(changes).map(toIndexPath));
-  const addedPaths = getAddedPaths(changes).map(toIndexPath);
+
+  const addedPaths = await mapConcurrently(
+    getAddedPaths(changes),
+    (path) => getWorkingTreePath(fs, index.entries, toIndexPath(path)),
+    { concurrency: STAGING_CONCURRENCY },
+  );
+
   const addedEntries = await stageFiles(repository, addedPaths);
 
   // The index is updated in memory and written once, rather than with `git.add()` and
@@ -267,14 +316,7 @@ const stageAndCommit = async (repository, changes, options) => {
     writeTree: (treeEntries) => writeLooseObject(fs, 'tree', serializeTree(treeEntries)),
   });
 
-  /** @type {string | undefined} */
-  let currentHeadOid;
-
-  try {
-    currentHeadOid = await git.resolveRef({ fs, dir: DIR, ref: branch });
-  } catch {
-    //
-  }
+  const currentHeadOid = await resolveBranchHead(git, fs, branch);
 
   // Git can’t update the branch while the index is locked, but a tool that doesn’t check the lock
   // could have, and the new commit would undo its commit

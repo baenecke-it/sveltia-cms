@@ -10,7 +10,7 @@
   import { _ } from '@sveltia/i18n';
   import { ConfirmationDialog, TextArea } from '@sveltia/ui';
   import { sleep } from '@sveltia/utils/misc';
-  import { flushSync, getContext, tick } from 'svelte';
+  import { flushSync, tick } from 'svelte';
   import { flip } from 'svelte/animate';
 
   import SelectAssetsDialog from '$lib/components/assets/browser/select-assets-dialog.svelte';
@@ -25,7 +25,10 @@
     moveMultiValueItem,
     removeMultiValueItem,
   } from '$lib/services/contents/draft/update/list';
-  import { isInEditorComponent } from '$lib/services/contents/editor/field-context';
+  import {
+    getFieldEditorContext,
+    isInEditorComponent,
+  } from '$lib/services/contents/editor/field-context';
   import { checkDuplicates } from '$lib/services/contents/fields/file/duplicates.svelte';
   import { createFolderAssetListing } from '$lib/services/contents/fields/file/listing.svelte';
   import {
@@ -39,16 +42,9 @@
   import { createDragSorter } from '$lib/services/utils/drag-sorting.svelte';
 
   /**
-   * @import {
-   * AssetFolderInfo,
-   * EntryDraft,
-   * FieldEditorContext,
-   * FieldEditorProps,
-   * InternalLocaleCode,
-   * MediaLibraryAssetKind,
-   * SelectedResource,
-   * } from '$lib/types/private';
+   * @import { FieldEditorProps, SelectedResource } from '$lib/types/private';
    * @import { FileField, MediaField } from '$lib/types/public';
+   * @import { FolderAssetListingOptions } from '$lib/services/contents/fields/file/listing.svelte';
    */
 
   /**
@@ -59,18 +55,16 @@
 
   const entryDraft = getEntryDraftContext();
 
-  /** @type {FieldEditorContext} */
   const {
     valueStoreKey = 'currentValues',
     fieldContext = undefined,
     parentComponentNames = [],
-  } = getContext('field-editor') ?? {};
+  } = getFieldEditorContext();
   const inEditorComponent = isInEditorComponent(valueStoreKey);
   const componentName = parentComponentNames.at(-1);
 
   /** @type {FieldEditorProps & Props} */
   let {
-    /* eslint-disable prefer-const */
     locale,
     keyPath,
     typedKeyPath,
@@ -80,7 +74,6 @@
     required = true,
     readonly = false,
     invalid = false,
-    /* eslint-enable prefer-const */
   } = $props();
 
   let showSelectAssetsDialog = $state(false);
@@ -142,38 +135,20 @@
   const targetFolder = $derived(assetOptions.folder);
   // The existing files a dropped one could replace. One of another type isn’t listed: a dropped
   // file of that type is refused, unless a transformation gives it another name
-  const assetListing = createFolderAssetListing({
+  const assetListing = createFolderAssetListing(
     /**
-     * Get the entry draft.
-     * @returns {EntryDraft | null | undefined} Draft.
+     * Get the listing options.
+     * @returns {FolderAssetListingOptions} Options.
      */
-    getDraft: () => entryDraft.current,
-    /**
-     * Get the target folder.
-     * @returns {AssetFolderInfo | undefined} Folder.
-     */
-    getFolder: () => targetFolder,
-    /**
-     * Get the locale being edited.
-     * @returns {InternalLocaleCode} Locale.
-     */
-    getLocale: () => locale,
-    /**
-     * Get the asset kind.
-     * @returns {MediaLibraryAssetKind | undefined} Kind.
-     */
-    getKind: () => kind,
-    /**
-     * Get the accepted file types.
-     * @returns {string | undefined} Types.
-     */
-    getAccept: () => acceptedTypes,
-    /**
-     * Get whether file names are slugified.
-     * @returns {boolean | undefined} Whether to slugify.
-     */
-    getSlugificationEnabled: () => libraryConfig.slugify_filename,
-  });
+    () => ({
+      draft: entryDraft.current,
+      folder: targetFolder,
+      locale,
+      kind,
+      accept: acceptedTypes,
+      slugificationEnabled: libraryConfig.slugify_filename,
+    }),
+  );
   const multiple = $derived(isMultiple(fieldConfig));
   const itemCount = $derived(Array.isArray(currentValue) ? currentValue.length : 0);
   /** Whether a multiple-file field has as many files as it takes, so no more can be dropped. */
@@ -207,10 +182,12 @@
    */
   const isDefaultLibraryAvailable = $derived(assetOptions.enabled && !!targetFolder);
   /**
-   * The total number of available media storage providers (default and/or cloud).
+   * The total number of available media storage providers (default and/or cloud) that can take
+   * dropped files. A cloud service without an upload function, like Cloudinary, can’t.
    */
   const totalProviders = $derived(
-    (isDefaultLibraryAvailable ? 1 : 0) + enabledCloudServiceEntries.length,
+    (isDefaultLibraryAvailable ? 1 : 0) +
+      enabledCloudServiceEntries.filter(([, { upload }]) => !!upload).length,
   );
   /**
    * Disable the drop zone if there are no providers or multiple providers are available, to avoid
@@ -450,13 +427,7 @@
   {#if !!currentValue?.length && !processing}
     {#if multiple}
       {#if Array.isArray(currentValue)}
-        <div
-          role="none"
-          class="item-list"
-          bind:this={itemList}
-          ondragovercapture={sorter.onDragOver}
-          ondropcapture={sorter.onDrop}
-        >
+        <div role="none" class="item-list" bind:this={itemList} {...sorter.listProps}>
           {#each sorter.displayOrder as index (`${currentValue[index]}|${index}`)}
             <!--
               The wrapper is what the `flip` animation moves: `animate:` only works on an element at

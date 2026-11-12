@@ -12,7 +12,8 @@ import { DEFAULT_VALIDITY, finalizeValidity } from '$lib/services/contents/draft
 import { buildEntryUpdateChanges } from '$lib/services/contents/entry/changes';
 import { isEntryReadonly } from '$lib/services/contents/entry/readonly';
 import { assignAutoNowValues } from '$lib/services/contents/fields/date-time/auto-now';
-import { getUnpublishedEntriesByCollection } from '$lib/services/workflow';
+import { getLocalizedFieldValue } from '$lib/services/contents/fields/locale';
+import { getCompanionEntries, getUnpublishedEntriesByCollection } from '$lib/services/workflow';
 
 import {
   applyBulkEdits,
@@ -25,6 +26,11 @@ import {
   setBulkEditValue,
   validateBulkEdits,
 } from '.';
+
+vi.mock('$lib/services/contents/entry', async (importOriginal) => ({
+  ...(await importOriginal()),
+  getPreviewPath: vi.fn(({ slug, content }) => `${content.title}/${slug}/`),
+}));
 
 vi.mock('$lib/services/backends/refresh', () => ({
   checkForRemoteChanges: vi.fn(),
@@ -84,6 +90,12 @@ vi.mock('$lib/services/contents/entry/readonly', () => ({
   isEntryReadonly: vi.fn(() => false),
 }));
 
+vi.mock('$lib/services/contents/fields/locale', async (importOriginal) => {
+  const actual = /** @type {any} */ (await importOriginal());
+
+  return { getLocalizedFieldValue: vi.fn(actual.getLocalizedFieldValue) };
+});
+
 vi.mock('$lib/services/contents/fields/date-time/auto-now', () => ({
   // Stand in for the real one, which looks the field up by the collection name: set the `updated`
   // field, which the tests configure with the `auto_now` option, wherever it’s present
@@ -98,6 +110,7 @@ vi.mock('$lib/services/contents/fields/date-time/auto-now', () => ({
 
 vi.mock('$lib/services/workflow', async (importOriginal) => ({
   .../** @type {object} */ (await importOriginal()),
+  getCompanionEntries: vi.fn(() => []),
   getUnpublishedEntriesByCollection: vi.fn(() => []),
 }));
 
@@ -332,9 +345,11 @@ describe('applyBulkEdits()', () => {
     expect(entry.locales._default.content).toEqual({ title: 'A', draft: false, updated: 'THEN' });
 
     expect(assignAutoNowValues).toHaveBeenCalledExactlyOnceWith({
-      isNew: false,
+      collection,
       collectionName: 'posts',
+      fields: collection.fields,
       isIndexFile: false,
+      isNew: false,
       currentValues: { _default: { title: 'B', draft: true, updated: 'NOW' } },
     });
   });
@@ -343,8 +358,16 @@ describe('applyBulkEdits()', () => {
     const collection = makeCollection({
       fields: [
         { name: 'title', widget: 'string', i18n: true },
-        { name: 'draft', widget: 'boolean', i18n: 'duplicate' },
+        // A synced field holds the same value in every locale as well
+        { name: 'draft', widget: 'boolean', i18n: 'sync' },
         { name: 'rank', widget: 'number' },
+        {
+          name: 'tag',
+          widget: 'relation',
+          collection: 'tags',
+          value_field: '{{locale}}/{{slug}}',
+          i18n: 'duplicate',
+        },
       ],
       _i18n: {
         i18nEnabled: true,
@@ -369,11 +392,18 @@ describe('applyBulkEdits()', () => {
     const updated = applyBulkEdits({
       collection,
       entry,
-      entryEdits: { title: 'B', draft: true, rank: 2, unknown: 'x' },
+      entryEdits: { title: 'B', draft: true, rank: 2, tag: 'en/food', unknown: 'x' },
     });
 
-    expect(updated.locales.en.content).toEqual({ title: 'B', draft: true, rank: 2, unknown: 'x' });
-    expect(updated.locales.fr.content).toEqual({ title: 'Á', draft: true });
+    expect(updated.locales.en.content).toEqual({
+      title: 'B',
+      draft: true,
+      rank: 2,
+      tag: 'en/food',
+      unknown: 'x',
+    });
+    // A duplicated value is localized for the locale
+    expect(updated.locales.fr.content).toEqual({ title: 'Á', draft: true, tag: 'fr/food' });
     // A locale without content is kept as is
     expect(updated.locales.de).toEqual({
       slug: 'a',
@@ -382,6 +412,72 @@ describe('applyBulkEdits()', () => {
     });
     expect(updated.locales.de).not.toBe(entry.locales.de);
     expect(entry.locales.fr.content).toEqual({ title: 'Á', draft: false });
+  });
+
+  test('writes a `duplicate_if_empty` field to the locales where it’s empty or still in sync', () => {
+    const collection = makeCollection({
+      fields: [{ name: 'title', widget: 'string', i18n: 'duplicate_if_empty' }],
+      _i18n: {
+        i18nEnabled: true,
+        allLocales: ['en', 'fr', 'de', 'ja'],
+        defaultLocale: 'en',
+        structureMap: {},
+      },
+    });
+
+    const entry = makeEntry(
+      'a',
+      {},
+      {
+        locales: {
+          en: { slug: 'a', path: 'a.en.md', content: { title: 'A' } },
+          fr: { slug: 'a', path: 'a.fr.md', content: { title: 'A' } },
+          de: { slug: 'a', path: 'a.de.md', content: {} },
+          ja: { slug: 'a', path: 'a.ja.md', content: { title: 'エー' } },
+        },
+      },
+    );
+
+    const updated = applyBulkEdits({ collection, entry, entryEdits: { title: 'B' } });
+
+    expect(updated.locales.en.content).toEqual({ title: 'B' });
+    expect(updated.locales.fr.content).toEqual({ title: 'B' });
+    expect(updated.locales.de.content).toEqual({ title: 'B' });
+    expect(updated.locales.ja.content).toEqual({ title: 'エー' });
+  });
+
+  test('compares and writes a `duplicate_if_empty` value localized for each locale', () => {
+    const original = vi.mocked(getLocalizedFieldValue).getMockImplementation();
+
+    // e.g. a DateTime field with the `localize_format` option
+    vi.mocked(getLocalizedFieldValue).mockImplementation(({ value, targetLocale }) =>
+      value ? `${value} (${targetLocale})` : value,
+    );
+
+    const collection = makeCollection({
+      fields: [{ name: 'date', widget: 'datetime', i18n: 'duplicate_if_empty' }],
+      _i18n: { i18nEnabled: true, allLocales: ['en', 'fr', 'de'], defaultLocale: 'en' },
+    });
+
+    const entry = makeEntry(
+      'a',
+      {},
+      {
+        locales: {
+          en: { slug: 'a', path: 'a.en.md', content: { date: 'May 1' } },
+          fr: { slug: 'a', path: 'a.fr.md', content: { date: 'May 1 (fr)' } },
+          de: { slug: 'a', path: 'a.de.md', content: { date: 'May 1' } },
+        },
+      },
+    );
+
+    const updated = applyBulkEdits({ collection, entry, entryEdits: { date: 'June 1' } });
+
+    vi.mocked(getLocalizedFieldValue).mockImplementation(/** @type {any} */ (original));
+
+    expect(updated.locales.fr.content).toEqual({ date: 'June 1 (fr)' });
+    // The value isn’t the previous one as written in the locale
+    expect(updated.locales.de.content).toEqual({ date: 'May 1' });
   });
 });
 
@@ -579,6 +675,21 @@ describe('validateBulkEdits()', () => {
     });
   });
 
+  test('counts a new entry riding along in the pull request of another entry', () => {
+    const collection = makeCollection();
+    const entries = [makeEntry('a', { slug: 'one' })];
+
+    vi.mocked(getEntriesByCollection).mockReturnValue(entries);
+    vi.mocked(getUnpublishedEntriesByCollection).mockReturnValue([]);
+    vi.mocked(getCompanionEntries).mockReturnValue([makeEntry('companion', { slug: 'two' })]);
+
+    expect(validateBulkEdits({ collection, entries, edits: { a: { slug: 'two' } } })).toEqual({
+      a: { slug: ['duplicateError'] },
+    });
+
+    vi.mocked(getCompanionEntries).mockReturnValue([]);
+  });
+
   test('counts an entry and its unpublished version renamed by a pull request once', () => {
     const collection = makeCollection();
     const entries = [makeEntry('a', { slug: 'one' }), makeEntry('b', { slug: 'two' })];
@@ -712,6 +823,25 @@ describe('buildBulkEditChanges()', () => {
     });
   });
 
+  test('refreshes the permalink, which can depend on the edited field', async () => {
+    const collection = makeCollection({
+      permalink_field: true,
+      preview_path: '{{fields.title}}/{{slug}}/',
+    });
+
+    const entries = [makeEntry('a', { title: 'old', permalink: '/old/a/' })];
+
+    vi.mocked(getEntriesByCollection).mockReturnValue(entries);
+
+    const { savingEntries } = await buildBulkEditChanges({
+      collection,
+      entries,
+      edits: { a: { title: 'new' } },
+    });
+
+    expect(savingEntries[0].locales._default.content.permalink).toBe('/new/a/');
+  });
+
   test('flattens the changes of an entry stored in several files', async () => {
     vi.mocked(buildEntryUpdateChanges).mockResolvedValueOnce(
       /** @type {any} */ ([{ path: 'a.en.md' }, { path: 'a.fr.md' }]),
@@ -792,6 +922,8 @@ describe('saveBulkEdits()', () => {
       count: 2,
       saved: true,
       deleted: false,
+      // Skipping CI isn’t configured, so the entries aren’t said to be published
+      published: false,
     });
   });
 

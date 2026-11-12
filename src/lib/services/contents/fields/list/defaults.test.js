@@ -124,6 +124,115 @@ describe('Test getDefaultValueMap()', () => {
     expect(result).toEqual({ items: [], 'items.0': '<b>', 'items.1': 'a < b' });
   });
 
+  test('should convert dynamicValue items of a Number subfield to numbers', () => {
+    /** @type {ListField} */
+    const fieldConfig = {
+      ...baseFieldConfig,
+      field: { name: 'rating', widget: 'number' },
+    };
+
+    const result = getDefaultValueMap({
+      fieldConfig,
+      keyPath: 'items',
+      locale: '_default',
+      defaultLocale: '_default',
+      // An item that isn’t a number is left out, like the dynamic value of a Number field
+      dynamicValue: '1, 2.7, abc, 3',
+    });
+
+    expect(result).toEqual({ items: [], 'items.0': 1, 'items.1': 2, 'items.2': 3 });
+  });
+
+  test('should keep dynamicValue items of a Number subfield as strings for a string type', () => {
+    /** @type {ListField} */
+    const fieldConfig = {
+      ...baseFieldConfig,
+      field: { name: 'price', widget: 'number', value_type: 'float/string' },
+    };
+
+    const result = getDefaultValueMap({
+      fieldConfig,
+      keyPath: 'items',
+      locale: '_default',
+      defaultLocale: '_default',
+      dynamicValue: '1.50, 2',
+    });
+
+    expect(result).toEqual({ items: [], 'items.0': '1.5', 'items.1': '2' });
+  });
+
+  test('should convert dynamicValue items of a Boolean subfield to booleans', () => {
+    /** @type {ListField} */
+    const fieldConfig = {
+      ...baseFieldConfig,
+      field: { name: 'flag', widget: 'boolean' },
+    };
+
+    const result = getDefaultValueMap({
+      fieldConfig,
+      keyPath: 'items',
+      locale: '_default',
+      defaultLocale: '_default',
+      dynamicValue: 'true, false, yes',
+    });
+
+    expect(result).toEqual({ items: [], 'items.0': true, 'items.1': false, 'items.2': false });
+  });
+
+  test('should convert dynamicValue items of a Select subfield to the option values', () => {
+    /** @type {[Record<string, any>, string, any[]][]} */
+    const cases = [
+      // A number or boolean option is held as such, while an unknown value is kept as a string
+      [{ widget: 'select', options: [1, 2, 3] }, '1,, 2, 4', [1, 2, '4']],
+      [{ widget: 'select', options: [{ label: 'Yes', value: true }] }, 'true', [true]],
+      // Each item is a single option, even if the subfield allows multiple
+      [{ widget: 'select', options: [1, 2], multiple: true }, '1, 2', [1, 2]],
+      // A Relation field has no options, so its value is a string
+      [{ widget: 'relation', collection: 'authors' }, 'a, b', ['a', 'b']],
+    ];
+
+    cases.forEach(([field, dynamicValue, items]) => {
+      /** @type {ListField} */
+      const fieldConfig = {
+        ...baseFieldConfig,
+        field: /** @type {any} */ ({ name: 'item', ...field }),
+      };
+
+      const result = getDefaultValueMap({
+        fieldConfig,
+        keyPath: 'items',
+        locale: '_default',
+        defaultLocale: '_default',
+        dynamicValue,
+      });
+
+      expect(result).toEqual({
+        items: [],
+        ...Object.fromEntries(items.map((item, index) => [`items.${index}`, item])),
+      });
+    });
+  });
+
+  test('should take a default of numbers for a Number subfield', () => {
+    // The `default` option takes the values of the single subfield, which the type has to allow for
+    // the configuration to pass the schema validation
+    /** @type {ListField} */
+    const fieldConfig = {
+      ...baseFieldConfig,
+      field: { name: 'rating', widget: 'number' },
+      default: [3, 5],
+    };
+
+    const result = getDefaultValueMap({
+      fieldConfig,
+      keyPath: 'items',
+      locale: '_default',
+      defaultLocale: '_default',
+    });
+
+    expect(result).toEqual({ items: [], 'items.0': 3, 'items.1': 5 });
+  });
+
   test('should handle empty dynamicValue', () => {
     /** @type {ListField} */
     const fieldConfig = {

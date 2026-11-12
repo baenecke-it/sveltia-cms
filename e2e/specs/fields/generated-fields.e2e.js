@@ -599,6 +599,45 @@ test.describe('Compute field with a template tag in a transformation argument', 
   });
 });
 
+test.describe('Compute field with the plainify transformation', () => {
+  const SAVED = 'content/notes/episode.yml';
+
+  test.use({
+    config: config([
+      { name: 'body', label: 'Body', widget: 'richtext' },
+      {
+        name: 'description',
+        label: 'Description',
+        widget: 'compute',
+        value: "{{fields.body | plainify | truncate(30, '...')}}",
+      },
+    ]),
+  });
+
+  test.beforeEach(async ({ cms }) => {
+    await cms.open();
+    await cms.seed({
+      [SAVED]: [
+        'title: Episode',
+        'body: "# Intro\\n\\nHi, let’s **welcome** this morning [our guest](https://example.com)"',
+        '',
+      ].join('\n'),
+    });
+    await cms.signIn();
+  });
+
+  test('saves a truncated description without the Markdown syntax', async ({ cms, page }) => {
+    const editor = await openNote(page, 'Episode');
+
+    await editor.getByRole('textbox', { name: 'Title' }).fill('Episode 1');
+    await editor.getByRole('button', { name: 'Save' }).click();
+
+    await expect
+      .poll(async () => (await cms.readRepo())[SAVED])
+      .toMatch(/^description: Intro Hi, let’s welcome this m\.\.\.$/m);
+  });
+});
+
 test.describe('Code field', () => {
   const SAVED = 'content/notes/saved.yml';
 
@@ -751,5 +790,68 @@ test.describe('Code field', () => {
           '',
         ].join('\n'),
       );
+  });
+});
+
+test.describe('Compute field generating a UUID, duplicated to the other locales', () => {
+  const SAVED = 'content/notes/saved.yml';
+
+  test.use({
+    config: {
+      backend: { name: 'test-repo' },
+      media_folder: 'static/uploads',
+      i18n: { structure: 'single_file', locales: ['en', 'fr'] },
+      collections: [
+        {
+          ...notes([
+            { name: 'ref', label: 'Reference', widget: 'compute', value: '{{uuid_short}}' },
+          ]),
+          i18n: true,
+          fields: [
+            { name: 'title', label: 'Title', i18n: true },
+            {
+              name: 'ref',
+              label: 'Reference',
+              widget: 'compute',
+              value: '{{uuid_short}}',
+              i18n: 'duplicate',
+            },
+          ],
+        },
+      ],
+    },
+  });
+
+  test.beforeEach(async ({ cms }) => {
+    await cms.open();
+    await cms.seed({
+      [SAVED]: [
+        'en:',
+        '  title: Saved',
+        '  ref: 0123456789ab',
+        'fr:',
+        '  title: Enregistré',
+        '  ref: 0123456789ab',
+        '',
+      ].join('\n'),
+    });
+    await cms.signIn();
+  });
+
+  test('gives a duplicate one new UUID, shared by every locale', async ({ cms, page }) => {
+    const editor = await openNote(page, 'Saved');
+
+    await duplicate(cms, page);
+    await editor.getByRole('textbox', { name: 'Title' }).first().fill('Copy');
+    await editor.getByRole('button', { name: 'Save' }).click();
+
+    await expect.poll(async () => (await cms.readRepo())['content/notes/copy.yml']).toBeTruthy();
+
+    const saved = (await cms.readRepo())['content/notes/copy.yml'];
+    const refs = [...saved.matchAll(/^ {2}ref: (\S+)$/gm)].map(([, ref]) => ref);
+
+    expect(refs).toHaveLength(2);
+    expect(refs[0]).not.toBe('0123456789ab');
+    expect(refs[1]).toBe(refs[0]);
   });
 });

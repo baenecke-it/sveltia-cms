@@ -8,20 +8,21 @@ import {
   getSharedEntryFileName,
   usesCustomEntryPath,
 } from '$lib/services/contents/collection/nested';
-import {
-  getFolderName,
-  getOwnFolderName,
-  localizeDirPath,
-} from '$lib/services/contents/collection/nested/i18n';
+import { getOwnFolderName, localizeDirPath } from '$lib/services/contents/collection/nested/i18n';
 import { isArrayFileCollection } from '$lib/services/contents/collection/predicates';
-import { hasLocalizedSlugs } from '$lib/services/contents/draft/slugs';
+import { hasLocalizedSlugs } from '$lib/services/contents/collection/slug';
+import {
+  getChosenDirPath,
+  getEntryDateTimeParts,
+  getRandomValues,
+} from '$lib/services/contents/draft/slugs';
 import { resolveFileConfig } from '$lib/services/contents/file/config';
 import { getLocalePath } from '$lib/services/contents/i18n';
 import {
   fillLocalePlaceholder,
   hasLocalePlaceholder,
 } from '$lib/services/contents/i18n/placeholder';
-import { createPath } from '$lib/services/utils/file';
+import { createPath, getBaseName } from '$lib/services/utils/file';
 
 /**
  * @import {
@@ -90,8 +91,8 @@ export const buildPathByStructure = ({
  * folder named after the localized slug.
  * @param {object} args Arguments.
  * @param {EntryDraft} args.draft Entry draft.
- * @param {string} args.slug Entry slug in the locale. For an existing entry in a nested collection,
- * that’s the entry’s sub path in the locale.
+ * @param {string} args.slug Entry slug in the locale. For an existing entry in a collection with
+ * nested entries, that’s the entry’s sub path in the locale.
  * @param {string | undefined} args.indexFileName File name shared by every entry in the collection,
  * if any.
  * @param {InternalLocaleCode} args.locale Locale code.
@@ -107,14 +108,14 @@ export const buildCustomEntryPath = ({ draft, slug, indexFileName, locale }) => 
     // Every entry shares one file name, so a folder is what makes an entry. A new entry therefore
     // gets a folder of its own, named after the slug, within the folder the editor points at
     if (isNew) {
-      return createPath([localizeDirPath({ collection, dirPath, locale }), slug, indexFileName]);
+      return createPath([getChosenDirPath(draft, locale), slug, indexFileName]);
     }
 
     // An existing entry already has such a folder, and the editor points at it. In another locale,
     // the folder goes by the name in the localized slug; a locale that has just been enabled has a
     // bare slug, which becomes the folder name as it would for a new entry
     const parentPath = localizeDirPath({ collection, dirPath: getEntryDirPath(dirPath), locale });
-    const ownFolderName = localized ? getOwnFolderName(slug) || slug : getFolderName(dirPath);
+    const ownFolderName = localized ? getOwnFolderName(slug) || slug : getBaseName(dirPath);
 
     return createPath([parentPath, ownFolderName, indexFileName]);
   }
@@ -126,7 +127,8 @@ export const buildCustomEntryPath = ({ draft, slug, indexFileName, locale }) => 
 
   const fileName = originalSubPath ? getPathInfo(originalSubPath).basename : slug;
 
-  return createPath([localizeDirPath({ collection, dirPath, locale }), fileName]);
+  // A slug filed as a bare name has been made unique within the same folder
+  return createPath([getChosenDirPath(draft, locale), fileName]);
 };
 
 /**
@@ -218,11 +220,16 @@ export const createEntryPath = ({ draft, locale, slug }) => {
     : useCustomPath
       ? buildCustomEntryPath({ draft, slug, indexFileName, locale })
       : subPath
-        ? fillTemplate(subPath, {
+        ? // The template is filled with the default locale’s values, as the default locale, so
+          // that every locale, and every call for the same draft, e.g. for the entry file and for
+          // its entry-relative assets, gets the same random values for tags like `{{uuid_short}}`
+          fillTemplate(subPath, {
             collection: entryCollection,
-            locale,
+            locale: defaultLocale,
             content: currentValues[defaultLocale],
             currentSlug: slug,
+            dateTimeParts: getEntryDateTimeParts(draft),
+            randomValues: getRandomValues(draft),
           })
         : slug;
 

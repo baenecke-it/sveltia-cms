@@ -1,4 +1,5 @@
 import { customFileFormatRegistry } from '$lib/services/api/registries';
+import { assertOption } from '$lib/services/api/validate';
 import { BUILTIN_FILE_FORMATS } from '$lib/services/contents/file/constants';
 import { isNonEmptyString } from '$lib/services/utils/string';
 
@@ -20,7 +21,9 @@ import { isNonEmptyString } from '$lib/services/utils/string';
  * built-in parser for the format name, if any; without `toFile`, they are formatted likewise. If
  * the format name isn’t a built-in one, such as `yaml` or `json`, omit neither: without `fromFile`,
  * files in the format can’t be loaded, and without `toFile`, saving an entry fails with an error,
- * leaving the file untouched. A warning is logged when either is missing.
+ * leaving the file untouched. A warning is logged when either is missing. `toFile` is also given a
+ * context with a `serialize` function, which formats the content with the built-in formatter for
+ * a built-in format name, so its output can be post-processed, e.g. with a code formatter.
  * @throws {TypeError} If `name` or `extension` is not a non-empty string, or if `fromFile` or
  * `toFile` is given but not a function.
  * @throws {Error} If neither `fromFile` nor `toFile` is provided.
@@ -28,29 +31,29 @@ import { isNonEmptyString } from '$lib/services/utils/string';
  * @see https://sveltiacms.app/en/docs/api/file-formats
  */
 const registerCustomFormat = (name, extension, { fromFile, toFile } = {}) => {
-  if (!isNonEmptyString(name)) {
-    throw new TypeError(
-      'The `name` option for `CMS.registerCustomFormat()` must be a non-empty string',
-    );
-  }
-
-  if (!isNonEmptyString(extension)) {
-    throw new TypeError(
-      'The `extension` option for `CMS.registerCustomFormat()` must be a non-empty string',
-    );
-  }
+  assertOption(isNonEmptyString(name), 'registerCustomFormat', 'name', 'a non-empty string');
+  assertOption(
+    isNonEmptyString(extension),
+    'registerCustomFormat',
+    'extension',
+    'a non-empty string',
+  );
 
   // Check the types first, so a method given by mistake as a non-function is reported as such
   // rather than as a missing method
-  if (typeof fromFile !== 'undefined' && typeof fromFile !== 'function') {
-    throw new TypeError(
-      'The `fromFile` option for `CMS.registerCustomFormat()` must be a function',
-    );
-  }
+  assertOption(
+    fromFile === undefined || typeof fromFile === 'function',
+    'registerCustomFormat',
+    'fromFile',
+    'a function',
+  );
 
-  if (typeof toFile !== 'undefined' && typeof toFile !== 'function') {
-    throw new TypeError('The `toFile` option for `CMS.registerCustomFormat()` must be a function');
-  }
+  assertOption(
+    toFile === undefined || typeof toFile === 'function',
+    'registerCustomFormat',
+    'toFile',
+    'a function',
+  );
 
   if (typeof fromFile !== 'function' && typeof toFile !== 'function') {
     throw new Error(

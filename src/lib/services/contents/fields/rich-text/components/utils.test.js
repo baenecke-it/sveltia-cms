@@ -1,15 +1,19 @@
 // @vitest-environment happy-dom
 /* eslint-disable jsdoc/require-jsdoc */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
+  escapeAlt,
   escapeTitle,
+  followReadonly,
   getParentComponentNames,
   getSelectorTagNames,
+  isInlineComponentDef,
   isMultiLinePattern,
   isValidSelector,
   normalizeProps,
+  observeReadonly,
   supportsHTML,
   unescapeTitle,
 } from './utils.js';
@@ -77,6 +81,17 @@ describe('utils', () => {
       const result = isMultiLinePattern(pattern);
 
       expect(result).toBe(true);
+    });
+  });
+
+  describe('isInlineComponentDef', () => {
+    it('should tell a component with a single-line pattern', () => {
+      expect(isInlineComponentDef({ pattern: /\[\[(.+?)\]\]/ })).toBe(true);
+      expect(isInlineComponentDef({ pattern: /^<aside>[\s\S]*?<\/aside>$/m })).toBe(false);
+    });
+
+    it('should always tell a pattern-based inline component', () => {
+      expect(isInlineComponentDef({ pattern: /a[\s\S]b/s, inlinePattern: {} })).toBe(true);
     });
   });
 
@@ -220,6 +235,27 @@ describe('utils', () => {
       });
     });
   });
+
+  describe('escapeAlt', () => {
+    it('should escape brackets', () => {
+      expect(escapeAlt('smile :] [1')).toBe('smile :\\] \\[1');
+    });
+
+    it('should escape a backslash before a punctuation character or at the end', () => {
+      expect(escapeAlt('a\\] b\\* c\\')).toBe('a\\\\\\] b\\\\* c\\\\');
+    });
+
+    it('should keep other characters as is', () => {
+      expect(escapeAlt('')).toBe('');
+      expect(escapeAlt('C:\\Users "it\'s"')).toBe('C:\\Users "it\'s"');
+    });
+
+    it('should be the counterpart of unescapeTitle', () => {
+      ['a]', '[b', 'end\\', 'C:\\Users', '\\]', '\\\\[', '![x](y)'].forEach((alt) => {
+        expect(unescapeTitle(escapeAlt(alt))).toBe(alt);
+      });
+    });
+  });
 });
 
 describe('getSelectorTagNames', () => {
@@ -286,5 +322,107 @@ describe('getParentComponentNames', () => {
     ]);
     expect(getParentComponentNames(document.querySelector('#top') ?? undefined)).toEqual([]);
     expect(getParentComponentNames(undefined)).toEqual([]);
+  });
+});
+
+describe('observeReadonly', () => {
+  it('should follow the read-only state of the editor the component is in', async () => {
+    document.body.innerHTML =
+      '<div role="textbox" aria-readonly="true"><p><span id="component"></span></p></div>';
+
+    const textbox = /** @type {HTMLElement} */ (document.querySelector('[role="textbox"]'));
+    const callback = vi.fn();
+    const observer = observeReadonly(document.querySelector('#component') ?? undefined, callback);
+
+    expect(callback).toHaveBeenLastCalledWith(true);
+
+    textbox.setAttribute('aria-readonly', 'false');
+    await vi.waitFor(() => {
+      expect(callback).toHaveBeenLastCalledWith(false);
+    });
+
+    observer?.disconnect();
+    textbox.setAttribute('aria-readonly', 'true');
+    await new Promise((resolve) => {
+      setTimeout(resolve, 10);
+    });
+    expect(callback).toHaveBeenCalledTimes(2);
+  });
+
+  it('should do nothing outside an editor', () => {
+    document.body.innerHTML = '<span id="component"></span>';
+
+    const callback = vi.fn();
+
+    expect(observeReadonly(document.querySelector('#component') ?? undefined, callback)).toBe(
+      undefined,
+    );
+    expect(observeReadonly(undefined, callback)).toBe(undefined);
+    expect(callback).not.toHaveBeenCalled();
+  });
+});
+
+describe('followReadonly', () => {
+  /**
+   * Wait for the next frame.
+   * @returns {Promise<void>} Promise.
+   */
+  const nextFrame = () =>
+    new Promise((resolve) => {
+      window.requestAnimationFrame(() => resolve(undefined));
+    });
+
+  it('should follow the read-only state from the next frame on', async () => {
+    document.body.innerHTML =
+      '<div role="textbox" aria-readonly="true"><p><span id="component"></span></p></div>';
+
+    const textbox = /** @type {HTMLElement} */ (document.querySelector('[role="textbox"]'));
+    const callback = vi.fn();
+    const stop = followReadonly(document.querySelector('#component') ?? undefined, callback);
+
+    expect(callback).not.toHaveBeenCalled();
+
+    await nextFrame();
+    expect(callback).toHaveBeenLastCalledWith(true);
+
+    textbox.setAttribute('aria-readonly', 'false');
+    await vi.waitFor(() => {
+      expect(callback).toHaveBeenLastCalledWith(false);
+    });
+
+    stop();
+    textbox.setAttribute('aria-readonly', 'true');
+    await new Promise((resolve) => {
+      setTimeout(resolve, 10);
+    });
+    expect(callback).toHaveBeenCalledTimes(2);
+  });
+
+  it('should never call the callback if stopped before the frame', async () => {
+    document.body.innerHTML =
+      '<div role="textbox" aria-readonly="true"><p><span id="component"></span></p></div>';
+
+    const textbox = /** @type {HTMLElement} */ (document.querySelector('[role="textbox"]'));
+    const callback = vi.fn();
+    const stop = followReadonly(document.querySelector('#component') ?? undefined, callback);
+
+    stop();
+    await nextFrame();
+    textbox.setAttribute('aria-readonly', 'false');
+    await new Promise((resolve) => {
+      setTimeout(resolve, 10);
+    });
+    expect(callback).not.toHaveBeenCalled();
+  });
+
+  it('should do nothing outside an editor', async () => {
+    document.body.innerHTML = '<span id="component"></span>';
+
+    const callback = vi.fn();
+    const stop = followReadonly(document.querySelector('#component') ?? undefined, callback);
+
+    await nextFrame();
+    stop();
+    expect(callback).not.toHaveBeenCalled();
   });
 });

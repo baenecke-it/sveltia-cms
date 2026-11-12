@@ -4,9 +4,10 @@ import { allAssetFolders, selectedAssetFolder } from '$lib/services/assets/folde
 import { isCmsFolderName, isCmsFolderPath } from '$lib/services/assets/reserved';
 import { allAssets } from '$lib/services/assets/state';
 import { gitConfigFiles } from '$lib/services/backends/git/shared/config';
-import { slugify } from '$lib/services/common/slug';
+import { slugify, validateNewFolderName } from '$lib/services/common/slug';
+import { allEntries } from '$lib/services/contents';
 import { getDefaultMediaLibraryOptions } from '$lib/services/integrations/media-libraries/default';
-import { createPath, getDirName, sanitizeFileName } from '$lib/services/utils/file';
+import { createPath, getBaseName, getDirName, sanitizeFileName } from '$lib/services/utils/file';
 import { createDerivedState, createRawState } from '$lib/services/utils/state.svelte';
 
 /**
@@ -233,6 +234,26 @@ export const getFolderNamesInDir = (dirPath) =>
   });
 
 /**
+ * Get the names of the files right in a directory of the repository that aren’t assets, which a
+ * file renamed or uploaded there can’t take without overwriting them: the entry files, as in a Hugo
+ * page bundle keeping its images next to its `index.md`, and the Git config files like `.gitkeep`.
+ * @param {string} dirPath Directory path. An empty string for the repository root.
+ * @returns {string[]} Names.
+ */
+export const getNonAssetFileNamesInDir = (dirPath) => [
+  ...new Set(
+    [
+      ...allEntries.current.flatMap(({ locales }) =>
+        Object.values(locales).map(({ path }) => path),
+      ),
+      ...gitConfigFiles.current.map(({ path }) => path),
+    ]
+      .filter((path) => getDirName(path) === dirPath)
+      .map(getBaseName),
+  ),
+];
+
+/**
  * Get the breadcrumb trail of the subfolder being browsed, from the location root down. Each
  * ancestor leads back to itself; the last item is the subfolder being browsed.
  * @param {object} args Arguments.
@@ -341,29 +362,11 @@ export const formatSubfolderName = (name) => {
  * @returns {'empty' | 'invalid' | 'reserved' | 'duplicate' | undefined} What stops the name from
  * being used, or `undefined` if it can be used.
  */
-export const validateSubfolderName = ({ name, takenNames }) => {
-  const trimmedName = name.trim();
-
-  if (!trimmedName) {
-    return 'empty';
-  }
-
-  const folderName = formatSubfolderName(trimmedName);
-
-  // A name has to stay a single folder, a leading dot would hide the folder from most file
-  // listings, and sanitization can leave nothing to name the folder with
-  if (!folderName || trimmedName.includes('/') || folderName.startsWith('.')) {
-    return 'invalid';
-  }
-
+export const validateSubfolderName = ({ name, takenNames }) =>
   // The files in a folder the CMS itself is usually served from are read-only
-  if (isCmsFolderName(folderName)) {
-    return 'reserved';
-  }
-
-  const normalizedName = folderName.normalize().toLowerCase();
-
-  return takenNames.some((taken) => taken.normalize().toLowerCase() === normalizedName)
-    ? 'duplicate'
-    : undefined;
-};
+  validateNewFolderName({
+    name,
+    takenNames,
+    format: formatSubfolderName,
+    isReserved: isCmsFolderName,
+  });

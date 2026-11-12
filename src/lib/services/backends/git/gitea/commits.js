@@ -8,9 +8,12 @@ import {
   createCommitMessage,
   createLastCommitError,
   fetchPerPathCommits,
+  MAX_FILE_COMMITS,
+  signOffCommitMessage,
 } from '$lib/services/backends/git/shared/commits';
 import { checkDirectCommitAllowed } from '$lib/services/backends/git/shared/fork';
 import { repositoryHead } from '$lib/services/backends/git/shared/head';
+import { getRepositoryPath } from '$lib/services/backends/git/shared/repository';
 import { user } from '$lib/services/user/account.svelte';
 import { encodePathSegments } from '$lib/services/utils/url';
 
@@ -76,7 +79,7 @@ const getKnownSha = async ({ action, path, previousPath, previousSha }, workflow
   // A workflow branch has moved on from the configured one, so the file is looked up on the branch
   // the commit lands on, in the repository it lives in. The Editorial Workflow service resolves
   // these ahead of the commit, so this is a fallback rather than the usual path
-  const { owner, repo } = workflowBranch ? getWorkflowRepository() : repository;
+  const repoPath = getRepositoryPath(workflowBranch ? getWorkflowRepository() : repository);
   const ref = workflowBranch ?? repositoryHead.current;
   const knownPath = (action === 'move' && previousPath) || path;
 
@@ -87,7 +90,7 @@ const getKnownSha = async ({ action, path, previousPath, previousSha }, workflow
   const filePath = encodePathSegments(knownPath);
 
   const { sha } = /** @type {{ sha: string }} */ (
-    await fetchAPI(`/repos/${owner}/${repo}/contents/${filePath}?ref=${encodeURIComponent(ref)}`)
+    await fetchAPI(`${repoPath}/contents/${filePath}?ref=${encodeURIComponent(ref)}`)
   );
 
   return sha;
@@ -105,10 +108,10 @@ export const commitChanges = async (changes, options) => {
 
   // A workflow branch lives in the contributor’s fork with Open Authoring, while the configured
   // branch is only ever committed to by someone who can write to the configured repository
-  const { owner, repo } = options.branch ? getWorkflowRepository() : repository;
+  const repoPath = getRepositoryPath(options.branch ? getWorkflowRepository() : repository);
   // An Editorial Workflow change lands on a workflow branch rather than the configured one
   const { branch = repository.branch, startBranch } = options;
-  const commitMessage = createCommitMessage(changes, options);
+  const commitMessage = signOffCommitMessage(createCommitMessage(changes, options));
   const { name, email } = /** @type {User} */ (user.account);
   const date = new Date().toJSON();
 
@@ -144,7 +147,7 @@ export const commitChanges = async (changes, options) => {
 
   try {
     response = /** @type {CommitResponse} */ (
-      await fetchAPI(`/repos/${owner}/${repo}/contents`, {
+      await fetchAPI(`${repoPath}/contents`, {
         method: 'POST',
         body: {
           // `new_branch` creates the target branch from `branch` as part of the commit.
@@ -158,6 +161,9 @@ export const commitChanges = async (changes, options) => {
           message: commitMessage,
           files,
         },
+        // The commit can be sent again after a transient error: one that has already landed is
+        // refused, as a created file then exists and a changed file no longer has the given SHA
+        retryable: true,
       })
     );
   } catch (/** @type {any} */ ex) {
@@ -188,33 +194,70 @@ export const commitChanges = async (changes, options) => {
 };
 
 /**
+ * Maximum number of pages to read from a file’s commit history, a safety net against a runaway
+ * loop on an instance configured with a tiny page size.
+ */
+const MAX_FILE_COMMIT_PAGES = 10;
+
+/**
+ * Fetch the commit history of a file, up to {@link MAX_FILE_COMMITS} commits. With a `path` filter,
+ * the instance ignores `limit` and returns `[git] COMMITS_RANGE_SIZE` commits per page, 50 by
+ * default, so the further pages are read while the `X-HasMore` header says there are any. The
+ * header is exposed to cross-origin requests; without it, only the first page is read.
+ * @param {string} path File path.
+ * @returns {Promise<any[]>} Raw commit list.
+ * @throws {Error} When the instance responded with an error.
+ * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoGetAllCommits
+ * @see https://docs.gitea.com/administration/config-cheat-sheet#git-git
+ */
+const fetchFileHistory = async (path) => {
+  const { branch } = repository;
+  /** @type {any[]} */
+  const commits = [];
+
+  for (let page = 1; page <= MAX_FILE_COMMIT_PAGES; page += 1) {
+    // The response is taken as is to read the paging headers
+    const response = /** @type {Response} */ (
+      // eslint-disable-next-line no-await-in-loop
+      await fetchAPI(
+        `${getRepositoryPath(repository)}/commits` +
+          `?sha=${encodeURIComponent(branch ?? '')}` +
+          `&path=${encodeURIComponent(path)}&limit=${MAX_FILE_COMMITS}&page=${page}`,
+        { responseType: 'raw' },
+      )
+    );
+
+    if (!response.ok) {
+      throw new Error('Server responded with an error', { cause: { status: response.status } });
+    }
+
+    // eslint-disable-next-line no-await-in-loop
+    commits.push(.../** @type {any[]} */ (await response.json()));
+
+    if (response.headers.get('X-HasMore') !== 'true' || commits.length >= MAX_FILE_COMMITS) {
+      break;
+    }
+  }
+
+  return commits.slice(0, MAX_FILE_COMMITS);
+};
+
+/**
  * Fetch commit history for the given file paths.
  * @param {string[]} paths File paths to fetch commit history for.
  * @returns {Promise<FileCommit[]>} Deduplicated and sorted list of commits.
  * @see https://docs.gitea.com/api/next/#tag/repository/operation/repoGetAllCommits
  */
-export const fetchFileCommits = async (paths) => {
-  const { owner, repo, branch } = repository;
-
-  return fetchPerPathCommits(
-    paths,
-    (path) =>
-      /** @type {Promise<any[]>} */ (
-        fetchAPI(
-          `/repos/${owner}/${repo}/commits` +
-            `?sha=${encodeURIComponent(branch ?? '')}` +
-            `&path=${encodeURIComponent(path)}&limit=100`,
-        )
-      ),
-    (commit) => ({
-      sha: commit.sha,
-      // A message written on Windows can have CRLF line breaks
-      message: (commit.commit?.message ?? '').split(/\r?\n/)[0],
-      authorName: commit.commit?.author?.name ?? '',
-      authorEmail: commit.commit?.author?.email,
-      authorAvatarURL: commit.author?.avatar_url,
-      authorLogin: commit.author?.login,
-      date: new Date(commit.commit?.author?.date ?? commit.created),
-    }),
-  );
-};
+export const fetchFileCommits = async (paths) =>
+  fetchPerPathCommits(paths, fetchFileHistory, (commit) => ({
+    sha: commit.sha,
+    // A message written on Windows can have CRLF line breaks
+    message: (commit.commit?.message ?? '').split(/\r?\n/)[0],
+    authorName: commit.commit?.author?.name ?? '',
+    authorEmail: commit.commit?.author?.email,
+    authorAvatarURL: commit.author?.avatar_url,
+    authorLogin: commit.author?.login,
+    // Date it by when it was committed, like GitHub and GitLab do, rather than authored, as a
+    // rebased or cherry-picked commit keeps its author date
+    date: new Date(commit.commit?.committer?.date ?? commit.created),
+  }));

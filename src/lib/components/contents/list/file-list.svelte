@@ -8,7 +8,8 @@
   import { goto } from '$lib/services/app/navigation';
   import { selectedCollection } from '$lib/services/contents/collection';
   import { isValidCollectionFile } from '$lib/services/contents/collection/predicates';
-  import { encodePathSegments } from '$lib/services/utils/url';
+  import { getEntryEditorPath } from '$lib/services/contents/editor/route';
+  import { getCollectionFileSummary } from '$lib/services/contents/entry/summary';
   import { unpublishedEntries } from '$lib/services/workflow';
   import { getEntryStage } from '$lib/services/workflow/stages';
 
@@ -46,14 +47,16 @@
     <ListingGrid viewType="list" aria-label={_('files')} aria-rowcount={files.length}>
       <InfiniteScroll items={files} itemKey="name">
         {#snippet renderItem(/** @type {CollectionFile} */ { name, label, icon })}
+          <!-- HTML, as the summary can contain Markdown, like an entry collection’s -->
+          {@const summary = getCollectionFileSummary(
+            /** @type {InternalFileCollection} */ (selectedCollection.current),
+            name,
+          )}
           <GridRow
             onclick={() => {
-              goto(
-                encodePathSegments(
-                  `/collections/${selectedCollection.current?.name}/entries/${name}`,
-                ),
-                { transitionType: 'forwards' },
-              );
+              goto(getEntryEditorPath(`${selectedCollection.current?.name}`, name), {
+                transitionType: 'forwards',
+              });
             }}
           >
             <GridCell class="title">
@@ -62,7 +65,11 @@
                   <Icon name={icon} />
                 {/if}
                 <TruncatedText lines={2}>
-                  {label || name}
+                  {#if summary !== undefined}
+                    <bdi>{@html summary}</bdi>
+                  {:else}
+                    {label || name}
+                  {/if}
                 </TruncatedText>
               </div>
             </GridCell>

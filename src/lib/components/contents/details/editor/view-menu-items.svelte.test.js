@@ -50,7 +50,7 @@ describe('ViewMenuItems', () => {
       .toBeChecked();
   });
 
-  test('disables the preview and the scroll syncing while the second pane is hidden', async () => {
+  test('disables the scroll syncing but not the preview while the second pane is hidden', async () => {
     entryEditorSettings.current = { showSecondPane: false, showPreview: true, syncScrolling: true };
 
     await renderItems();
@@ -58,9 +58,26 @@ describe('ViewMenuItems', () => {
     await expect
       .element(page.getByRole('menuitemcheckbox', { name: 'Show Second Pane' }))
       .toBeEnabled();
+    // The preview takes turns with the editor in the first pane
     await expect
       .element(page.getByRole('menuitemcheckbox', { name: 'Show Preview' }))
+      .toBeEnabled();
+    await expect
+      .element(page.getByRole('menuitemcheckbox', { name: 'Sync Scrolling' }))
       .toBeDisabled();
+  });
+
+  test('turns the second pane off when the configuration disallows it', async () => {
+    await renderItems({ canShowSecondPane: false }, { locales: ['en', 'fr'] });
+
+    const showSecondPane = page.getByRole('menuitemcheckbox', { name: 'Show Second Pane' });
+
+    await expect.element(showSecondPane).toBeDisabled();
+    await expect.element(showSecondPane).not.toBeChecked();
+    // The preview is still available in the only pane, but there’s nothing to sync it with
+    await expect
+      .element(page.getByRole('menuitemcheckbox', { name: 'Show Preview' }))
+      .toBeEnabled();
     await expect
       .element(page.getByRole('menuitemcheckbox', { name: 'Sync Scrolling' }))
       .toBeDisabled();

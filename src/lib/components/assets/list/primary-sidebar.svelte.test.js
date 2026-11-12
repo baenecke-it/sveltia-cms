@@ -149,6 +149,26 @@ describe('PrimarySidebar', () => {
     }
   });
 
+  test('lists the Global Assets folder at the repository root', async () => {
+    const folders = allAssetFolders.current;
+    const [allAssets] = folders;
+
+    // The global `media_folder` option is an empty string, which only differs from the All Assets
+    // folder in the internal and public paths
+    allAssetFolders.current = [allAssets, { ...allAssets, internalPath: '', publicPath: '/' }];
+
+    try {
+      await render(PrimarySidebar);
+
+      const listbox = page.getByRole('listbox', { name: 'Asset Folder List' });
+
+      await expect.element(listbox.getByRole('option', { name: /^All Assets/ })).toBeVisible();
+      await expect.element(listbox.getByRole('option', { name: /^Global Assets/ })).toBeVisible();
+    } finally {
+      allAssetFolders.current = folders;
+    }
+  });
+
   test('hides the external locations without a cloud service or linked file', async () => {
     const config = cmsConfig.current;
     const entries = allEntries.current;
@@ -219,6 +239,8 @@ describe('PrimarySidebar', () => {
 
     await expect.poll(() => container.querySelectorAll('[role="option"]').length).toBe(8);
     expect(container.querySelectorAll('[aria-selected="true"]')).toHaveLength(0);
+    // The search results replace the folder the list would control
+    expect(container.querySelector('[role="listbox"]')).not.toHaveAttribute('aria-controls');
   });
 
   test('adds a heading and a search bar on a small screen', async () => {
@@ -229,6 +251,8 @@ describe('PrimarySidebar', () => {
     const { container } = await render(PrimarySidebar);
 
     expect(container.querySelector('h2')).toHaveTextContent('Assets');
+    // The sidebar is a page of its own, without the folder it would control
+    expect(container.querySelector('[role="listbox"]')).not.toHaveAttribute('aria-controls');
 
     await page.getByRole('searchbox').click();
     await expect.poll(() => window.location.hash).toBe('#/search');

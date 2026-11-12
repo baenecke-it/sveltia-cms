@@ -4,7 +4,6 @@ import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { getEntriesByCollection } from '$lib/services/contents/collection/entries';
 import {
-  getFolderName,
   getOwnFolderName,
   hasLocalizedFolders,
   localizeDirPath,
@@ -44,7 +43,7 @@ const entry = (id, subPaths) => ({
 });
 
 /**
- * Create a nested collection with localized slugs.
+ * Create a collection of nested entries with localized slugs.
  * @param {object} [overrides] Property overrides.
  * @returns {any} Collection.
  */
@@ -82,14 +81,6 @@ beforeEach(() => {
   ]);
 });
 
-describe('getFolderName()', () => {
-  test('returns the last segment', () => {
-    expect(getFolderName('about/team')).toBe('team');
-    expect(getFolderName('about')).toBe('about');
-    expect(getFolderName('')).toBe('');
-  });
-});
-
 describe('getOwnFolderName()', () => {
   test('returns the folder the index file is in', () => {
     expect(getOwnFolderName('about/team/_index')).toBe('team');
@@ -102,7 +93,7 @@ describe('getOwnFolderName()', () => {
 });
 
 describe('hasLocalizedFolders()', () => {
-  test('is true for a nested collection with an index file and localized slugs', () => {
+  test('is true for nested entries with an index file and localized slugs', () => {
     expect(hasLocalizedFolders(createCollection())).toBe(true);
   });
 

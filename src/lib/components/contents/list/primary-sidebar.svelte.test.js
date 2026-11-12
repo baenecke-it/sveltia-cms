@@ -78,7 +78,7 @@ describe('PrimarySidebar', () => {
 
   test('navigates to a collection', async () => {
     await render(PrimarySidebar, {});
-    await page.getByRole('treeitem', { name: 'Posts' }).click();
+    await page.getByRole('treeitem', { name: /^Posts/ }).click();
 
     await expect.poll(() => window.location.hash).toBe('#/collections/posts');
   });
@@ -91,6 +91,10 @@ describe('PrimarySidebar', () => {
 
     expect(container.querySelector('h2')).toHaveTextContent('Contents');
     await expect.element(page.getByRole('searchbox')).toBeVisible();
+    // The sidebar is a page of its own, without the collection it would control
+    await expect
+      .element(page.getByRole('tree', { name: 'Collection List' }))
+      .not.toHaveAttribute('aria-controls');
   });
 
   test('searches from the small-screen search bar', async () => {
@@ -116,10 +120,10 @@ describe('PrimarySidebar', () => {
       await render(PrimarySidebar, {});
 
       const tree = page.getByRole('tree', { name: 'Collection List' });
-      const item = tree.getByRole('treeitem', { name: 'Files' });
+      const item = tree.getByRole('treeitem', { name: /^Files/ });
 
       await expect.element(item).toHaveTextContent('bookmark_manager Files 2');
-      expect(item.element().querySelector('.count')).toHaveAttribute('aria-label', '(2 entries)');
+      expect(item.element().querySelector('.count')).toHaveAttribute('aria-label', '2 entries');
       expect(tree.element().querySelectorAll('[role="separator"]')).toHaveLength(0);
       expect(tree.getByRole('treeitem').elements()).toHaveLength(1);
 

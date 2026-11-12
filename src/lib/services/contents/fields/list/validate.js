@@ -1,3 +1,6 @@
+import { validateItemCount } from '$lib/services/contents/draft/validate/validity';
+import { isNumeric } from '$lib/services/utils/number';
+
 /**
  * @import {
  * EntryValidityState,
@@ -11,10 +14,6 @@
  * `0` in `0` or `0.name`.
  */
 const LEADING_INDEX_REGEX = /^\d+/;
-/**
- * Regular expression to match a key path relative to its list that is an item index alone.
- */
-const INDEX_REGEX = /^\d+$/;
 
 /**
  * Validate a list/multiple-value field, updating `validity` in place.
@@ -81,13 +80,7 @@ export const validateListField = ({
 
   const size = Array.isArray(value) && !!value.length ? value.length : countItems();
 
-  if (required && !size) {
-    validity.valueMissing = true;
-  } else if (typeof min === 'number' && size < min) {
-    validity.rangeUnderflow = true;
-  } else if (typeof max === 'number' && size > max) {
-    validity.rangeOverflow = true;
-  }
+  validateItemCount(validity, { count: size, required, min, max });
 
   return { skip: false, empty: !size };
 };
@@ -112,7 +105,7 @@ export const getListItems = ({ keyPath, value, valueMap }) => {
     .flatMap((key) => {
       const index = key.startsWith(prefix) ? key.slice(prefix.length) : undefined;
 
-      return index !== undefined && INDEX_REGEX.test(index) ? [[Number(index), valueMap[key]]] : [];
+      return index !== undefined && isNumeric(index) ? [[Number(index), valueMap[key]]] : [];
     })
     .sort(([a], [b]) => a - b)
     .map(([, item]) => item);

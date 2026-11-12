@@ -1,21 +1,31 @@
-import { beforeEach, describe, expect, test } from 'vitest';
+import { beforeEach, describe, expect, onTestFinished, test, vi } from 'vitest';
 
-import { backend, backendName } from '$lib/services/backends';
+import { backend, backendName, loadBackendService } from '$lib/services/backends';
 import { lockedBranch, mergeLockedBranch } from '$lib/services/backends/branch-access';
 import { cmsConfig } from '$lib/services/config';
 import { allEntries } from '$lib/services/contents';
+import { getCollection } from '$lib/services/contents/collection';
 import { createDerivedState } from '$lib/services/utils/state.svelte';
 import {
   canMergePullRequest,
+  canSkipReviewAlong,
   checkPublishedVersion,
+  findEditingUnpublishedEntry,
+  getCompanionEntries,
+  getDeletionSelection,
+  getEditedCompanionEntries,
+  getEditedCompanionPaths,
   getPublishedVersion,
+  getPullRequestEntries,
   getUnpublishedEntriesByCollection,
   getUnpublishedEntry,
   getUnpublishedEntryByBranch,
   getUnpublishedEntryByDraft,
+  getUnpublishedEntryById,
   getUnpublishedEntryBySlug,
   hasPublishedVersion,
   isDirectPublishAllowed,
+  isDiscardableDraft,
   isPendingDeletion,
   isPublishAllowed,
   isWorkflowDraft,
@@ -28,6 +38,40 @@ import {
   workflowEnabled,
 } from '$lib/services/workflow';
 import { forkedRepository } from '$lib/services/workflow/open-authoring';
+
+vi.mock('$lib/services/contents/collection', async (importOriginal) => {
+  const actual = /** @type {any} */ (await importOriginal());
+
+  return { ...actual, getCollection: vi.fn(actual.getCollection) };
+});
+
+/**
+ * Collections the entries riding along with another one can belong to: one without Editorial
+ * Workflow, one whose review can be skipped, and one whose review can’t.
+ * @type {Record<string, any>}
+ */
+const alongCollections = {
+  tags: { name: 'tags', publish_mode: 'simple' },
+  authors: { name: 'authors', publish_mode: { type: 'editorial_workflow', direct_publish: true } },
+  reviewed: { name: 'reviewed', publish_mode: 'editorial_workflow' },
+};
+
+/**
+ * Look the collections up in {@link alongCollections} for the current test.
+ */
+const mockAlongCollections = () => {
+  const { current: config } = cmsConfig;
+  const { current: name } = backendName;
+
+  backendName.current = 'github';
+  cmsConfig.current = /** @type {any} */ ({ publish_mode: 'editorial_workflow' });
+  vi.mocked(getCollection).mockImplementation((collectionName) => alongCollections[collectionName]);
+  onTestFinished(() => {
+    cmsConfig.current = config;
+    backendName.current = name;
+    vi.mocked(getCollection).mockReset();
+  });
+};
 
 /**
  * Create a minimal unpublished entry for testing.
@@ -91,7 +135,9 @@ describe('workflow/index', () => {
 
     test.each(['github', 'gitlab', 'gitea'])(
       'is true with the %s backend and the editorial_workflow publish mode',
-      (name) => {
+      async (name) => {
+        // GitLab and Gitea are kept in chunks, which are loaded before a backend is selected
+        await loadBackendService(name);
         backendName.current = name;
         cmsConfig.current = /** @type {any} */ ({ publish_mode: 'editorial_workflow' });
         expect(workflowEnabled.current).toBe(true);
@@ -244,6 +290,194 @@ describe('workflow/index', () => {
     });
   });
 
+  describe('getCompanionEntries', () => {
+    const guides = /** @type {any} */ ({ id: 'guides' });
+    const help = /** @type {any} */ ({ id: 'help' });
+    const jane = /** @type {any} */ ({ id: 'jane' });
+
+    /**
+     * Create an entry with new entries riding along in its pull request.
+     * @param {any[]} [companions] Companion entries.
+     * @returns {any} Unpublished entry.
+     */
+    const createHost = (companions) => ({
+      ...createEntry({ collectionName: 'posts', subPath: 'a' }),
+      workflow: { collectionName: 'posts', companions },
+    });
+
+    test('collects the entries of the collection from every pull request', () => {
+      unpublishedEntries.current = [
+        createHost([
+          { collectionName: 'sections', entry: guides },
+          { collectionName: 'authors', entry: jane },
+        ]),
+        createHost(),
+        createHost([{ collectionName: 'sections', entry: help }]),
+      ];
+
+      expect(getCompanionEntries('sections')).toEqual([guides, help]);
+      expect(getCompanionEntries('tags')).toEqual([]);
+    });
+
+    test('looks in the given entries only', () => {
+      const host = createHost([{ collectionName: 'sections', entry: help }]);
+
+      unpublishedEntries.current = [createHost([{ collectionName: 'sections', entry: guides }])];
+
+      expect(getCompanionEntries('sections', [host])).toEqual([help]);
+    });
+
+    test('tells the existing entries changed in a pull request apart from the new ones', () => {
+      const ada = /** @type {any} */ ({ id: 'ada' });
+      const alan = /** @type {any} */ ({ id: 'alan' });
+
+      const host = createHost([
+        { collectionName: 'authors', entry: jane },
+        { collectionName: 'authors', entry: ada, edited: true },
+      ]);
+
+      unpublishedEntries.current = [
+        host,
+        createHost(),
+        createHost([{ collectionName: 'authors', entry: alan, edited: true }]),
+      ];
+
+      expect(getCompanionEntries('authors')).toEqual([jane]);
+      expect(getEditedCompanionEntries('authors')).toEqual([ada, alan]);
+      expect(getEditedCompanionEntries('authors', [host])).toEqual([ada]);
+      expect(getEditedCompanionEntries('sections')).toEqual([]);
+
+      expect(findEditingUnpublishedEntry(ada)).toBe(host);
+      // A new entry isn’t edited
+      expect(findEditingUnpublishedEntry(jane)).toBeUndefined();
+      expect(findEditingUnpublishedEntry(guides)).toBeUndefined();
+    });
+
+    test('collects the paths of the edited entries on both branches, found by ID', () => {
+      /**
+       * Create an entry with the given locale file paths.
+       * @param {string} id Entry ID.
+       * @param {string[]} paths File paths.
+       * @returns {any} Entry.
+       */
+      const createPathEntry = (id, paths) => ({
+        id,
+        locales: Object.fromEntries(paths.map((path, index) => [`l${index}`, { path }])),
+      });
+
+      allEntries.current = [
+        createPathEntry('ada', ['authors/ada.md', 'authors/ja/ada.md']),
+        createPathEntry('grace', ['authors/grace.md']),
+      ];
+
+      expect(
+        getEditedCompanionPaths([
+          // Renamed on the branch, and the Japanese locale turned off
+          {
+            collectionName: 'authors',
+            entry: createPathEntry('ada', ['authors/ada-l.md']),
+            edited: true,
+          },
+          // No longer on the configured branch
+          {
+            collectionName: 'authors',
+            entry: createPathEntry('alan', ['authors/alan.md']),
+            edited: true,
+          },
+          // A new one isn’t edited
+          { collectionName: 'authors', entry: createPathEntry('grace', ['authors/grace.md']) },
+        ]),
+      ).toEqual({
+        paths: ['authors/ada-l.md', 'authors/alan.md'],
+        publishedPaths: new Set(['authors/ada.md', 'authors/ja/ada.md']),
+      });
+    });
+  });
+
+  describe('getDeletionSelection', () => {
+    /**
+     * Get the pull request properties recording the given deletion group in the description.
+     * @param {string} group Deletion group ID.
+     * @returns {{ description: string }} Properties.
+     */
+    const recordGroup = (group) => ({
+      description: `Automatically generated\n\n<!-- sveltia-cms:deletion-group=${group} -->`,
+    });
+
+    /**
+     * Create an entry awaiting deletion.
+     * @param {string} subPath Sub path.
+     * @param {object} [workflow] Workflow property overrides.
+     * @param {object} [pullRequest] Pull request property overrides.
+     * @returns {any} Unpublished entry.
+     */
+    const createDeletion = (subPath, workflow = {}, pullRequest = recordGroup('group-1')) => {
+      const entry = createEntry({ collectionName: 'posts', subPath });
+
+      return {
+        ...entry,
+        workflow: {
+          ...entry.workflow,
+          status: 'pending_deletion',
+          pullRequest: { ...entry.workflow.pullRequest, ...pullRequest },
+          ...workflow,
+        },
+      };
+    };
+
+    test('lists the entry, then the others of its collection deleted with it', () => {
+      const entry = createDeletion('a');
+      const other = createDeletion('b');
+      const draft = createDeletion('c', { status: 'draft' });
+      // A selection is recorded per collection, or collection file, so another one has its own
+      const elsewhere = createDeletion('d', { collectionName: 'pages' }, recordGroup('group-3'));
+      const file = createDeletion('e', { fileName: 'home' }, recordGroup('group-4'));
+      // Deleted one at a time, or in another selection
+      const lone = createDeletion('f', {}, {});
+      const later = createDeletion('g', {}, recordGroup('group-2'));
+
+      unpublishedEntries.current = [other, entry, draft, elsewhere, file, lone, later];
+
+      expect(getDeletionSelection(entry)).toEqual([entry, other]);
+      expect(getDeletionSelection(file)).toEqual([file]);
+      expect(getDeletionSelection(later)).toEqual([later]);
+
+      // A copy of the entry the store has replaced since isn’t listed a second time
+      expect(getDeletionSelection({ ...entry })).toEqual([{ ...entry }, other]);
+    });
+
+    test('lists an entry deleted on its own alone', () => {
+      // Two entries deleted one at a time, or before the selection was recorded: each pull request
+      // removes only the references to its own entry
+      const entry = createDeletion('a', {}, {});
+      const other = createDeletion('b', {}, {});
+
+      unpublishedEntries.current = [other, entry];
+
+      expect(getDeletionSelection(entry)).toEqual([entry]);
+    });
+  });
+
+  describe('getPullRequestEntries', () => {
+    test('lists the unpublished entries of the collection, then the companions', () => {
+      const guides = /** @type {any} */ ({ id: 'guides' });
+      const section = createEntry({ collectionName: 'sections', subPath: 'about' });
+
+      const host = {
+        ...createEntry({ collectionName: 'posts', subPath: 'a' }),
+        workflow: {
+          collectionName: 'posts',
+          companions: [{ collectionName: 'sections', entry: guides }],
+        },
+      };
+
+      unpublishedEntries.current = [host, section];
+
+      expect(getPullRequestEntries('sections')).toEqual([section, guides]);
+      expect(getPullRequestEntries('tags')).toEqual([]);
+    });
+  });
+
   describe('getUnpublishedEntry', () => {
     test('finds the entry by collection name and sub path', () => {
       unpublishedEntries.current = [
@@ -371,6 +605,20 @@ describe('workflow/index', () => {
 
       expect(getUnpublishedEntryByBranch('cms/posts/hello')).toBe(entry);
       expect(getUnpublishedEntryByBranch('cms/posts/hello-2')).toBeUndefined();
+    });
+  });
+
+  describe('getUnpublishedEntryById', () => {
+    test('finds the current entry in the store by its ID', () => {
+      const entry = createEntry({ collectionName: 'posts', subPath: 'hello' });
+
+      unpublishedEntries.current = [entry];
+
+      // A copy held since an action started resolves to the entry in the store now
+      expect(getUnpublishedEntryById(/** @type {any} */ ({ ...entry }).id)).toBe(entry);
+      // An entry that has left the board, or none at all
+      expect(getUnpublishedEntryById('posts/gone')).toBeUndefined();
+      expect(getUnpublishedEntryById(undefined)).toBeUndefined();
     });
   });
 
@@ -569,6 +817,30 @@ describe('hasPublishedVersion', () => {
     ];
 
     expect(hasPublishedVersion(entry)).toBe(true);
+  });
+});
+
+describe('isDiscardableDraft', () => {
+  beforeEach(() => {
+    allEntries.current = [];
+  });
+
+  test('is true for an entry with a pull request that has never been published', () => {
+    const entry = createEntry({ collectionName: 'posts', subPath: 'hello' });
+
+    expect(isDiscardableDraft(entry)).toBe(true);
+
+    // The pull request changes a published entry, which deleting it takes off the site
+    allEntries.current = [
+      /** @type {any} */ ({ id: 'p1', locales: { _default: { path: 'content/posts/hello.md' } } }),
+    ];
+
+    expect(isDiscardableDraft(entry)).toBe(false);
+  });
+
+  test('is false for a published entry or no entry', () => {
+    expect(isDiscardableDraft(/** @type {any} */ ({ id: 'p1', locales: {} }))).toBe(false);
+    expect(isDiscardableDraft(undefined)).toBe(false);
   });
 });
 
@@ -835,6 +1107,51 @@ describe('Test isPublishAllowed()', () => {
         publish_mode: { type: 'editorial_workflow', direct_publish: true },
       }),
     ).toBe(true);
+  });
+
+  test('refuses to skip the review of an entry riding along that has to be reviewed', () => {
+    mockAlongCollections();
+
+    const directPublish = {
+      ...collection,
+      publish_mode: { type: 'editorial_workflow', direct_publish: true },
+    };
+
+    /**
+     * Create a draft riding along with entries of the given collections.
+     * @param {string[]} names Collection names.
+     * @returns {any} Entry.
+     */
+    const createDraftWith = (names) => {
+      const entry = createWorkflowEntry('draft');
+
+      entry.workflow.companions = names.map((collectionName) => ({ collectionName }));
+
+      return entry;
+    };
+
+    expect(isPublishAllowed(createDraftWith(['tags', 'authors']), directPublish)).toBe(true);
+    expect(isPublishAllowed(createDraftWith(['tags', 'reviewed']), directPublish)).toBe(false);
+
+    // Once reviewed, the entries riding along are published with it
+    const ready = createDraftWith(['reviewed']);
+
+    ready.workflow.status = 'pending_publish';
+    expect(isPublishAllowed(ready, directPublish)).toBe(true);
+  });
+});
+
+describe('Test canSkipReviewAlong()', () => {
+  test('allows skipping the review of the entries whose collections allow it', () => {
+    mockAlongCollections();
+
+    expect(canSkipReviewAlong([])).toBe(true);
+    expect(canSkipReviewAlong([{ collectionName: 'tags' }, { collectionName: 'authors' }])).toBe(
+      true,
+    );
+    expect(canSkipReviewAlong([{ collectionName: 'tags' }, { collectionName: 'reviewed' }])).toBe(
+      false,
+    );
   });
 });
 

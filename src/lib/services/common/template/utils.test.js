@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest';
 import {
   getFileNameLocaleSuffixes,
   getFileNameParts,
+  getTemplatePattern,
   stripFieldTagPrefix,
 } from '$lib/services/common/template/utils';
 
@@ -85,5 +86,36 @@ describe('Test getFileNameLocaleSuffixes()', () => {
   test('returns nothing without the i18n configuration', () => {
     expect(getFileNameLocaleSuffixes(/** @type {any} */ ({}))).toEqual([]);
     expect(getFileNameLocaleSuffixes(/** @type {any} */ ({ _i18n: {} }))).toEqual([]);
+  });
+});
+
+describe('Test getTemplatePattern()', () => {
+  test('replaces each template tag with the wildcard and escapes the rest', () => {
+    expect(getTemplatePattern('images/{{slug}}', '[^/]+')).toBe('images/[^/]+');
+    expect(getTemplatePattern('{{dirname}}/a.b/{{slug}}', '.+?')).toBe('.+?/a\\.b/.+?');
+  });
+
+  test('matches a path filled in for the template', () => {
+    const regex = new RegExp(`^${getTemplatePattern('static/{{dirname}}/images', '.+?')}$`);
+
+    expect(regex.test('static/blog/2024/images')).toBe(true);
+    expect(regex.test('static/images')).toBe(false);
+  });
+
+  test('returns a template without tags escaped', () => {
+    expect(getTemplatePattern('uploads', '.+?')).toBe('uploads');
+  });
+
+  test('replaces a tag with a nested template in a transformation argument as a whole', () => {
+    const template = "{{fields.slug | default('{{title}}')}}/index";
+    const pattern = getTemplatePattern(template, '[^/]+?');
+
+    expect(pattern).toBe('[^/]+?/index');
+    expect(new RegExp(`^${pattern}$`).test('hello-world/index')).toBe(true);
+    expect(getTemplatePattern("{{a | default('}}')}}-{{b}}", '.+?')).toBe('.+?-.+?');
+  });
+
+  test('matches an escaped tag literally, without the backslash', () => {
+    expect(getTemplatePattern('\\{{title}}/{{slug}}', '.+?')).toBe('\\{\\{title\\}\\}/.+?');
   });
 });

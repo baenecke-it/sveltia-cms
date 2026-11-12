@@ -1,10 +1,10 @@
-import { getAssetsByDirName } from '$lib/services/assets';
+import { getAssetsByDirName, getTakenNamesInDir } from '$lib/services/assets';
 import { assetUpdatesToast, refreshFocusedAssets } from '$lib/services/assets/data';
 import { formatFileName } from '$lib/services/assets/file-name';
 import { getAssetKind } from '$lib/services/assets/kinds';
 import { assertOutsideCmsFolders } from '$lib/services/assets/reserved';
 import { getUploadDirPath } from '$lib/services/assets/subfolders';
-import { skipCIConfigured, skipCIEnabled } from '$lib/services/backends/git/shared/integration';
+import { isPublishingCommit } from '$lib/services/backends/git/shared/integration';
 import { saveChanges } from '$lib/services/backends/save';
 import { UPDATE_TOAST_DEFAULT_STATE } from '$lib/services/contents/collection/data';
 import { getDefaultMediaLibraryOptions } from '$lib/services/integrations/media-libraries/default';
@@ -28,7 +28,8 @@ export const createFileList = (uploadingAssets) => {
   const { slugify_filename: slugificationEnabled = false } = getDefaultMediaLibraryOptions().config;
   const dirPath = getUploadDirPath(uploadingAssets);
   const assetsInSameFolder = dirPath !== undefined ? getAssetsByDirName(dirPath) : [];
-  const assetNamesInSameFolder = assetsInSameFolder.map((a) => a.name.normalize());
+  // A file is never named after an entry file or a subfolder there either
+  const assetNamesInSameFolder = dirPath !== undefined ? getTakenNamesInDir(dirPath) : [];
   /** @type {string[]} */
   const namesInBatch = [];
 
@@ -75,14 +76,15 @@ export const createFileList = (uploadingAssets) => {
  * and displays a toast notification about the asset updates.
  * @param {object} args Arguments.
  * @param {number} args.count The number of files that were updated.
+ * @param {CommitOptions} args.options Options the files were committed with.
  */
-export const updateStores = ({ count }) => {
+export const updateStores = ({ count, options }) => {
   refreshFocusedAssets((asset) => asset.path);
 
   assetUpdatesToast.current = {
     ...UPDATE_TOAST_DEFAULT_STATE,
     saved: true,
-    published: skipCIConfigured.current && !skipCIEnabled.current,
+    published: isPublishingCommit(options),
     count,
   };
 };
@@ -115,5 +117,5 @@ export const saveAssets = async (uploadingAssets, options) => {
     options,
   });
 
-  updateStores({ count: files.length });
+  updateStores({ count: files.length, options });
 };

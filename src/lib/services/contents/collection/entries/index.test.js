@@ -619,7 +619,28 @@ describe('matchesCollectionFilter()', () => {
       locale: 'en',
       collectionName: 'posts',
       key: 'status',
+      // A Relation field is matched by its stored value, not by the referenced entry’s label
+      resolveRef: false,
     });
+  });
+
+  test('reads the value from another locale when the entry lacks the default one', async () => {
+    const { getPropertyValue } = await import('$lib/services/contents/entry/values');
+
+    const collection = {
+      name: 'posts',
+      _type: 'entry',
+      _i18n: { defaultLocale: 'en' },
+      filter: { field: 'published', value: true },
+    };
+
+    // A multi-file i18n entry with only `hello.fr.md`, which is listed in French
+    const entry = { id: '1', locales: { fr: { content: { published: true } } } };
+
+    vi.mocked(getPropertyValue).mockReturnValue(true);
+
+    expect(matchesCollectionFilter(collection, entry)).toBe(true);
+    expect(getPropertyValue).toHaveBeenCalledWith(expect.objectContaining({ locale: 'fr' }));
   });
 
   test('matches the field value against the filter pattern', async () => {
@@ -977,7 +998,7 @@ describe('canCreateIndexFile()', () => {
     expect(result).toBe(false);
   });
 
-  test('ignores a nested collection’s index file listed in the collection', async () => {
+  test('ignores the index file of nested entries listed in the collection', async () => {
     const { getIndexFile, isCollectionIndexFile } =
       await import('$lib/services/contents/collection/entries/index-file');
 

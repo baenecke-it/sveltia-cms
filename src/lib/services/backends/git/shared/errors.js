@@ -42,6 +42,39 @@ export const getErrorMessage = (ex, fallback) =>
   (ex?.cause instanceof LocalizedError && ex.cause.message) || _(fallback);
 
 /**
+ * Create the error to throw when the signed-in user can’t see the configured repository, or their
+ * token can’t be used to read it. It carries the shared message, which the sign-in flow looks for
+ * to drop the cached credentials, so the user gets the sign-in form rather than the same error on
+ * every reload.
+ * @param {string} repo Repository name.
+ * @returns {Error} Error to throw.
+ */
+export const createNoAccessError = (repo) =>
+  createLocalizedError(NOT_COLLABORATOR_ERROR_MESSAGE, 'repository_no_access', { repo });
+
+/**
+ * Create the error to throw when the signed-in user can read the configured repository but can’t
+ * push to it, e.g. a collaborator with the read or triage role on GitHub, or the Reporter role on
+ * GitLab. It carries the shared message, so the sign-in flow drops the cached credentials just like
+ * it does when the user has no access at all, but tells the user it’s write access that’s missing.
+ * @param {string} repo Repository name.
+ * @returns {Error} Error to throw.
+ */
+export const createNoWriteAccessError = (repo) =>
+  createLocalizedError(NOT_COLLABORATOR_ERROR_MESSAGE, 'repository_no_write_access', { repo });
+
+/**
+ * Create the error to throw when the signed-in user can’t push to the configured repository: one
+ * saying write access is missing if they can at least read it, or one saying there is no access at
+ * all otherwise. See {@link createNoWriteAccessError} and {@link createNoAccessError}.
+ * @param {string} repo Repository name.
+ * @param {boolean} [canRead] Whether the user can read the repository.
+ * @returns {Error} Error to throw.
+ */
+export const createPermissionError = (repo, canRead) =>
+  canRead ? createNoWriteAccessError(repo) : createNoAccessError(repo);
+
+/**
  * Create the error to throw when the configured repository couldn’t be read while checking the
  * signed-in user’s access to it. A refusal means the user has no access, and the shared message is
  * what the sign-in flow looks for to drop the cached credentials, so the user gets the sign-in form
@@ -52,26 +85,14 @@ export const getErrorMessage = (ex, fallback) =>
  * @param {number | undefined} status HTTP status the request was refused with. `undefined` for a
  * request that wasn’t answered, or one whose status doesn’t tell, like a rate limit answered with a
  * 403.
- * @param {object} [options] Options.
- * @param {boolean} [options.reportNotFound] Whether to report a 404 as a missing repository rather
- * than as a refusal. A private repository answers a request from someone without access with a 404
- * as well, so its existence isn’t leaked.
  * @returns {Error} Error.
  */
-export const toRepositoryAccessError = (
-  { owner, repo },
-  status,
-  { reportNotFound = false } = {},
-) => {
-  if (status === 404 && reportNotFound) {
-    return createLocalizedError('Failed to check repository access', 'repository_not_found', {
-      repo,
-    });
-  }
-
-  // A 401 means the token has expired or been revoked, and a 403 that it lacks the scope
+export const toRepositoryAccessError = ({ owner, repo }, status) => {
+  // A 401 means the token has expired or been revoked, and a 403 that it lacks the scope. A private
+  // repository answers someone without access with a 404, so its existence isn’t leaked; a mistyped
+  // name can’t be told apart from that, but the message names the repository it looked for
   if (status === 401 || status === 403 || status === 404) {
-    return createLocalizedError(NOT_COLLABORATOR_ERROR_MESSAGE, 'repository_no_access', { repo });
+    return createNoAccessError(repo);
   }
 
   return createLocalizedError(

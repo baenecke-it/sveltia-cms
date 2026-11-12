@@ -91,6 +91,37 @@ describe('WorkflowEntryCard', () => {
     await expect.poll(() => window.location.hash).toBe('#/collections/posts/entries/hello');
   });
 
+  test('lists the entries riding along in the pull request', async () => {
+    // @see https://github.com/sveltia/sveltia-cms/issues/1112
+    const { container } = await render(WorkflowEntryCard, {
+      entry: createEntry({
+        companions: [
+          {
+            collectionName: 'posts',
+            entry: createMockEntry({ slug: 'guides', content: { _default: { title: 'Guides' } } }),
+          },
+          // An existing entry edited along with the entry
+          // @see https://github.com/sveltia/sveltia-cms/issues/1129
+          {
+            collectionName: 'posts',
+            entry: createMockEntry({ slug: 'about', content: { _default: { title: 'About' } } }),
+            edited: true,
+          },
+        ],
+      }),
+    });
+
+    const notes = container.querySelectorAll('.companions');
+
+    expect(notes).toHaveLength(2);
+    expect(notes[0]).toHaveTextContent(
+      'Also adds \u2068\u2068Post\u2069: \u2068Guides\u2069\u2069',
+    );
+    expect(notes[1]).toHaveTextContent(
+      'Also changes \u2068\u2068Post\u2069: \u2068About\u2069\u2069',
+    );
+  });
+
   test('offers to publish an entry that is ready', async () => {
     const onPublish = vi.fn();
 

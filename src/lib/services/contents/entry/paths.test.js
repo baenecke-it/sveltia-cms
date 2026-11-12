@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   getEntryDirName,
-  getEntryFolderPath,
+  getEntryDisplayLocale,
   getEntryLocaleFile,
   getEntryPaths,
 } from '$lib/services/contents/entry/paths';
@@ -88,42 +88,6 @@ describe('getEntryLocaleFile()', () => {
   });
 });
 
-describe('getEntryFolderPath()', () => {
-  it('returns the folder of the first locale’s file', () => {
-    const entry = /** @type {Entry} */ (
-      /** @type {unknown} */ ({
-        locales: { en: { path: 'posts/new.en.md' }, fr: { path: 'posts/fr/new.md' } },
-      })
-    );
-
-    expect(getEntryFolderPath(entry)).toBe('posts');
-  });
-
-  it('returns the folder of the given locale’s file', () => {
-    const entry = /** @type {Entry} */ (
-      /** @type {unknown} */ ({
-        locales: {
-          en: { path: 'posts/en/hello/index.md' },
-          fr: { path: 'posts/fr/hello/index.md' },
-        },
-      })
-    );
-
-    expect(getEntryFolderPath(entry, 'fr')).toBe('posts/fr/hello');
-    expect(getEntryFolderPath(entry, 'en')).toBe('posts/en/hello');
-    // The entry doesn’t have the locale yet
-    expect(getEntryFolderPath(entry, 'de')).toBe('posts/en/hello');
-  });
-
-  it('returns an empty string for an entry at the repository root', () => {
-    const entry = /** @type {Entry} */ (
-      /** @type {unknown} */ ({ locales: { en: { path: 'index.md' } } })
-    );
-
-    expect(getEntryFolderPath(entry)).toBe('');
-  });
-});
-
 describe('getEntryDirName()', () => {
   /**
    * Get the file configuration of an entry collection with the given options.
@@ -131,7 +95,7 @@ describe('getEntryDirName()', () => {
    * @param {string} args.basePath Normalized `folder` option.
    * @param {I18nFileStructure} [args.structure] I18n structure. Omit to disable i18n.
    * @param {boolean} [args.omitDefaultLocaleFromFilePath] Whether to omit the default locale.
-   * @param {number} [args.nestedDepth] Nested collection depth.
+   * @param {number} [args.nestedDepth] Nested entry depth.
    * @param {string} [args.subPath] Normalized `path` option.
    * @returns {{ basePath: string, fullPathRegEx: RegExp }} File configuration.
    */
@@ -275,5 +239,19 @@ describe('getEntryDirName()', () => {
     expect(getEntryDirName('content/posts/foo.md')).toBe('content/posts');
     expect(getEntryDirName('content/posts/foo.md', { basePath: '' })).toBe('content/posts');
     expect(getEntryDirName('foo.md')).toBe('');
+  });
+});
+
+describe('getEntryDisplayLocale()', () => {
+  it('should return the default locale if the entry has it', () => {
+    expect(getEntryDisplayLocale({ fr: {}, en: {} }, 'en')).toBe('en');
+  });
+
+  it('should fall back to the first locale', () => {
+    expect(getEntryDisplayLocale({ fr: {}, de: {} }, 'en')).toBe('fr');
+  });
+
+  it('should return `undefined` without locales', () => {
+    expect(getEntryDisplayLocale({}, 'en')).toBeUndefined();
   });
 });

@@ -243,6 +243,149 @@ describe('getDateTimeFieldDisplayValue', () => {
     expect(typeof result).toBe('string');
   });
 
+  test('shows an ISO 8601 value with an offset in the time zone of a field in a custom format', () => {
+    const { TZ } = process.env;
+
+    process.env.TZ = 'America/Los_Angeles';
+
+    try {
+      /** @type {DateTimeField} */
+      const fieldConfig = { ...baseFieldConfig, format: 'YYYY-MM-DD HH:mm' };
+
+      /**
+       * Get the display value of a value in the field with the given options.
+       * @param {string} currentValue Stored value.
+       * @param {Partial<DateTimeField>} [options] Field options.
+       * @returns {string} Display value.
+       */
+      const getValue = (currentValue, options = {}) =>
+        getDateTimeFieldDisplayValue({
+          locale: 'en',
+          fieldConfig: { ...fieldConfig, ...options },
+          currentValue,
+        });
+
+      expect(getValue('2026-01-15T01:30:00Z', { input_timezone: 'Asia/Tokyo' })).toBe(
+        '2026-01-15 10:30',
+      );
+      expect(getValue('2026-01-15T01:30:00Z', { input_timezone: 'utc' })).toBe('2026-01-15 01:30');
+      expect(getValue('2026-01-15T01:30:00Z', { output_utc: true })).toBe('2026-01-15 01:30');
+      expect(getValue('2026-01-15T01:30:00Z')).toBe('2026-01-14 17:30');
+      // A value in the format is shown as written
+      expect(getValue('2026-01-15 10:30', { input_timezone: 'Asia/Tokyo' })).toBe(
+        '2026-01-15 10:30',
+      );
+      expect(getValue('2026-01-15 10:30', { output_utc: true })).toBe('2026-01-15 10:30');
+      expect(getValue('2026-01-15 10:30')).toBe('2026-01-15 10:30');
+      // A value with an offset that can’t be parsed
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      expect(getValue('invalid 10:30Z')).toBe('');
+      // A date in a format without a time is read as written
+      expect(getValue('2026-01-15T00:00:00Z', { format: 'YYYY/MM/DD', time_format: false })).toBe(
+        '2026/01/15',
+      );
+    } finally {
+      process.env.TZ = TZ;
+    }
+  });
+
+  test('shows the wall time of an ISO 8601 value in the browser’s DST gap in the field’s zone', () => {
+    const { TZ } = process.env;
+
+    // 2026-03-08 02:00–03:00 doesn’t exist in New York, where DST starts
+    process.env.TZ = 'America/New_York';
+
+    try {
+      [
+        ['2026-03-08T02:30:00+09:00', '2026-03-08 02:30'],
+        ['2026-03-08T04:30:00+09:00', '2026-03-08 04:30'],
+      ].forEach(([currentValue, displayValue]) => {
+        expect(
+          getDateTimeFieldDisplayValue({
+            locale: 'en',
+            fieldConfig: {
+              ...baseFieldConfig,
+              format: 'YYYY-MM-DD HH:mm',
+              input_timezone: 'Asia/Tokyo',
+            },
+            currentValue,
+          }),
+        ).toBe(displayValue);
+      });
+    } finally {
+      process.env.TZ = TZ;
+    }
+  });
+
+  test('shows a value in a custom format with an offset token as written or in the field’s zone', () => {
+    const { TZ } = process.env;
+
+    process.env.TZ = 'America/Los_Angeles';
+
+    try {
+      /** @type {DateTimeField} */
+      const fieldConfig = { ...baseFieldConfig, format: 'YYYY-MM-DDTHH:mm:ssZ' };
+
+      /**
+       * Get the display value of a value in the field with the given options.
+       * @param {string} currentValue Stored value.
+       * @param {Partial<DateTimeField>} [options] Field options.
+       * @returns {string} Display value.
+       */
+      const getValue = (currentValue, options = {}) =>
+        getDateTimeFieldDisplayValue({
+          locale: 'en',
+          fieldConfig: { ...fieldConfig, ...options },
+          currentValue,
+        });
+
+      // A value written in the format is shown as written, whatever its offset
+      [
+        '2026-01-15T10:30:00+09:00',
+        '2026-01-15T01:30:00+00:00',
+        '2026-01-15T05:30:00+05:30',
+      ].forEach((currentValue) => {
+        expect(getValue(currentValue, { input_timezone: 'Asia/Tokyo' })).toBe(currentValue);
+        expect(getValue(currentValue)).toBe(currentValue);
+      });
+      expect(
+        getValue('2026-01-15 10:30 +0900', {
+          format: 'YYYY-MM-DD HH:mm ZZ',
+          input_timezone: 'utc',
+        }),
+      ).toBe('2026-01-15 10:30 +0900');
+      // Any other value is shown in the field’s time zone, or the browser’s
+      expect(getValue('2026-01-15T01:30:00Z', { input_timezone: 'Asia/Tokyo' })).toBe(
+        '2026-01-15T10:30:00+09:00',
+      );
+      expect(getValue('2026-01-15T01:30:00Z', { output_utc: true })).toBe(
+        '2026-01-15T01:30:00+00:00',
+      );
+      expect(getValue('2026-01-15T01:30:00Z')).toBe('2026-01-14T17:30:00-08:00');
+      expect(getValue('2026-01-15T10:30:00.000+09:00', { input_timezone: 'Asia/Tokyo' })).toBe(
+        '2026-01-15T10:30:00+09:00',
+      );
+    } finally {
+      process.env.TZ = TZ;
+    }
+  });
+
+  test('shows a value in a custom format with advanced Day.js tokens as written', () => {
+    [
+      ['X', '1782865800'],
+      ['x', '1782865800000'],
+      ['MMMM Do, YYYY', 'July 1st, 2026'],
+    ].forEach(([format, currentValue]) => {
+      expect(
+        getDateTimeFieldDisplayValue({
+          locale: 'en',
+          fieldConfig: { ...baseFieldConfig, format },
+          currentValue,
+        }),
+      ).toBe(currentValue);
+    });
+  });
+
   test('shows the stored date of a date-only field with a custom input time zone', () => {
     const { TZ } = process.env;
 

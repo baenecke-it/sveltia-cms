@@ -14,16 +14,19 @@ import {
   selectedExternalAssets,
   selectedExternalDirPath,
 } from '$lib/services/assets/external';
+import { getAssetNameContext } from '$lib/services/assets/name';
 import { partitionProcessedFiles, processFile } from '$lib/services/assets/process';
 import { cmsConfig } from '$lib/services/config';
 import { UPDATE_TOAST_DEFAULT_STATE } from '$lib/services/contents/collection/data';
+import { getSlugs } from '$lib/services/contents/draft/slugs';
 import { normalizeFileNameTemplate } from '$lib/services/integrations/media-libraries/default';
-import { createPath } from '$lib/services/utils/file';
+import { createPath, getDirName } from '$lib/services/utils/file';
 import { createDeepState, createRawState } from '$lib/services/utils/state.svelte';
 
 /**
  * @import {
  * AssetSubfolder,
+ * EntryDraft,
  * ExternalAsset,
  * ExternalFolderListing,
  * MediaLibraryFetchOptions,
@@ -234,14 +237,21 @@ export const loadExternalAssets = async (service) => {
  * @param {object} [extraOptions] Extra options.
  * @param {boolean} [extraOptions.replacing] Whether the file replaces an existing asset, taking
  * over its name, so the file isn’t renamed with the template.
+ * @param {EntryDraft | null} [extraOptions.draft] Draft of the entry the files are added to, whose
+ * current values fill the template. Without one, the entry tags get random values.
  * @returns {Promise<{ validFiles: File[], oversizedFileNames: string[], invalidFileNames: string[]
  * }>} Files that can be uploaded, and the names of the files that were rejected.
  */
-export const prepareExternalUploads = async (files, options, { replacing = false } = {}) => {
+export const prepareExternalUploads = async (files, options, { replacing = false, draft } = {}) => {
   const nameTemplate = replacing ? undefined : normalizeFileNameTemplate(options.filename_template);
 
+  const nameContext =
+    nameTemplate && draft
+      ? getAssetNameContext({ draft, defaultLocaleSlug: getSlugs({ draft }).defaultLocaleSlug })
+      : undefined;
+
   const processed = await Promise.all(
-    files.map((file) => processFile(file, options, { nameTemplate })),
+    files.map((file) => processFile(file, options, { nameTemplate, nameContext })),
   );
 
   const { validFiles, oversizedFiles, invalidFiles } = partitionProcessedFiles(processed);
@@ -434,9 +444,10 @@ export const createExternalFolder = async (name) => {
 
 /**
  * Rename a folder on the selected cloud storage service, which moves every asset below it, one by
- * one, along with the placeholder of any empty folder below it. The list is reloaded from the
- * service afterwards, whether or not every move went through, so it never shows a file at a path
- * it no longer has.
+ * one, along with the placeholder of any empty folder below it. The rename is refused if a folder
+ * with the new name already exists, as its files would be overwritten. The list is reloaded from
+ * the service afterwards, whether or not every move went through, so it never shows a file at a
+ * path it no longer has.
  * @param {AssetSubfolder} subfolder Folder to be renamed.
  * @param {string} newName New folder name.
  * @returns {Promise<boolean>} Whether the folder has been renamed.
@@ -448,7 +459,7 @@ export const renameExternalFolder = async ({ path: dirPath }, newName) => {
     return false;
   }
 
-  const newDirPath = [...dirPath.split('/').slice(0, -1), newName].join('/');
+  const newDirPath = createPath([getDirName(dirPath), newName]);
   /**
    * Get the path of a file or folder once the folder has been renamed.
    * @param {string} path Current path.
@@ -463,6 +474,14 @@ export const renameExternalFolder = async ({ path: dirPath }, newName) => {
 
   try {
     const { assets, folders } = await getExternalFolderContents(service, dirPath, fetchOptions);
+    // The destination is listed in full too, as the list the user picked the name against can be
+    // cut short on a service holding many files, and moving the files onto an existing folder
+    // would overwrite its files with the same names
+    const destination = await getExternalFolderContents(service, newDirPath, fetchOptions);
+
+    if (destination.assets.length || destination.folders.length) {
+      throw new Error(`A folder named “${newName}” already exists in the folder.`);
+    }
 
     // Move the files one at a time, as the services do
     // eslint-disable-next-line no-restricted-syntax

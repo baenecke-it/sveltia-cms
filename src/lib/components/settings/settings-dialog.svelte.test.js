@@ -21,10 +21,14 @@ describe('SettingsDialog', () => {
       'language Language',
       'library_books Contents',
       'photo_library Media',
+      'auto_awesome AI',
       'accessibility_new Accessibility',
       'code_xml Developer',
       'database Data Management',
     ]);
+    // Nor is its panel rendered
+    expect(dialog.getByRole('tabpanel', { includeHidden: true }).elements()).toHaveLength(8);
+    expect(document.getElementById('prefs-tab-i18n')).toBeNull();
     await expect.element(tabs.nth(0)).toHaveAttribute('aria-selected', 'true');
     await expect.element(dialog.getByRole('heading', { name: 'Theme' })).toBeVisible();
 

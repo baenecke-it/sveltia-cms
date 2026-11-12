@@ -4,13 +4,18 @@ import { escapeRegExp } from '@sveltia/utils/string';
 
 import { version } from '$lib/services/app';
 import { cmsConfigVersion } from '$lib/services/config';
-import { getIndexFile } from '$lib/services/contents/collection/entries/index-file';
+import {
+  getIndexFile,
+  isCollectionIndexFilePath,
+} from '$lib/services/contents/collection/entries/index-file';
 import { resolveCollectionAndFile } from '$lib/services/contents/collection/files';
 import { getNestedIndexFileName } from '$lib/services/contents/collection/nested';
 import { hasRootField } from '$lib/services/contents/entry/fields';
+import { convertMapLists, getMapKeyField } from '$lib/services/contents/fields/list/map';
 import { detectedFrontMatterFormats } from '$lib/services/contents/file/detected-formats';
 import { mayHaveUnsafeInteger } from '$lib/services/contents/file/integers';
 import { hasCustomParser, parseEntryFile } from '$lib/services/contents/file/parse';
+import { valueSources } from '$lib/services/contents/file/value-sources';
 import {
   usesMultiFileStructure,
   usesSingleFileStructure,
@@ -141,6 +146,7 @@ const cacheParsedContent = ({ parsedFileMap, path, key, content }) => {
       // Copied, as the content is processed further, and the copy has to be cached as parsed
       content: structuredClone(content),
       format: detectedFrontMatterFormats.get(path),
+      valueSources: valueSources.get(path),
     });
   } catch {
     // Content the database can’t store either; the file is just parsed again next time
@@ -160,11 +166,21 @@ const cacheParsedContent = ({ parsedFileMap, path, key, content }) => {
 export const parseFileContent = async (file, errors, parsedFileMap) => {
   const { path, parsed } = file;
   const key = getParsedContentKey();
+  const customParser = hasCustomParser(file);
 
-  if (parsed?.key === key && !hasCustomParser(file)) {
+  if (parsed?.key === key && !customParser) {
+    // Remembered, so the file is saved back in the same format, as when it was parsed
     if (parsed.format) {
-      // Remembered, so the file is saved back in the same format, as when it was parsed
       detectedFrontMatterFormats.set(path, parsed.format);
+    } else {
+      detectedFrontMatterFormats.delete(path);
+    }
+
+    // Remembered, so the floats that are whole numbers are saved back as they were written
+    if (parsed.valueSources) {
+      valueSources.set(path, parsed.valueSources);
+    } else {
+      valueSources.delete(path);
     }
 
     return parsed.content;
@@ -185,7 +201,7 @@ export const parseFileContent = async (file, errors, parsedFileMap) => {
 
     // Parsing a file remembers the source text of any integer a `number` can’t represent exactly,
     // which is what the integer is saved as, so such a file has to be parsed every time
-    if (parsedFileMap && !hasCustomParser(file) && !mayHaveUnsafeInteger(file.text)) {
+    if (parsedFileMap && !customParser && !mayHaveUnsafeInteger(file.text)) {
       cacheParsedContent({ parsedFileMap, path, key, content });
     }
 
@@ -261,18 +277,25 @@ export const normalizeDefaultRootContent = (rawContent, allLocales, defaultLocal
 };
 
 /**
- * Transform raw content to handle special cases like root List and root KeyValue fields.
+ * Wrap the content of a top-level field in an object under the field name, as if the field were
+ * stored like any other field.
  * @param {RawEntryContent} rawContent Raw content from the file.
  * @param {Field[]} fields Collection fields.
  * @param {boolean} i18nSingleFile Whether i18n single file structure is used.
  * @returns {RawEntryContent | undefined} Transformed content or undefined if invalid.
  */
-export const transformRawContent = (rawContent, fields, i18nSingleFile) => {
+const transformRootContent = (rawContent, fields, i18nSingleFile) => {
   const args = { rawContent, fields, i18nSingleFile };
 
   // Handle a special case: top-level List field
   if (hasRootField(fields, 'list')) {
-    return transformRoot({ ...args, validate: Array.isArray });
+    // A keyed list is stored as a map, but a list saved before the option was added is an array
+    return transformRoot({
+      ...args,
+      validate: getMapKeyField(fields[0])
+        ? (value) => isObject(value) || Array.isArray(value)
+        : Array.isArray,
+    });
   }
 
   // Handle a special case: top-level KeyValue field
@@ -287,6 +310,33 @@ export const transformRawContent = (rawContent, fields, i18nSingleFile) => {
   }
 
   return isObject(rawContent) ? rawContent : undefined;
+};
+
+/**
+ * Transform raw content to handle special cases like root List and root KeyValue fields, as well
+ * as List fields stored as a map, which become list items like those of any other List field.
+ * @param {RawEntryContent} rawContent Raw content from the file.
+ * @param {Field[]} fields Collection fields.
+ * @param {boolean} i18nSingleFile Whether i18n single file structure is used.
+ * @returns {RawEntryContent | undefined} Transformed content or undefined if invalid.
+ */
+export const transformRawContent = (rawContent, fields, i18nSingleFile) => {
+  const content = transformRootContent(rawContent, fields, i18nSingleFile);
+
+  if (!content) {
+    return undefined;
+  }
+
+  if (!i18nSingleFile) {
+    return convertMapLists(content, fields, true);
+  }
+
+  return Object.fromEntries(
+    Object.entries(content).map(([locale, localizedContent]) => [
+      locale,
+      convertMapLists(localizedContent, fields, true),
+    ]),
+  );
 };
 
 /**
@@ -319,7 +369,7 @@ export const shouldSkipIndexFile = (path, fileName, collection, subPathTemplate,
   // 2. The collection is an entry collection and index file inclusion is enabled
   // 3. The collection is an entry collection and the `path` option value ends with `_index` and
   // the extension is `md`
-  // 4. The collection is a nested collection where every entry is stored as `_index.md`
+  // 4. The collection has nested entries, and every entry is stored as `_index.md`
   return !(
     !!fileName ||
     getIndexFile(collection)?.name === '_index' ||
@@ -637,7 +687,7 @@ export const prepareEntry = async ({ file, entries, entryMap, errors, parsedFile
   }
 
   const {
-    fields = [],
+    fields: regularFields = [],
     _file: { fullPathRegEx, subPath: subPathTemplate, extension },
     _i18n: {
       i18nEnabled,
@@ -647,6 +697,14 @@ export const prepareEntry = async ({ file, entries, entryMap, errors, parsedFile
       canonicalSlug: { key: canonicalSlugKey },
     },
   } = collectionFile ?? /** @type {InternalEntryCollection} */ (collection);
+
+  // The special index file has fields of its own, which its draft is created and saved with, so its
+  // content has to be read with them too, e.g. to convert a List field stored as a map
+  const fields =
+    (!collectionFile &&
+      isCollectionIndexFilePath(collection, path) &&
+      getIndexFile(collection)?.fields) ||
+    regularFields;
 
   // Normalize `single_file_default_root` content into the standard locale-keyed format so that the
   // rest of the processing pipeline can treat it identically to `single_file`.

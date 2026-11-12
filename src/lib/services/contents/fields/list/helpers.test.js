@@ -762,6 +762,48 @@ describe('Test hasDuplicatedSubField()', () => {
     ).toBe(true);
   });
 
+  test('should find a subfield using the `sync` strategy', () => {
+    expect(
+      hasDuplicatedSubField(
+        /** @type {any} */ ({
+          fields: [translatable, { name: 'url', widget: 'string', i18n: 'sync' }],
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  test('should find a subfield using the `duplicate_if_empty` strategy', () => {
+    expect(
+      hasDuplicatedSubField(
+        /** @type {any} */ ({
+          fields: [translatable, { name: 'caption', widget: 'string', i18n: 'duplicate_if_empty' }],
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  test('should ignore the `duplicate_if_empty` option of a subfield not supporting it', () => {
+    // Such a subfield works like a translatable one, so the items aren’t paired
+    expect(
+      hasDuplicatedSubField(
+        /** @type {any} */ ({
+          fields: [
+            translatable,
+            { name: 'draft', widget: 'boolean', i18n: 'duplicate_if_empty' },
+            {
+              name: 'colors',
+              widget: 'select',
+              options: ['red'],
+              multiple: true,
+              i18n: 'duplicate_if_empty',
+            },
+            { name: 'photos', widget: 'image', multiple: true, i18n: 'duplicate_if_empty' },
+          ],
+        }),
+      ),
+    ).toBe(false);
+  });
+
   test('should find a duplicated subfield nested in another subfield', () => {
     expect(
       hasDuplicatedSubField(

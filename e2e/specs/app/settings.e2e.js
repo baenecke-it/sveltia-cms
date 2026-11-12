@@ -63,6 +63,7 @@ test('opens and closes the Settings dialog', async ({ cms, page }) => {
     /Language/,
     /Contents/,
     /Media/,
+    /AI/,
     /Accessibility/,
     /Developer/,
     /Data Management/,
@@ -239,4 +240,10 @@ test('shows the developer tools once Developer Mode is on', async ({ cms, page }
     page.getByRole('menuitem', { name: 'CMS Configuration' }),
   );
   await expect(page).toHaveURL(/#\/config$/);
+
+  // The page shows the configuration as YAML
+  const config = page.getByRole('blockquote', { name: 'CMS Configuration' });
+
+  await expect(config).toContainText('name: test-repo');
+  await expect(config).toContainText('folder: content/posts');
 });

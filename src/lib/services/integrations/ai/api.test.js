@@ -720,13 +720,16 @@ describe('AI API Utilities', () => {
 describe('API key patterns', () => {
   // A key is saved as soon as it matches the selected service’s pattern, so a pattern that also
   // matched another service’s key would send that key to the wrong API
-  const keys = {
-    anthropic: `sk-ant-api03-${'aB3_-x'.repeat(15)}AA`,
-    deepseek: `sk-${'0123456789abcdef'.repeat(2)}`,
-    google: `AIza${'SyAbCdEfGh'.repeat(3)}IjKlM`,
-    mistral: 'abcdefghijklmnopqrstuvwxyz123456',
-    openai: `sk-proj-${'aB3_-x'.repeat(10)}`,
-  };
+  /** @type {[string, string][]} */
+  const keys = [
+    ['anthropic', `sk-ant-api03-${'aB3_-x'.repeat(15)}AA`],
+    ['deepseek', `sk-${'0123456789abcdef'.repeat(2)}`],
+    ['google', `AIza${'SyAbCdEfGh'.repeat(3)}IjKlM`],
+    ['google', `AQ.Ab8RN6${'aB3_-x.'.repeat(6)}`],
+    ['mistral', 'abcdefghijklmnopqrstuvwxyz123456'],
+    ['mistral', `mstrl_${'aB3x'.repeat(8)}_${'cD4y'.repeat(2)}`],
+    ['openai', `sk-proj-${'aB3_-x'.repeat(10)}`],
+  ];
 
   const patterns = {
     anthropic: anthropicKeyPattern,
@@ -737,7 +740,7 @@ describe('API key patterns', () => {
   };
 
   it.each(Object.keys(patterns))('should accept only a %s key', (service) => {
-    Object.entries(keys).forEach(([keyService, key]) => {
+    keys.forEach(([keyService, key]) => {
       expect(patterns[/** @type {keyof typeof patterns} */ (service)].test(key)).toBe(
         keyService === service,
       );
@@ -745,7 +748,7 @@ describe('API key patterns', () => {
   });
 
   it('should not accept a key with extra text around it', () => {
-    Object.entries(keys).forEach(([service, key]) => {
+    keys.forEach(([service, key]) => {
       expect(patterns[/** @type {keyof typeof patterns} */ (service)].test(`x ${key}`)).toBe(false);
     });
   });

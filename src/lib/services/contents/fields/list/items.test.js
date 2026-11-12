@@ -6,6 +6,7 @@ import {
 } from '$lib/services/contents/fields/list/items';
 
 vi.mock('$lib/services/config');
+vi.mock('$lib/services/user/account.svelte', () => ({ user: { account: {} } }));
 
 describe('getInitialListExpanderStates()', () => {
   /** @type {any} */
@@ -113,6 +114,67 @@ describe('createListItem()', () => {
     expect(duplicate).toEqual({ name: 'Bob', __sc_item_id: expect.any(String) });
   });
 
+  test('removes the original positions of the nested items from a duplicate', () => {
+    const valueList = [
+      {
+        name: 'Alice',
+        __sc_item_original_key_path: 'authors.1',
+        books: [
+          { title: 'A', __sc_item_original_key_path: 'authors.0.books.1' },
+          { title: 'B', __sc_item_original_key_path: 'authors.0.books.0' },
+        ],
+        tags: ['x'],
+      },
+    ];
+
+    const item = createListItem({ ...args, valueList, dupIndex: 0 });
+
+    expect(item).toEqual({
+      name: 'Alice',
+      books: [{ title: 'A' }, { title: 'B' }],
+      tags: ['x'],
+      __sc_item_id: expect.any(String),
+    });
+    // The source item keeps them
+    expect(valueList[0].books[0].__sc_item_original_key_path).toBe('authors.0.books.1');
+  });
+
+  test('copies a pasted item as a new one', () => {
+    const OLD_ID = 'de305d54-75b4-431b-adb2-eb6b9e546014';
+    const sourceItem = { name: 'Alice', links: { url: 'https://example.com' }, id: OLD_ID };
+
+    const item = createListItem({
+      ...args,
+      subFields: [...subFields, { name: 'id', widget: 'uuid' }],
+      valueList: [],
+      sourceItem,
+    });
+
+    expect(item).toEqual({
+      name: 'Alice',
+      links: { url: 'https://example.com' },
+      id: expect.any(String),
+      __sc_item_id: expect.any(String),
+    });
+    expect(item.id).not.toBe(OLD_ID);
+    expect(item.links).not.toBe(sourceItem.links);
+    // The pasted item isn’t modified
+    expect(sourceItem.id).toBe(OLD_ID);
+  });
+
+  test('copies a pasted value into a list with a single subfield', () => {
+    expect(
+      createListItem({
+        ...args,
+        valueList: [],
+        sourceItem: '',
+        subFields: [{ name: 'tag', widget: 'string' }],
+        hasSingleSubField: true,
+        field: { name: 'tag', widget: 'string', default: 'news' },
+      }),
+    ).toBe('');
+  });
+
   test('creates a new item if there is no item to duplicate', () => {
     // e.g. another locale of a list with paired items, which lacks the item being duplicated
     expect(createListItem({ ...args, valueList: [{ name: 'Alice' }], dupIndex: 1 })).toEqual(
@@ -211,7 +273,7 @@ describe('createListItem()', () => {
     test('gives a UUID the same new value in every locale sharing the map', () => {
       /** @type {import('$lib/types/public').Field[]} */
       const fields = [{ name: 'id', widget: 'uuid' }];
-      const renewedUuids = new Map();
+      const renewedValues = new Map();
 
       // A duplicated UUID holds the same value in every locale, while a translatable one doesn’t
       const [en, fr, de] = [OLD_ID, OLD_ID, OTHER_ID].map((id) =>
@@ -220,7 +282,7 @@ describe('createListItem()', () => {
           subFields: fields,
           valueList: [{ id }],
           dupIndex: 0,
-          renewedUuids,
+          renewedValues,
         }),
       );
 
@@ -239,6 +301,43 @@ describe('createListItem()', () => {
 
       expect(next.id).toMatch(UUID_REGEX);
       expect(next.id).not.toBe(en.id);
+    });
+
+    test('gives a Hidden field its default value again, the same in every locale sharing the map', () => {
+      /** @type {import('$lib/types/public').Field[]} */
+      const fields = [
+        { name: 'key', widget: 'hidden', default: '{{uuid}}' },
+        { name: 'lang', widget: 'hidden', default: '{{locale}}', i18n: true },
+        { name: 'tags', widget: 'hidden', default: ['a'] },
+        { name: 'choices', widget: 'select', multiple: true, options: ['x', 'y'] },
+      ];
+
+      const renewedValues = new Map();
+
+      const [en, fr] = ['en', 'fr'].map((locale) =>
+        createListItem({
+          ...args,
+          subFields: fields,
+          valueList: [{ key: OLD_ID, lang: locale, tags: ['b'], choices: ['x'] }],
+          dupIndex: 0,
+          renewedValues,
+          locale,
+        }),
+      );
+
+      expect(en.key).toMatch(UUID_REGEX);
+      expect(en.key).not.toBe(OLD_ID);
+      // A value duplicated across the locales gets the same new one in each
+      expect(fr.key).toBe(en.key);
+      // A translatable one gets one per locale
+      expect(en.lang).toBe('en');
+      expect(fr.lang).toBe('fr');
+      expect(en.tags).toEqual(['a']);
+      // An object or array isn’t shared by the locales, whether it’s renewed or kept
+      expect(fr.tags).toEqual(['a']);
+      expect(fr.tags).not.toBe(en.tags);
+      expect(fr.choices).toEqual(['x']);
+      expect(fr.choices).not.toBe(en.choices);
     });
 
     test('resolves the type of a duplicated item of a list with variable types', () => {

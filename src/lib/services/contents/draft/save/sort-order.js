@@ -1,7 +1,8 @@
 import { getEntriesByCollection } from '$lib/services/contents/collection/entries';
 import { getOrderFieldKey } from '$lib/services/contents/collection/entries/reorder/config';
 import { getDraftI18nConfig } from '$lib/services/contents/i18n/config';
-import { getUnpublishedEntriesByCollection } from '$lib/services/workflow';
+import { isValueEmpty } from '$lib/services/utils/object';
+import { getPullRequestEntries } from '$lib/services/workflow';
 
 /**
  * @import { EntryDraft, InternalLocaleCode } from '$lib/types/private';
@@ -11,23 +12,28 @@ import { getUnpublishedEntriesByCollection } from '$lib/services/workflow';
 /**
  * Get the highest number stored under the given key path by the entries of a collection, in the
  * given locale. The entries still in a pull request count too, as a new entry saved with
- * Editorial Workflow has taken its number as well. A value that isn’t a finite number is ignored,
- * and so is a negative one, as the result is never below zero.
+ * Editorial Workflow has taken its number as well, including the new entries riding along in the
+ * pull request of an entry of another collection. A value that isn’t a finite number is ignored.
  * @param {object} args Arguments.
  * @param {string} args.collectionName Entry collection name.
  * @param {FieldKeyPath} args.keyPath Key path of the value.
  * @param {InternalLocaleCode} args.locale Locale of the values, usually the default locale.
- * @returns {number} Highest number, or `0` if no entry has a positive one.
+ * @returns {number | undefined} Highest number, which can be zero or negative, or `undefined` if no
+ * entry has a number.
  */
 export const getMaxEntryNumber = ({ collectionName, keyPath, locale }) =>
-  [
-    ...getEntriesByCollection(collectionName),
-    ...getUnpublishedEntriesByCollection(collectionName),
-  ].reduce((max, entry) => {
-    const value = Number(entry.locales[locale]?.content?.[keyPath]);
+  [...getEntriesByCollection(collectionName), ...getPullRequestEntries(collectionName)].reduce(
+    (/** @type {number | undefined} */ max, entry) => {
+      const content = entry.locales[locale]?.content;
+      const rawValue = content?.[keyPath];
+      // `Number()` turns an empty value, like `null` or an empty string, into `0`, which isn’t a
+      // number the entry has
+      const value = isValueEmpty(rawValue) ? NaN : Number(rawValue);
 
-    return Number.isFinite(value) && value > max ? value : max;
-  }, 0);
+      return Number.isFinite(value) && (max === undefined || value > max) ? value : max;
+    },
+    undefined,
+  );
 
 /**
  * For new entries in reorder-enabled entry collections, assign a fresh manual sort order to the
@@ -57,7 +63,8 @@ export const assignManualSortOrder = (draft, offset = 0) => {
     locale: defaultLocale,
   });
 
-  const nextOrder = maxOrder + offset + 1;
+  // The order starts from 1, even if an entry has a negative one
+  const nextOrder = Math.max(maxOrder ?? 0, 0) + offset + 1;
 
   Object.values(currentValues).forEach((valueMap) => {
     valueMap[orderKey] = nextOrder;

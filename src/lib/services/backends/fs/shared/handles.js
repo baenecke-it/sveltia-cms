@@ -12,7 +12,78 @@ import { getRootDir } from '$lib/services/backends/root-dir';
 export const isNotFoundError = (ex) => /** @type {DOMException} */ (ex)?.name === 'NotFoundError';
 
 /**
- * Get a file or directory handle at the given path.
+ * Check if the given error says a file was expected where there’s a directory, or the other way
+ * round.
+ * @param {unknown} ex Error.
+ * @returns {boolean} `true` for a `TypeMismatchError`.
+ */
+export const isTypeMismatchError = (ex) =>
+  /** @type {DOMException} */ (ex)?.name === 'TypeMismatchError';
+
+/**
+ * Check if a file or folder name can be spelled in more than one Unicode normalization form, like
+ * `café`, whose `é` is one character in form C and two in form D.
+ * @param {string} name Name or path.
+ * @returns {boolean} Result.
+ */
+export const hasOtherSpellings = (name) => name.normalize('NFC') !== name.normalize('NFD');
+
+/**
+ * Pick the name a file or folder has among the names of the entries in a directory, which can be
+ * spelled in another Unicode normalization form than the given one. The exact spelling wins.
+ * @param {string[]} names Names of the entries in the directory.
+ * @param {string} name Name to look for.
+ * @returns {string | undefined} Name of the file or folder in the directory, or `undefined` if
+ * there’s none.
+ */
+export const pickEntryName = (names, name) => {
+  if (names.includes(name)) {
+    return name;
+  }
+
+  const normalizedName = name.normalize();
+
+  return names.find((entryName) => entryName.normalize() === normalizedName);
+};
+
+/**
+ * Find the name a file or folder has in a directory, which can be spelled in another Unicode
+ * normalization form than the given one. The CMS works with names in form C, while a file added on
+ * Linux, or by a program on macOS, can have a name in form D, and a file system that compares names
+ * byte for byte, like ext4, NTFS or the origin private file system, wouldn’t find the file by the
+ * other spelling. On macOS, which ignores the normalization, the name is found as it is.
+ * @param {FileSystemDirectoryHandle} dirHandle Directory handle.
+ * @param {string} name Name.
+ * @returns {Promise<string>} Name of the file or folder in the directory, or the given name if
+ * there’s none.
+ */
+export const findEntryName = async (dirHandle, name) => {
+  if (!hasOtherSpellings(name)) {
+    return name;
+  }
+
+  try {
+    await dirHandle.getFileHandle(name);
+
+    return name;
+  } catch (ex) {
+    if (isTypeMismatchError(ex)) {
+      // It’s a folder
+      return name;
+    }
+
+    if (!isNotFoundError(ex)) {
+      throw ex;
+    }
+  }
+
+  return pickEntryName(await Array.fromAsync(dirHandle.keys()), name) ?? name;
+};
+
+/**
+ * Get a file or directory handle at the given path. A file or folder whose name is spelled in
+ * another Unicode normalization form is found too, and a missing one is created with the given
+ * spelling.
  * @param {FileSystemDirectoryHandle} rootDirHandle Root directory handle.
  * @param {string | undefined} path Path to the file/directory.
  * @param {'file' | 'directory'} [type] Type of the handle to retrieve.
@@ -46,7 +117,9 @@ export const getHandleByPath = async (
   const pathParts = normalizedPath.split('/');
   const lastIndex = pathParts.length - 1;
 
-  for await (const [index, name] of pathParts.entries()) {
+  for await (const [index, part] of pathParts.entries()) {
+    const name = await findEntryName(/** @type {FileSystemDirectoryHandle} */ (handle), part);
+
     // If the part is the last one and the type is `file`, we need to ensure that we get a file
     // handle. Otherwise, we can get a directory handle.
     handle = await (index === lastIndex && type === 'file'
@@ -94,6 +167,25 @@ export const readFile = async (rootDirHandle, path) => {
   );
 
   return handle.getFile();
+};
+
+/**
+ * Read a file at the given path, if it exists.
+ * @param {FileSystemDirectoryHandle} rootDirHandle Root directory handle.
+ * @param {string} path Path to the file.
+ * @returns {Promise<File | undefined>} File, or `undefined` if it doesn’t exist.
+ * @throws {Error} If the file can’t be read for any other reason.
+ */
+export const readFileIfExists = async (rootDirHandle, path) => {
+  try {
+    return await readFile(rootDirHandle, path);
+  } catch (ex) {
+    if (isNotFoundError(ex)) {
+      return undefined;
+    }
+
+    throw ex;
+  }
 };
 
 /**

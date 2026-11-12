@@ -1,10 +1,15 @@
 import { loadChunk } from '$lib/services/app/dependencies';
-import { DIR, INDEX_LOCK_PATH, OPERATION_MARKERS } from '$lib/services/backends/fs/git/constants';
+import {
+  DIR,
+  INDEX_LOCK_PATH,
+  OID_SIZE,
+  OPERATION_MARKERS,
+} from '$lib/services/backends/fs/git/constants';
 import { createGitFileSystem, exists } from '$lib/services/backends/fs/git/file-system';
 import { hasRequiredExtension, parseIndex } from '$lib/services/backends/fs/git/index-file';
 import { createObjectReader } from '$lib/services/backends/fs/git/objects';
 import { buildTree, getCommitTree } from '$lib/services/backends/fs/git/tree';
-import { isNotFoundError, readFile } from '$lib/services/backends/fs/shared/handles';
+import { isTypeMismatchError, readFileIfExists } from '$lib/services/backends/fs/shared/handles';
 import { toHex } from '$lib/services/utils/crypto';
 
 /**
@@ -49,7 +54,28 @@ export const setIndexCache = (cache) => {
  * @param {Uint8Array} bytes Content of the index file.
  * @returns {string} Checksum.
  */
-export const getIndexChecksum = (bytes) => toHex(bytes.subarray(-20));
+export const getIndexChecksum = (bytes) => toHex(bytes.subarray(-OID_SIZE));
+
+/**
+ * Get the commit a branch points to.
+ * @param {any} git Isomorphic-git module.
+ * @param {GitFileSystem} fs File system.
+ * @param {string} branch Full name of the branch.
+ * @returns {Promise<string | undefined>} Object ID of the commit, or `undefined` if the branch has
+ * no commits yet.
+ * @throws {Error} If the branch couldn’t be read.
+ */
+export const resolveBranchHead = async (git, fs, branch) => {
+  try {
+    return await git.resolveRef({ fs, dir: DIR, ref: branch });
+  } catch (ex) {
+    if (/** @type {any} */ (ex)?.code === 'NotFoundError') {
+      return undefined;
+    }
+
+    throw ex;
+  }
+};
 
 /**
  * Build the tree of an index, reusing the cached one if the index hasn’t changed, and cache it.
@@ -79,17 +105,7 @@ const getIndexTree = async (index, checksum) => {
  * @throws {Error} If the file exists but can’t be read.
  */
 const readIndex = async (gitDirHandle) => {
-  /** @type {ArrayBuffer | undefined} */
-  let buffer;
-
-  try {
-    buffer = await (await readFile(gitDirHandle, 'index')).arrayBuffer();
-  } catch (ex) {
-    if (!isNotFoundError(ex)) {
-      throw ex;
-    }
-  }
-
+  const buffer = await (await readFileIfExists(gitDirHandle, 'index'))?.arrayBuffer();
   const checksum = buffer ? getIndexChecksum(new Uint8Array(buffer)) : '';
 
   if (indexCache?.checksum === checksum) {
@@ -130,6 +146,39 @@ const identifyOperation = async (fs, marker, operation) => {
 };
 
 /**
+ * Check whether a configuration value is true the way Git reads a boolean: `true`, `yes`, `on` and
+ * a number other than zero are true, in any case, as is an option without a value, which the
+ * isomorphic-git library reads as `true`.
+ * @param {any} value Value.
+ * @returns {boolean} Whether the value is true.
+ * @see https://git-scm.com/docs/git-config#Documentation/git-config.txt-boolean
+ */
+const isTrueConfigValue = (value) =>
+  value === true || /^(?:true|yes|on|[+-]?0*[1-9]\d*)$/i.test(String(value).trim());
+
+/**
+ * Read a boolean option from the repository’s configuration the way Git does: `true`, `yes`, `on`
+ * and a number other than zero are true, in any case, and an option that isn’t set is false.
+ * The isomorphic-git library converts the value of a few options, such as `core.ignorecase`, to a
+ * boolean, but throws on a number or an empty value, which Git never writes itself; such a value is
+ * read as false.
+ * @param {any} git Isomorphic-git module.
+ * @param {GitFileSystem} fs File system.
+ * @param {string} path Name of the option.
+ * @returns {Promise<boolean>} Value.
+ * @see https://git-scm.com/docs/git-config#Documentation/git-config.txt-boolean
+ */
+const getBooleanConfig = async (git, fs, path) => {
+  try {
+    const value = await git.getConfig({ fs, dir: DIR, path });
+
+    return isTrueConfigValue(value);
+  } catch {
+    return false;
+  }
+};
+
+/**
  * Check whether the CMS can commit to a repository on the user’s computer right now, and gather
  * what it needs to do so. It can if it understands the repository’s format, knows who the author
  * is, and the index, the files staged for the next commit, matches the current commit: a commit
@@ -152,7 +201,7 @@ export const inspectRepository = async (repoRootDirHandle, { onLock } = {}) => {
   } catch (ex) {
     // `.git` is a file in a linked worktree or a submodule, pointing to a directory elsewhere, out
     // of reach of the browser
-    if (/** @type {DOMException} */ (ex)?.name === 'TypeMismatchError') {
+    if (isTypeMismatchError(ex)) {
       return { ready: false, reason: 'unsupported_repository' };
     }
 
@@ -163,15 +212,18 @@ export const inspectRepository = async (repoRootDirHandle, { onLock } = {}) => {
   const fs = createGitFileSystem(repoRootDirHandle, { Buffer: git.Buffer });
 
   // isomorphic-git only reads the repository’s own configuration, not the user’s global one
-  const [objectFormat, refStorage, name, email, autocrlf] = await Promise.all(
-    [
-      'extensions.objectformat',
-      'extensions.refstorage',
-      'user.name',
-      'user.email',
-      'core.autocrlf',
-    ].map((path) => git.getConfig({ fs, dir: DIR, path })),
-  );
+  const [[objectFormat, refStorage, name, email, autocrlf], ignoreCase] = await Promise.all([
+    Promise.all(
+      [
+        'extensions.objectformat',
+        'extensions.refstorage',
+        'user.name',
+        'user.email',
+        'core.autocrlf',
+      ].map((path) => git.getConfig({ fs, dir: DIR, path })),
+    ),
+    getBooleanConfig(git, fs, 'core.ignorecase'),
+  ]);
 
   if ((objectFormat && objectFormat !== 'sha1') || (refStorage && refStorage !== 'files')) {
     return { ready: false, reason: 'unsupported_repository' };
@@ -232,19 +284,9 @@ export const inspectRepository = async (repoRootDirHandle, { onLock } = {}) => {
   }
 
   const reader = createObjectReader(gitDirHandle);
-  /** @type {string | undefined} */
-  let headOid;
+  const headOid = await resolveBranchHead(git, fs, branch);
   /** @type {string | undefined} */
   let headTreeOid;
-
-  try {
-    headOid = await git.resolveRef({ fs, dir: DIR, ref: branch });
-  } catch (ex) {
-    // The branch has no commits yet
-    if (/** @type {any} */ (ex)?.code !== 'NotFoundError') {
-      throw ex;
-    }
-  }
 
   if (headOid) {
     const commit = await reader.readObject(headOid);
@@ -280,8 +322,11 @@ export const inspectRepository = async (repoRootDirHandle, { onLock } = {}) => {
       index,
       indexBuffer,
       indexTree,
-      // Git converts the line endings when adding a file with both values
-      autocrlf: ['true', 'input'].includes(String(autocrlf)),
+      // Git converts the line endings when adding a file with `input` as well as a true value
+      autocrlf: /^input$/i.test(String(autocrlf).trim()) || isTrueConfigValue(autocrlf),
+      // Git matches the patterns in `.gitattributes` case-insensitively with the option, which it
+      // sets when the repository is cloned or created on a case-insensitive file system
+      ignoreCase,
     },
   };
 };

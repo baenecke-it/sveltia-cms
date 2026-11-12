@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 
 // Mock dependencies
 vi.mock('$lib/services/config', () => ({
@@ -27,9 +27,16 @@ vi.mock('$lib/services/contents/draft/create/versioned-map.svelte', () => ({
   createValueMap: vi.fn((target) => target),
 }));
 
-vi.mock('$lib/services/contents/draft/create/uuid', () => ({
+vi.mock('$lib/services/contents/draft/create/unique-values', () => ({
   fillUuidValues: vi.fn(),
 }));
+
+// The actual function, unless a test resolves the fields itself
+vi.mock('$lib/services/contents/entry/fields', async (importOriginal) => {
+  const actual = await importOriginal();
+
+  return { ...actual, getField: vi.fn(actual.getField) };
+});
 
 // `populateDefaultValue` is kept intact because `normalizeContentMap()` relies on it to fill in the
 // values missing from an existing entry
@@ -47,7 +54,8 @@ const { restoreBackupIfNeeded } = await import('$lib/services/contents/draft/bac
 const { createProxy } = await import('$lib/services/contents/draft/create/proxy.svelte');
 const { createValueMap } = await import('$lib/services/contents/draft/create/versioned-map.svelte');
 const { getDefaultValues } = await import('$lib/services/contents/draft/defaults');
-const { fillUuidValues } = await import('$lib/services/contents/draft/create/uuid');
+const { fillUuidValues } = await import('$lib/services/contents/draft/create/unique-values');
+const { getField } = await import('$lib/services/contents/entry/fields');
 const { cmsConfig } = await import('$lib/services/config');
 const { nestedFilterPath } = await import('$lib/services/contents/collection/nested');
 const { createDraft, getInitialSlugs, getOriginalPath, getSlugEditorProp } = await import('.');
@@ -414,6 +422,7 @@ describe('contents/draft/create/index', () => {
           isNew: true,
           id: expect.any(String),
           canPreview: true,
+          canShowSecondPane: true,
           fields: collection.fields,
           originalEntry: undefined,
           defaultLocale: 'en',
@@ -462,6 +471,70 @@ describe('contents/draft/create/index', () => {
       });
 
       expect(fillUuidValues).not.toHaveBeenCalled();
+    });
+
+    it('should give a duplicated Hidden field the default locale’s value in every locale', () => {
+      const collection = {
+        name: 'posts',
+        _type: 'entry',
+        fields: [
+          { name: 'id', widget: 'hidden', default: '{{uuid}}', i18n: 'duplicate' },
+          { name: 'ids', widget: 'hidden', i18n: 'sync' },
+          { name: 'lang', widget: 'hidden', default: '{{locale}}', i18n: true },
+          { name: 'shared', widget: 'hidden' },
+          { name: 'title', widget: 'string', i18n: 'duplicate' },
+        ],
+        _i18n: {
+          i18nEnabled: true,
+          structureMap: {},
+          allLocales: ['en', 'ja'],
+          initialLocales: ['en', 'ja'],
+          defaultLocale: 'en',
+          canonicalSlug: { key: 'translationKey' },
+        },
+      };
+
+      const getFieldImpl = vi.mocked(getField).getMockImplementation();
+
+      onTestFinished(() => {
+        vi.mocked(getField).mockImplementation(/** @type {any} */ (getFieldImpl));
+      });
+
+      vi.mocked(getField).mockImplementation(({ keyPath }) =>
+        collection.fields.find(({ name }) => name === keyPath),
+      );
+
+      // The default values of each locale are created separately, so a generated one differs
+      getDefaultValues.mockImplementation(({ locale }) => ({
+        id: `${locale}-uuid`,
+        ids: [`${locale}-uuid`],
+        lang: locale,
+        ...(locale === 'en' ? { shared: 'value' } : {}),
+        title: `${locale}-title`,
+      }));
+
+      createDraft({ entryDraft, collection });
+
+      const { originalValues } = entryDraft.current;
+
+      expect(originalValues.ja).toEqual({
+        id: 'en-uuid',
+        ids: ['en-uuid'],
+        lang: 'ja',
+        title: 'ja-title',
+      });
+      // A copy, so the locales don’t share the value
+      expect(originalValues.ja.ids).not.toBe(originalValues.en.ids);
+
+      // A new entry may lack the default locale
+      createDraft({
+        entryDraft,
+        collection: { ...collection, _i18n: { ...collection._i18n, initialLocales: ['ja'] } },
+      });
+
+      expect(entryDraft.current.originalValues).toEqual({
+        ja: { id: 'ja-uuid', ids: ['ja-uuid'], lang: 'ja', title: 'ja-title' },
+      });
     });
 
     it('should create draft for existing entry', () => {
@@ -611,6 +684,7 @@ describe('contents/draft/create/index', () => {
       expect(entryDraft.current).toEqual(
         expect.objectContaining({
           canPreview: false,
+          canShowSecondPane: true,
         }),
       );
     });
@@ -649,8 +723,70 @@ describe('contents/draft/create/index', () => {
       expect(entryDraft.current).toEqual(
         expect.objectContaining({
           canPreview: false,
+          canShowSecondPane: true,
         }),
       );
+    });
+
+    it('should set canShowSecondPane from the most specific editor config', () => {
+      const i18n = {
+        i18nEnabled: false,
+        structureMap: {},
+        allLocales: ['_default'],
+        initialLocales: ['_default'],
+        defaultLocale: '_default',
+        canonicalSlug: { key: 'translationKey' },
+      };
+
+      const entryCollection = { name: 'posts', _type: 'entry', fields: [], _i18n: i18n };
+
+      /**
+       * Create a draft and read whether it can show the second pane.
+       * @param {any} args Arguments for `createDraft()`.
+       * @returns {boolean | undefined} Value.
+       */
+      const resolve = (args) => {
+        createDraft({ entryDraft, ...args });
+
+        return entryDraft.current?.canShowSecondPane;
+      };
+
+      // Global
+      cmsConfig.current = /** @type {any} */ ({ editor: { second_pane: false } });
+      expect(resolve({ collection: entryCollection })).toBe(false);
+
+      // Collection over global
+      expect(resolve({ collection: { ...entryCollection, editor: { second_pane: true } } })).toBe(
+        true,
+      );
+
+      cmsConfig.current = /** @type {any} */ ({});
+      expect(resolve({ collection: { ...entryCollection, editor: { second_pane: false } } })).toBe(
+        false,
+      );
+
+      // Collection file over collection
+      expect(
+        resolve({
+          collection: {
+            name: 'pages',
+            _type: 'file',
+            files: [],
+            editor: { second_pane: true },
+            _i18n: i18n,
+          },
+          collectionFile: {
+            name: 'about',
+            fields: [],
+            editor: { second_pane: false },
+            _i18n: i18n,
+          },
+        }),
+      ).toBe(false);
+
+      // Index file over collection
+      getIndexFile.mockReturnValue({ fields: [], editor: { second_pane: false } });
+      expect(resolve({ collection: entryCollection, isIndexFile: true })).toBe(false);
     });
 
     it('should use true fallback when no editor.preview is set anywhere (line 120)', () => {
@@ -679,6 +815,7 @@ describe('contents/draft/create/index', () => {
       expect(entryDraft.current).toEqual(
         expect.objectContaining({
           canPreview: true, // falls through to the literal `true` at line 120
+          canShowSecondPane: true,
         }),
       );
     });
@@ -991,6 +1128,7 @@ describe('contents/draft/create/index', () => {
           fields: indexFile.fields,
           defaultLocale: 'en',
           canPreview: false,
+          canShowSecondPane: true,
         }),
       );
     });

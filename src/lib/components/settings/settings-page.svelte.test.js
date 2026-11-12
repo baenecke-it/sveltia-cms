@@ -29,6 +29,7 @@ describe('SettingsPage', () => {
       'language Language',
       'library_books Contents',
       'photo_library Media',
+      'auto_awesome AI',
       'accessibility_new Accessibility',
       'code_xml Developer',
       'database Data Management',
@@ -60,6 +61,15 @@ describe('SettingsPage', () => {
 
     await page.getByRole('toolbar').getByRole('button', { name: 'Back' }).click();
     await expect.poll(() => window.location.hash).toBe('#/settings');
+  });
+
+  test('reports a disabled panel as unknown', async () => {
+    // Internationalization is only offered for a multilingual site
+    window.location.hash = '#/settings/i18n';
+
+    await render(SettingsPage, {});
+
+    await expect.element(page.getByRole('toolbar')).toHaveTextContent('arrow_back Page not found.');
   });
 
   test('goes back to the menu from the index, and ignores other pages', async () => {

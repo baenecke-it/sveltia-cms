@@ -1,17 +1,8 @@
 /* eslint-disable jsdoc/require-jsdoc */
 
 import { execFileSync } from 'node:child_process';
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
@@ -24,7 +15,10 @@ import {
 } from '$lib/services/backends/fs/git';
 import { formatTimezoneOffset } from '$lib/services/backends/fs/git/commit';
 import { parseIndex } from '$lib/services/backends/fs/git/index-file';
+import { saveChanges } from '$lib/services/backends/fs/shared/save';
 import { cmsConfig } from '$lib/services/config';
+import { createGitEnv, createTempDir, runGitRaw, writeRepoFile } from '$lib/test/git-repo';
+import { copyFromMemory, copyToMemory } from '$lib/test/memory-fs-handles';
 import { createNodeDirectoryHandle } from '$lib/test/node-fs-handles';
 
 /**
@@ -44,35 +38,16 @@ vi.mock('$lib/services/backends/git/shared/commits', () => ({
   ),
 }));
 
-/**
- * Environment for the `git` command, isolated from the user’s and system configuration. Auto
- * maintenance is turned off: `git commit` would otherwise start a detached `git maintenance` that
- * deletes its lock file in `.git` while a test removes the folder, and on Linux `rmSync()` then
- * returns without an error, leaving the rest of the folder, `.git/config` included, behind.
- */
-const GIT_ENV = {
-  ...process.env,
-  GIT_CONFIG_GLOBAL: '/dev/null',
-  GIT_CONFIG_NOSYSTEM: '1',
-  GIT_CONFIG_COUNT: '1',
-  GIT_CONFIG_KEY_0: 'maintenance.auto',
-  GIT_CONFIG_VALUE_0: 'false',
-  GIT_AUTHOR_NAME: 'Native',
-  GIT_AUTHOR_EMAIL: 'native@example.com',
-  GIT_COMMITTER_NAME: 'Native',
-  GIT_COMMITTER_EMAIL: 'native@example.com',
-};
-
+// Commits made with the native Git are by a different author from the ones the CMS makes
+const NATIVE_GIT_ENV = createGitEnv({ name: 'Native', email: 'native@example.com' });
 /** @type {string} */
 let repoDir;
-
 /**
  * Run a Git command in the test repository.
  * @param {...string} args Arguments.
  * @returns {string} Output, trimmed.
  */
-const git = (...args) =>
-  execFileSync('git', args, { cwd: repoDir, env: GIT_ENV, stdio: 'pipe' }).toString().trim();
+const git = (...args) => runGitRaw(repoDir, args, NATIVE_GIT_ENV).toString().trim();
 
 /**
  * Write a file in the test repository.
@@ -80,8 +55,7 @@ const git = (...args) =>
  * @param {string} content Content.
  */
 const write = (path, content) => {
-  mkdirSync(dirname(join(repoDir, path)), { recursive: true });
-  writeFileSync(join(repoDir, path), content);
+  writeRepoFile(repoDir, path, content);
 };
 
 /**
@@ -131,7 +105,7 @@ const expectCleanRepository = () => {
 };
 
 beforeEach(() => {
-  repoDir = mkdtempSync(join(tmpdir(), 'sveltia-git-'));
+  repoDir = createTempDir('sveltia-git-');
   git('init', '--initial-branch=main');
   git('config', 'user.name', 'Jane Doe');
   git('config', 'user.email', 'jane@example.com');
@@ -399,7 +373,7 @@ describe('saveAndCommitChanges()', () => {
     expect(git('show', '--format=', '--summary', 'HEAD')).toBe('');
   });
 
-  test.each(['true', 'input'])(
+  test.each(['true', 'input', 'Input', 'TRUE', 'yes', 'on', '1'])(
     'stores text with LF line endings when `core.autocrlf` is %s',
     async (value) => {
       git('config', 'core.autocrlf', value);
@@ -433,6 +407,32 @@ describe('saveAndCommitChanges()', () => {
     },
   );
 
+  test.each(['false', 'off', '0'])(
+    'stores text with CRLF line endings as is when `core.autocrlf` is %s',
+    async (value) => {
+      git('config', 'core.autocrlf', value);
+
+      const changes = [
+        { action: /** @type {const} */ ('create'), path: 'crlf.md', data: 'One\r\nTwo\r\n' },
+      ];
+
+      await saveAndCommitChanges({
+        repoRootDirHandle: createNodeDirectoryHandle(repoDir),
+        changes,
+        options: { commitType: 'create' },
+        save: async () => {
+          write('crlf.md', 'One\r\nTwo\r\n');
+
+          return { sha: 'pseudo', files: {} };
+        },
+      });
+
+      expect(
+        execFileSync('git', ['cat-file', 'blob', 'HEAD:crlf.md'], { cwd: repoDir }).toString(),
+      ).toBe('One\r\nTwo\r\n');
+    },
+  );
+
   test('leaves a cache tree that Git can commit on top of', async () => {
     write('content/notes/a.md', 'A\n');
     git('add', '.');
@@ -454,7 +454,7 @@ describe('saveAndCommitChanges()', () => {
     git('add', 'content/notes/a.md');
     git('commit', '-qm', 'Native');
 
-    const env = { ...GIT_ENV, GIT_INDEX_FILE: join(repoDir, '.git/fresh-index') };
+    const env = { ...NATIVE_GIT_ENV, GIT_INDEX_FILE: join(repoDir, '.git/fresh-index') };
 
     execFileSync('git', ['add', '-A'], { cwd: repoDir, env });
     expect(git('rev-parse', 'HEAD^{tree}')).toBe(
@@ -668,6 +668,72 @@ describe('saveAndCommitChanges()', () => {
     });
   });
 
+  describe('matches the `.gitattributes` patterns like Git with `core.ignorecase`', () => {
+    const path = 'static/images/IMG_1234.JPG';
+
+    /**
+     * Replace the `core.ignorecase` option in the repository’s configuration, keeping the other
+     * options in the `core` section, which `git init` writes.
+     * @param {string} [line] Line setting the option, or nothing to leave it unset.
+     */
+    const setIgnoreCase = (line) => {
+      const configPath = join(repoDir, '.git/config');
+      const config = readFileSync(configPath, 'utf8').replace(/^\s*ignorecase\b.*\n/gim, '');
+
+      writeFileSync(configPath, line ? config.replace('[core]\n', `[core]\n\t${line}\n`) : config);
+    };
+
+    beforeEach(() => {
+      write('.gitattributes', '*.jpg filter=lfs diff=lfs merge=lfs -text\n');
+      git('add', '.');
+      git('commit', '-m', 'Track JPEG with LFS');
+    });
+
+    test.each([
+      [undefined, false],
+      ['ignorecase = true', true],
+      ['ignorecase = false', false],
+      ['ignorecase = True', true],
+      ['ignorecase = yes', true],
+      ['ignorecase = off', false],
+      ['ignorecase', true],
+      ['ignoreCase = TRUE', true],
+      ['ignoreCase = 1', true],
+      ['ignoreCase = 0', false],
+      ['ignorecase = 0', false],
+    ])('%s: tracked with Git LFS: %s', async (line, tracked) => {
+      setIgnoreCase(line);
+      // The expectation is the same as Git’s
+      expect(git('check-attr', 'filter', '--', path)).toBe(
+        `${path}: filter: ${tracked ? 'lfs' : 'unspecified'}`,
+      );
+
+      const head = git('rev-parse', 'HEAD');
+      const results = await saveAndCommit([{ action: 'create', path, data: 'JPEG\n' }]);
+
+      if (tracked) {
+        expect(results.sha).toBe('pseudo');
+        expect(git('rev-parse', 'HEAD')).toBe(head);
+        expect(localGitNotice.current).toEqual({ reason: 'lfs', detail: path });
+      } else {
+        expect(results.sha).toBe(git('rev-parse', 'HEAD'));
+        expect(git('show', '--name-status', '--format=', 'HEAD')).toBe(`A\t${path}`);
+        expect(localGitNotice.current).toBeUndefined();
+      }
+    });
+
+    test('reads a number isomorphic-git can’t convert as false (known issue)', async () => {
+      // Git reads it as true, but never writes it itself
+      setIgnoreCase('ignorecase = 1');
+      expect(git('check-attr', 'filter', '--', path)).toBe(`${path}: filter: lfs`);
+
+      const results = await saveAndCommit([{ action: 'create', path, data: 'JPEG\n' }]);
+
+      expect(results.sha).toBe(git('rev-parse', 'HEAD'));
+      expect(localGitNotice.current).toBeUndefined();
+    });
+  });
+
   test('reports a commit that fails, keeping the saved changes', async () => {
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
     const head = git('rev-parse', 'HEAD');
@@ -705,6 +771,28 @@ describe('saveAndCommitChanges()', () => {
     });
     expect(consoleError).toHaveBeenCalled();
     expect(existsSync(join(repoDir, '.git/index.lock'))).toBe(false);
+    consoleError.mockRestore();
+  });
+
+  test('reports a branch that can’t be read before the commit as such', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const head = git('rev-parse', 'HEAD');
+    /** @type {any} */
+    const realGit = await loadChunk('git');
+
+    const resolveRef = vi
+      .fn(realGit.resolveRef)
+      .mockImplementationOnce(realGit.resolveRef)
+      .mockRejectedValueOnce(new Error('Disk failure'));
+
+    vi.mocked(loadChunk).mockResolvedValueOnce({ ...realGit, resolveRef });
+
+    const results = await saveAndCommit([{ action: 'update', path: 'README.md', data: 'Hi\n' }]);
+
+    expect(results.sha).toBe('pseudo');
+    expect(git('rev-parse', 'HEAD')).toBe(head);
+    expect(resolveRef).toHaveBeenCalledTimes(2);
+    expect(localGitNotice.current).toEqual({ reason: 'error', detail: 'Disk failure' });
     consoleError.mockRestore();
   });
 
@@ -779,6 +867,112 @@ describe('saveAndCommitChanges()', () => {
         },
       }),
     ).rejects.toThrow('Disk full');
+  });
+});
+
+describe('saveAndCommitChanges() on a file system that compares names byte for byte', () => {
+  // A name with a combining accent, as a file added on Linux can have, and its spelling in form C,
+  // which the CMS uses
+  const decomposed = 'cafe\u0301';
+  const composed = decomposed.normalize();
+
+  beforeEach(() => {
+    git('config', 'core.precomposeUnicode', 'false');
+    // The save renames its temporary file with `move()`
+    vi.stubGlobal('FileSystemFileHandle', { prototype: { move: () => {} } });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * Save and commit changes with the local backend’s own save, in a copy of the test repository
+   * kept in memory, where a name in form D isn’t found by its name in form C, as on Linux. The copy
+   * is then written back, so the repository can be checked with the `git` command.
+   * @param {FileChange[]} changes Changes.
+   */
+  const saveAndCommitInMemory = async (changes) => {
+    const repoRootDirHandle = await copyToMemory(repoDir);
+
+    clearLocalGitCache();
+    await saveAndCommitChanges({
+      repoRootDirHandle,
+      changes,
+      options: { commitType: 'update' },
+      save: () => saveChanges(repoRootDirHandle, changes),
+    });
+    expect(localGitNotice.current).toBeUndefined();
+
+    rmSync(repoDir, { recursive: true, force: true });
+    await copyFromMemory(repoRootDirHandle, repoDir);
+  };
+
+  /**
+   * List the files in the index.
+   * @param {string} path Folder to list.
+   * @returns {string} File paths, one per line.
+   */
+  const listFiles = (path) => git('-c', 'core.quotePath=false', 'ls-files', path);
+
+  test('commits an edit to a tracked file whose name is decomposed', async () => {
+    const path = `content/posts/${decomposed}.md`;
+
+    write(path, 'Coffee\n');
+    git('update-index', '--add', path);
+    git('commit', '-m', 'Add coffee');
+
+    await saveAndCommitInMemory([{ action: 'update', path: path.normalize(), data: 'Tea\n' }]);
+    expect(listFiles('content/posts')).toBe([path, 'content/posts/hello.md'].join('\n'));
+    expect(git('show', `HEAD:${path}`)).toBe('Tea');
+    expectCleanRepository();
+
+    await saveAndCommitInMemory([{ action: 'delete', path: path.normalize() }]);
+    expect(listFiles('content/posts')).toBe('content/posts/hello.md');
+    expectCleanRepository();
+  });
+
+  test('stages an untracked file with the name it has on the disk', async () => {
+    const path = `content/${decomposed}/${decomposed}.md`;
+
+    write(path, 'Coffee\n');
+
+    await saveAndCommitInMemory([{ action: 'update', path: path.normalize(), data: 'Tea\n' }]);
+    expect(listFiles(`content/${decomposed}`)).toBe(path);
+    expect(git('show', `HEAD:${path}`)).toBe('Tea');
+    expectCleanRepository();
+  });
+
+  test('reports a saved file that can’t be found', async () => {
+    const path = `content/${composed}/${composed}.md`;
+    const changes = [{ action: /** @type {const} */ ('create'), path, data: 'Tea\n' }];
+
+    await saveAndCommitChanges({
+      repoRootDirHandle: await copyToMemory(repoDir),
+      changes,
+      options: { commitType: 'create' },
+      // The file isn’t written, e.g. because it’s been removed right away by another program
+      save: async () => ({ sha: 'pseudo', files: {} }),
+    });
+    expect(localGitNotice.current).toEqual({ reason: 'error', detail: `ENOENT: ${path}` });
+  });
+
+  test('stages a new file in an untracked folder whose name is decomposed', async () => {
+    const folder = `content/${decomposed}`;
+
+    write(`${folder}/a.md`, 'A\n');
+
+    await saveAndCommitInMemory([
+      { action: 'create', path: `${folder.normalize()}/b.md`, data: 'B\n' },
+      { action: 'create', path: `content/${composed}-new.md`, data: 'C\n' },
+    ]);
+    // The new file goes in the folder, and a new name is in form C
+    expect(listFiles('content')).toBe(
+      [`${folder}/b.md`, `content/${composed}-new.md`, 'content/posts/hello.md'].join('\n'),
+    );
+    expect(git('-c', 'core.quotePath=false', 'status', '--porcelain', '-uall')).toBe(
+      `?? ${folder}/a.md`,
+    );
   });
 });
 

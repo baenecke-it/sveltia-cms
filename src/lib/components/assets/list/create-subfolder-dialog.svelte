@@ -6,11 +6,10 @@
 -->
 <script>
   import { _ } from '@sveltia/i18n';
-  import { Alert, Toast } from '@sveltia/ui';
 
   import SubfolderNameDialog from '$lib/components/assets/list/subfolder-name-dialog.svelte';
+  import { runAssetCommit } from '$lib/services/assets/data/commit';
   import { createSubfolder } from '$lib/services/assets/data/subfolder';
-  import { isCommitCancelled } from '$lib/services/backends/commit-prompt';
   import { createPath } from '$lib/services/utils/file';
 
   /**
@@ -22,39 +21,7 @@
    */
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    open = $bindable(false),
-    dirPath,
-    takenNames,
-    /* eslint-enable prefer-const */
-  } = $props();
-
-  // Committing to a remote repository takes a few seconds, and the dialog is gone by then, so the
-  // folder would otherwise be created with nothing on screen to say it’s under way
-  let creating = $state(false);
-  let creationFailed = $state(false);
-
-  /**
-   * Create the folder.
-   * @param {string} name Folder name.
-   */
-  const create = async (name) => {
-    creating = true;
-
-    try {
-      await createSubfolder(createPath([dirPath, name]));
-    } catch (/** @type {any} */ ex) {
-      // The user has cancelled the commit at the commit message prompt, which isn’t a failure
-      if (!isCommitCancelled(ex)) {
-        creationFailed = true;
-        // eslint-disable-next-line no-console
-        console.error(ex);
-      }
-    } finally {
-      creating = false;
-    }
-  };
+  let { open = $bindable(false), dirPath, takenNames } = $props();
 </script>
 
 <SubfolderNameDialog
@@ -64,15 +31,9 @@
   description={_('new_folder_description', { values: { folder: `/${dirPath}` } })}
   {takenNames}
   onSubmit={(name) => {
-    create(name);
+    runAssetCommit(() => createSubfolder(createPath([dirPath, name])), {
+      progress: 'creating_folder',
+      failure: 'creating_folder_failed',
+    });
   }}
 />
-
-<!-- `duration={0}` keeps this up until the commit settles, however long it takes -->
-<Toast show={creating} duration={0}>
-  <Alert status="info">{_('creating_folder')}</Alert>
-</Toast>
-
-<Toast bind:show={creationFailed}>
-  <Alert status="error">{_('creating_folder_failed')}</Alert>
-</Toast>

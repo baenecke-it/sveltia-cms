@@ -5,6 +5,7 @@ import { render } from 'vitest-browser-svelte';
 
 import { lockedBranch } from '$lib/services/backends/branch-access';
 import { getCollection, selectedCollection } from '$lib/services/contents/collection';
+import { getCollectionFile } from '$lib/services/contents/collection/files';
 import { EntryDraftState } from '$lib/services/contents/draft/state.svelte';
 import {
   editorFirstPane,
@@ -111,6 +112,11 @@ describe('ContentDetailsOverlay', () => {
         { name: 'limited', label: 'Limited', folder: 'content/limited', limit: 1, fields },
         { name: 'frozen', label: 'Frozen', folder: 'content/frozen', readonly: true, fields },
         { name: 'plain', label: 'Plain', folder: 'content/plain', fields },
+        {
+          name: 'pages',
+          label: 'Pages',
+          files: ['a', 'b'].map((name) => ({ name, file: `content/${name}.md`, fields })),
+        },
       ],
     });
     env.isSmallScreen = false;
@@ -168,6 +174,24 @@ describe('ContentDetailsOverlay', () => {
           .getByRole('textbox', { name: 'Title' }),
       )
       .toHaveValue('Bonjour');
+  });
+
+  test('shows a single pane when the configuration turns the second pane off', async () => {
+    await renderOverlay(createDraft({ canShowSecondPane: false }));
+
+    const editor = page.getByRole('group', { name: 'Content Editor' });
+
+    await expect
+      .element(editor.getByRole('group', { name: 'Edit \u2068English\u2069 Content' }))
+      .toBeInTheDocument();
+    expect(editorSecondPane.current).toBeNull();
+    expect(editor.getByRole('button', { name: 'Swap Panes' }).elements()).toHaveLength(0);
+
+    // The preview takes turns with the editor in the only pane
+    await editor.getByRole('radio', { name: 'Preview' }).click();
+    await expect
+      .element(editor.getByRole('group', { name: 'Preview \u2068English\u2069 Content' }))
+      .toBeInTheDocument();
   });
 
   test('shows a single pane on a small screen, with the sidebar panels in a sheet', async () => {
@@ -519,7 +543,7 @@ describe('ContentDetailsOverlay', () => {
   });
 
   test('highlights the path editor on request', async () => {
-    // A nested collection with the path editor, and a folder to choose from
+    // Nested entries with the path editor, and a folder to choose from
     await initTestConfig({
       i18n: {
         structure: /** @type {const} */ ('multiple_folders'),
@@ -731,6 +755,59 @@ describe('ContentDetailsOverlay', () => {
     } finally {
       setEntries([]);
     }
+  });
+
+  test('sets up the panes again for another file of the same collection', async () => {
+    const collection = getCollection('pages');
+
+    /**
+     * Create a draft of a page file.
+     * @param {string} fileName File name.
+     * @returns {any} Draft.
+     */
+    const createFileDraft = (fileName) =>
+      createMockDraft({
+        collectionName: 'pages',
+        fields,
+        values: { _default: { title: fileName.toUpperCase(), body: '', 'author.name': '' } },
+        draft: {
+          isNew: false,
+          collection,
+          collectionFile: getCollectionFile(/** @type {any} */ (collection), fileName),
+          fileName,
+        },
+      });
+
+    selectedCollection.current = collection;
+
+    const { entryDraft } = await renderOverlay(createFileDraft('a'));
+
+    await expect.element(page.getByRole('textbox', { name: 'Title' })).toHaveValue('A');
+
+    // The overlay stays open when a link leads to another file of the collection
+    entryDraft.current = createFileDraft('b');
+
+    await expect.element(page.getByRole('textbox', { name: 'Title' })).toHaveValue('B');
+  });
+
+  test('backs up the draft when a pending entry is changed', async () => {
+    const { scheduleBackup } = await import('$lib/services/contents/draft/backup');
+    const pendingEntry = { collectionName: 'plain', entry: { id: 'x' }, values: ['x'] };
+    const { entryDraft } = await renderOverlay(createDraft({ pendingEntries: [pendingEntry] }));
+    const draft = /** @type {any} */ (entryDraft.current);
+
+    await expect.element(page.getByRole('textbox', { name: 'Title' })).toBeInTheDocument();
+    vi.mocked(scheduleBackup).mockClear();
+
+    // An entry opened again and updated replaces its earlier version
+    draft.pendingEntries[0] = { ...pendingEntry, values: ['y'] };
+    flushSync();
+    expect(scheduleBackup).toHaveBeenCalledOnce();
+
+    vi.mocked(scheduleBackup).mockClear();
+    draft.pendingEntries.push({ ...pendingEntry, entry: { id: 'z' } });
+    flushSync();
+    expect(scheduleBackup).toHaveBeenCalledOnce();
   });
 
   test('shows the second pane alone', async () => {

@@ -91,7 +91,7 @@ test('refuses a user who can only read the repository', async ({ cms, gitea, pag
 
   await cms.open();
   await expect(page.getByRole('alert')).toContainText(
-    /You don’t have access to the .*e2e-site.* repository/,
+    /You don’t have write access to the .*e2e-site.* repository/,
   );
 });
 

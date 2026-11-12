@@ -14,6 +14,7 @@
   import { env } from '$lib/services/user/env.svelte';
 
   /**
+   * @import { InternalCollection } from '$lib/types/private';
    * @import { Collection } from '$lib/types/public';
    */
 
@@ -24,12 +25,7 @@
    */
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    collection,
-    isSearchPage = false,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { collection, isSearchPage = false } = $props();
 
   const { name, label, icon } = $derived(collection);
   const isCurrentCollection = $derived(selectedCollection.current?.name === name);
@@ -54,11 +50,13 @@
     'files' in collection ? collection.files.length : countCollectionEntries(name, entries),
   );
 
-  const treeNodes = $derived.by(() => {
-    const internalCollection = getCollection(name);
-
-    return internalCollection ? getNestedTree({ collection: internalCollection, entries }) : [];
-  });
+  // The collection comes from the configuration, which only has valid ones once it’s loaded
+  const treeNodes = $derived(
+    getNestedTree({
+      collection: /** @type {InternalCollection} */ (getCollection(name)),
+      entries,
+    }),
+  );
 
   let expanded = $state(false);
 
@@ -91,7 +89,10 @@
     <Icon name={icon || 'bookmark_manager'} />
   {/snippet}
   {#snippet endIcon()}
-    <span class="count" aria-label="({_('x_entries', { values: { count: entryCount } })})">
+    <span
+      class="count"
+      aria-label={entryCount ? _('x_entries', { values: { count: entryCount } }) : undefined}
+    >
       {appNumberFormatter.current.format(entryCount)}
     </span>
   {/snippet}

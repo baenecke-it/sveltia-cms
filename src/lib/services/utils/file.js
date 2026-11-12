@@ -45,9 +45,13 @@ export const encodeFilePath = (path) => {
  * is free is returned as is, even if numbered variants of it exist.
  * @param {string} name Original name.
  * @param {string[]} otherNames Other names (of files in the same folder).
+ * @param {object} [options] Options.
+ * @param {boolean} [options.hasExtension] Whether the name ends with a file extension, which the
+ * number goes before. Pass `false` for a slug, whose dot is part of the name, so `release-2.0` is
+ * renamed `release-2.0-1` rather than `release-2-1.0`.
  * @returns {string} Determined name.
  */
-export const renameIfNeeded = (name, otherNames) => {
+export const renameIfNeeded = (name, otherNames, { hasExtension = true } = {}) => {
   const lowerCaseName = name.toLowerCase();
 
   // Case-insensitive, since `Photo.jpg` and `photo.jpg` clash on a case-insensitive file system
@@ -56,7 +60,10 @@ export const renameIfNeeded = (name, otherNames) => {
     return name;
   }
 
-  const { filename: slug, extension } = getPathInfo(name);
+  const { filename: slug, extension } = hasExtension
+    ? getPathInfo(name)
+    : { filename: name, extension: undefined };
+
   const suffix = extension ? `\\.${extension}` : '';
   const regex = new RegExp(`^${escapeRegExp(slug)}-(?<num>\\d+)${suffix}$`, 'i');
   let highest = 0;
@@ -136,6 +143,14 @@ export const createPath = (segments) => segments.filter(Boolean).join('/');
 export const getDirName = (path) => getPathInfo(path).dirname ?? '';
 
 /**
+ * Get the last segment of a path, e.g. the file name of a file path. Unlike `getPathInfo()`, which
+ * ignores trailing slashes, this is an empty string for a path ending with a slash.
+ * @param {string} path Path.
+ * @returns {string} Last path segment, or the path itself if it has no slash.
+ */
+export const getBaseName = (path) => path.slice(path.lastIndexOf('/') + 1);
+
+/**
  * Remove the given directory from the start of a path, if the path sits below it.
  * @param {string} path Path, e.g. `images/photo.jpg`.
  * @param {string | undefined} dir Directory path, e.g. `images`. An empty string or `undefined`
@@ -161,34 +176,42 @@ export const sanitizePath = (path) =>
 
 /**
  * Resolve the given file path. This processes only dot(s) in the middle of the path; leading dots
- * like `../../foo/image.jpg` will be untouched.
+ * like `../../foo/image.jpg` will be untouched. A `..` that goes up past the named segments before
+ * it is kept as well, so the path still points outside the starting folder: `a/../../b` resolves to
+ * `../b`, and `../a/../../b` to `../../b`. Empty segments are dropped.
  * @param {string} path Unresolved path, e.g. `foo/bar/baz/../../image.jpg`.
  * @returns {string} Resolved path, e.g. `foo/image.jpg`.
  */
 export const resolvePath = (path) => {
-  /** @type {(string | null)[]} */
-  const segments = path.split('/');
+  /** @type {string[]} */
+  const segments = [];
   let nameFound = false;
 
-  segments.forEach((segment, index) => {
-    if (segment === '.' || segment === '..') {
-      if (nameFound) {
-        segments[index] = null;
+  path.split('/').forEach((segment) => {
+    if (!segment) {
+      return;
+    }
 
-        if (segment === '..') {
-          const lastIndex = segments.findLastIndex((s, i) => !!s && i < index);
+    if (!nameFound || (segment !== '.' && segment !== '..')) {
+      nameFound ||= segment !== '.' && segment !== '..';
+      segments.push(segment);
 
-          if (lastIndex > -1) {
-            segments[lastIndex] = null;
-          }
-        }
+      return;
+    }
+
+    if (segment === '..') {
+      const last = segments.at(-1);
+
+      // Only a named segment can be cancelled out; a leading dot stays, and the `..` with it
+      if (last !== undefined && last !== '.' && last !== '..') {
+        segments.pop();
+      } else {
+        segments.push(segment);
       }
-    } else {
-      nameFound = true;
     }
   });
 
-  return createPath(segments);
+  return segments.join('/');
 };
 
 /**

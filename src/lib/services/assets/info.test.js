@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   _resetAssetBlobCache,
   _resetRevocationQueue,
-  _resetThumbnailDB,
+  _resetThumbnailStore,
   cacheAssetBlob,
   createDisplayBlobURL,
   getAssetBlob,
@@ -36,7 +36,7 @@ vi.mock('@sveltia/utils/file');
 vi.mock('@sveltia/utils/misc');
 vi.mock('@sveltia/utils/storage');
 vi.mock('@sveltia/utils/string');
-vi.mock('mime');
+vi.mock('$lib/services/utils/mime');
 
 /** @type {{ current: any }} */
 const mockBackendState = vi.hoisted(() => ({ current: undefined }));
@@ -74,6 +74,7 @@ vi.mock('$lib/services/assets/folders', () => ({
   selectedAssetFolder: { current: undefined },
 }));
 vi.mock('$lib/services/assets/references');
+vi.mock('$lib/services/contents/collection', () => ({ getCollection: vi.fn() }));
 vi.mock('$lib/services/utils/file', async (importOriginal) => {
   const actual = /** @type {Record<string, any>} */ (await importOriginal());
 
@@ -216,7 +217,7 @@ describe('assets/info', () => {
 
       mockBackend.fetchBlob.mockResolvedValue(remoteBlob);
 
-      const { default: mime } = await import('mime');
+      const { default: mime } = await import('$lib/services/utils/mime');
       const mimeMock = vi.mocked(mime);
 
       mimeMock.getType.mockReturnValue('image/jpeg');
@@ -231,7 +232,7 @@ describe('assets/info', () => {
 
     it('should give an SVG image the URL of an inert wrapper, but return the original', async () => {
       const { createInertSVG } = await import('$lib/services/utils/media/image/svg');
-      const { default: mime } = await import('mime');
+      const { default: mime } = await import('$lib/services/utils/mime');
       const svgAsset = { ...mockAsset, path: 'assets/images/test.svg', name: 'test.svg' };
       const wrapper = new Blob(['<svg/>'], { type: 'image/svg+xml' });
 
@@ -267,7 +268,7 @@ describe('assets/info', () => {
 
     it('should not wrap other file types', async () => {
       const { createInertSVG } = await import('$lib/services/utils/media/image/svg');
-      const { default: mime } = await import('mime');
+      const { default: mime } = await import('$lib/services/utils/mime');
 
       vi.mocked(mime).getType.mockReturnValue('image/jpeg');
       mockBackend.fetchBlob.mockResolvedValue(new Blob(['data']));
@@ -371,7 +372,7 @@ describe('assets/info', () => {
 
       mockBackend.fetchBlob.mockResolvedValue(new Blob(['test data'], { type: 'image/jpeg' }));
 
-      const { default: mime } = await import('mime');
+      const { default: mime } = await import('$lib/services/utils/mime');
       const mimeMock = vi.mocked(mime);
 
       mimeMock.getType.mockReturnValue('image/jpeg');
@@ -646,20 +647,18 @@ describe('assets/info', () => {
       expect(result).toBe(undefined);
     });
 
-    it('should set thumbnailDB to null when backend has no databaseName', async () => {
-      // Covers L121 false branch (repository ?? {}) and L123 false branch (null thumbnailDB)
-      _resetThumbnailDB();
+    it('should fall back to the memory store when the backend has no repository', async () => {
+      _resetThumbnailStore();
       mockBackend.repository = undefined;
 
-      // With thumbnailDB=null, get() returns undefined (null?.get === undefined)
+      // Nothing has been cached in memory yet
       const result = await getAssetThumbnailURL(mockAsset, { cacheOnly: true });
 
       expect(result).toBe(undefined);
     });
 
-    it('should set thumbnailDB to null when databaseName is falsy', async () => {
-      // Covers L123 false branch: databaseName ? new IndexedDB(...) : null
-      _resetThumbnailDB();
+    it('should fall back to the memory store when the database name is falsy', async () => {
+      _resetThumbnailStore();
       mockBackend.repository = { databaseName: null };
 
       const result = await getAssetThumbnailURL(mockAsset, { cacheOnly: true });
@@ -667,9 +666,106 @@ describe('assets/info', () => {
       expect(result).toBe(undefined);
     });
 
+    it('should keep the thumbnails in memory without a database', async () => {
+      _resetThumbnailStore();
+      mockBackend.repository = undefined;
+
+      const { transformImage } = await import('$lib/services/utils/media/image/transform');
+      const transformImageMock = vi.mocked(transformImage);
+
+      transformImageMock.mockClear();
+      transformImageMock.mockResolvedValue(new Blob(['thumbnail'], { type: 'image/webp' }));
+
+      /**
+       * Create an asset with the given SHA.
+       * @param {number} index Index.
+       * @returns {any} Asset.
+       */
+      const createAsset = (index) => ({
+        ...mockAsset,
+        sha: `sha-${index}`,
+        file: new File(['content'], `${index}.jpg`, { type: 'image/jpeg' }),
+      });
+
+      const first = createAsset(0);
+
+      // Generated once, then read from memory, whether or not the lookup is cache-only
+      expect(await getAssetThumbnailURL(first)).toBe('blob:mock-url');
+      expect(await getAssetThumbnailURL(first)).toBe('blob:mock-url');
+      expect(await getAssetThumbnailURL(first, { cacheOnly: true })).toBe('blob:mock-url');
+      expect(await hasCachedThumbnail(first.sha)).toBe(true);
+      expect(transformImageMock).toHaveBeenCalledOnce();
+
+      // The least recently used thumbnail is dropped once 500 are kept
+      for (let index = 1; index <= 500; index += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        await getAssetThumbnailURL(createAsset(index));
+      }
+
+      expect(await hasCachedThumbnail(first.sha)).toBe(false);
+      expect(await hasCachedThumbnail('sha-500')).toBe(true);
+      expect(transformImageMock).toHaveBeenCalledTimes(501);
+    });
+
+    it('should move a thumbnail asked for again up the generation queue', async () => {
+      _resetThumbnailStore();
+      mockBackend.repository = undefined;
+
+      const { transformImage } = await import('$lib/services/utils/media/image/transform');
+      const transformImageMock = vi.mocked(transformImage);
+      /** @type {string[]} */
+      const started = [];
+      /** @type {(() => void)[]} */
+      const finishers = [];
+
+      transformImageMock.mockClear();
+      transformImageMock.mockImplementation(async (/** @type {any} */ file) => {
+        started.push(file.name);
+        await new Promise((resolve) => {
+          finishers.push(() => resolve(undefined));
+        });
+
+        return new Blob(['thumbnail'], { type: 'image/webp' });
+      });
+
+      /**
+       * Create an asset with the given name.
+       * @param {string} name Name.
+       * @returns {any} Asset.
+       */
+      const createAsset = (name) => ({
+        ...mockAsset,
+        sha: `sha-${name}`,
+        file: new File(['content'], name, { type: 'image/jpeg' }),
+      });
+
+      const [first, second, ...rest] = ['a', 'b', 'c', 'd', 'e', 'f'].map(createAsset);
+      // The four slots are taken, then `e` and `f` are queued, `f` going first
+      const requests = [first, second, ...rest].map((asset) => getAssetThumbnailURL(asset));
+
+      await vi.waitFor(() => expect(started).toEqual(['a', 'b', 'c', 'd']));
+
+      // `e` is asked for again, e.g. by a row now on screen, so it goes before `f`
+      requests.push(getAssetThumbnailURL(rest[2]));
+      finishers.shift()?.();
+      await vi.waitFor(() => expect(started).toHaveLength(5));
+      expect(started.at(-1)).toBe('e');
+
+      // The rest finishes in turn
+      while (finishers.length || started.length < 6) {
+        finishers.shift()?.();
+        // eslint-disable-next-line no-await-in-loop
+        await Promise.resolve();
+      }
+
+      await Promise.all(requests);
+      expect(started).toEqual(['a', 'b', 'c', 'd', 'e', 'f']);
+      transformImageMock.mockReset();
+    });
+
     it('should return a cached thumbnail in cache-only mode', async () => {
       // The preceding tests leave the database disabled
-      _resetThumbnailDB();
+      _resetThumbnailStore();
       mockBackend.repository = { databaseName: 'test-db' };
 
       const cachedBlob = new Blob(['cached'], { type: 'image/webp' });
@@ -1093,6 +1189,57 @@ describe('assets/info', () => {
       expect(
         getAssetPublicURL(entryRelativeAsset, { pathOnly: true, entry: mockEntry }),
       ).toBeUndefined();
+    });
+
+    it('should return the path relative to the folder named after an entry in subfolders', async () => {
+      const { getPathInfo } = await import('@sveltia/utils/file');
+      const { getAssetFoldersByPath } = await import('$lib/services/assets/folders');
+      const { getCollection } = await import('$lib/services/contents/collection');
+
+      vi.mocked(getPathInfo).mockImplementation(
+        (path) => /** @type {any} */ ({ dirname: path.slice(0, path.lastIndexOf('/')) }),
+      );
+
+      const folder = /** @type {any} */ ({
+        collectionName: 'posts',
+        internalPath: 'content/posts',
+        internalSubPath: '',
+        publicPath: '',
+        entryRelative: true,
+      });
+
+      vi.mocked(getAssetFoldersByPath).mockReturnValue([folder]);
+      // The `path` option puts the entry in subfolders, so its relative assets are saved to a
+      // folder named after it, next to the entry file
+      vi.mocked(getCollection).mockReturnValue(
+        /** @type {any} */ ({
+          name: 'posts',
+          _type: 'entry',
+          _file: { basePath: 'content/posts', subPath: '{{year}}/{{month}}/{{slug}}' },
+        }),
+      );
+
+      const mockEntry = /** @type {any} */ ({
+        id: 'my-post',
+        slug: 'my-post',
+        locales: { _default: { path: 'content/posts/2025/06/my-post.md' } },
+      });
+
+      const ownAsset = {
+        ...mockAsset,
+        path: 'content/posts/2025/06/my-post/cover.png',
+        name: 'cover.png',
+        folder,
+      };
+
+      expect(getAssetPublicURL(ownAsset, { pathOnly: true, entry: mockEntry })).toBe('cover.png');
+      expect(getCollection).toHaveBeenCalledWith('posts');
+
+      // An asset next to the entry file isn’t in the entry’s folder, so the reader wouldn’t find it
+      // for a relative value
+      const siblingAsset = { ...ownAsset, path: 'content/posts/2025/06/cover.png' };
+
+      expect(getAssetPublicURL(siblingAsset, { pathOnly: true, entry: mockEntry })).toBeUndefined();
     });
 
     it('should return relative path for entry-relative asset in sub-folder', async () => {
@@ -1583,7 +1730,13 @@ describe('assets/info', () => {
       mockBackend.fetchBlob.mockResolvedValueOnce(null);
       mockBackend.fetchBlob.mockResolvedValueOnce(new Blob(['test'], { type: 'image/jpeg' }));
 
-      await expect(getAssetDetails(assetWithoutHandle)).rejects.toThrow('Failed to retrieve blob');
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      // The media metadata is left out
+      expect((await getAssetDetails(assetWithoutHandle)).dimensions).toBeUndefined();
+      expect(error).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'Failed to retrieve blob' }),
+      );
 
       const result = await getAssetDetails(assetWithoutHandle);
 
@@ -1680,7 +1833,7 @@ describe('assets/info', () => {
     });
 
     it('should handle mime.getType returning null', async () => {
-      const { default: mime } = await import('mime');
+      const { default: mime } = await import('$lib/services/utils/mime');
       const mimeMock = vi.mocked(mime);
 
       mimeMock.getType.mockReturnValue(null);
@@ -1765,7 +1918,7 @@ describe('assets/info', () => {
     });
 
     it('should handle missing mime type in blob creation', async () => {
-      const { default: mime } = await import('mime');
+      const { default: mime } = await import('$lib/services/utils/mime');
 
       vi.mocked(mime).getType.mockReturnValue('application/octet-stream');
 

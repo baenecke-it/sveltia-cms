@@ -1,12 +1,12 @@
 <script>
   import { Checkbox, CheckboxGroup, SelectTags } from '@sveltia/ui';
-  import { getContext } from 'svelte';
 
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
   import { updateListFieldForLocales } from '$lib/services/contents/draft/update/list';
+  import { getFieldEditorContext } from '$lib/services/contents/editor/field-context';
 
   /**
-   * @import { FieldEditorContext, SelectFieldSelectorProps } from '$lib/types/private';
+   * @import { SelectFieldSelectorProps } from '$lib/types/private';
    * @import { SelectFieldValue } from '$lib/types/public';
    */
 
@@ -17,12 +17,10 @@
 
   const entryDraft = getEntryDraftContext();
 
-  /** @type {FieldEditorContext} */
-  const { valueStoreKey = 'currentValues' } = getContext('field-editor') ?? {};
+  const { valueStoreKey = 'currentValues' } = getFieldEditorContext();
 
   /** @type {SelectFieldSelectorProps & Props} */
   let {
-    /* eslint-disable prefer-const */
     locale,
     keyPath,
     fieldId,
@@ -32,7 +30,6 @@
     readonly = false,
     invalid = false,
     options,
-    /* eslint-enable prefer-const */
   } = $props();
 
   const { i18n, max, dropdown_threshold: dropdownThreshold = 5 } = $derived(fieldConfig);

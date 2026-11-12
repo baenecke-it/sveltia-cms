@@ -2,7 +2,7 @@
 
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { getSortKeyGetter, MARKDOWN_FIELD_KEYS, sortEntries } from './sort';
+import { getEntrySortKeyGetter, getSortKeyGetter, MARKDOWN_FIELD_KEYS, sortEntries } from './sort';
 
 /**
  * @import { Entry, InternalCollection } from '$lib/types/private';
@@ -1567,7 +1567,7 @@ describe('sortEntries', () => {
     expect(result.map((e) => e.slug)).toEqual(['entry-3', 'entry-2', 'entry-1']);
   });
 
-  test('should put an entry without a valid order value last, like the reorder UI', () => {
+  test('should put an entry without a valid order value last in either order, like the reorder UI', () => {
     const reorderableCollection = { ...mockCollection, reorder: true };
 
     /**
@@ -1600,7 +1600,7 @@ describe('sortEntries', () => {
       sortEntries(entries, reorderableCollection, { key: '_manual', order: 'descending' }).map(
         (e) => e.slug,
       ),
-    ).toEqual(['c', 'a', 'b', 'd']);
+    ).toEqual(['b', 'd', 'a', 'c']);
   });
 
   test('should fall back to the _manual key when the collection has no reorder configuration', () => {
@@ -1836,5 +1836,106 @@ describe('getSortKeyGetter', () => {
     const result = getter(mockEntry);
 
     expect(result).toBeUndefined();
+  });
+
+  test('should read the value from another locale when the entry lacks the default one', () => {
+    vi.mocked(getPropertyValue).mockReturnValue('Bonjour');
+
+    const getter = getSortKeyGetter({
+      key: 'title',
+      type: String,
+      collection: mockCollection,
+      locale: 'en',
+      collectionName: 'posts',
+      dateFieldConfig: undefined,
+      isMarkdownField: false,
+    });
+
+    // A multi-file i18n entry with only `entry-1.fr.md`, which is listed in French
+    const entry = { ...mockEntry, locales: { fr: { ...mockEntry.locales.en } } };
+
+    expect(getter(entry)).toBe('Bonjour');
+    expect(vi.mocked(getPropertyValue)).toHaveBeenCalledWith(
+      expect.objectContaining({ entry, locale: 'fr', key: 'title' }),
+    );
+  });
+
+  test('should treat a multi-value field without any item as having no value', () => {
+    const args = {
+      key: 'authors',
+      collection: mockCollection,
+      locale: 'en',
+      collectionName: 'posts',
+      dateFieldConfig: undefined,
+      isMarkdownField: false,
+    };
+
+    const getString = getSortKeyGetter({ ...args, type: String });
+    const getNumber = getSortKeyGetter({ ...args, type: Number });
+
+    // An empty array would be stringified to an empty string, and converted to `0`
+    vi.mocked(getPropertyValue).mockReturnValue([]);
+    expect(getString(mockEntry)).toBeUndefined();
+    expect(getNumber(mockEntry)).toBeUndefined();
+
+    vi.mocked(getPropertyValue).mockReturnValue([null, '']);
+    expect(getString(mockEntry)).toBeUndefined();
+
+    // Empty items are dropped
+    vi.mocked(getPropertyValue).mockReturnValue(['', 'Alice', null, 'Bob']);
+    expect(getString(mockEntry)).toBe('Alice,Bob');
+
+    vi.mocked(getPropertyValue).mockReturnValue([null, 5]);
+    expect(getNumber(mockEntry)).toBe(5);
+  });
+});
+
+describe('getEntrySortKeyGetter', () => {
+  /** @type {InternalCollection} */
+  const collection = /** @type {any} */ ({
+    name: 'posts',
+    _i18n: { defaultLocale: 'en' },
+  });
+
+  /** @type {Entry} */
+  const entry = /** @type {any} */ ({ slug: 'a', locales: { fr: { content: {} } } });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  test('should read the value in the given locale and compare strings as strings', () => {
+    vi.mocked(getField).mockReturnValue(undefined);
+    vi.mocked(getSortKeyType).mockReturnValue(String);
+    vi.mocked(getPropertyValue).mockReturnValue('Nom');
+
+    const { getSortKey, isStringType } = getEntrySortKeyGetter({
+      collection,
+      key: 'name',
+      locale: 'fr',
+    });
+
+    expect(isStringType).toBe(true);
+    expect(getSortKey(entry)).toBe('Nom');
+    expect(getField).toHaveBeenCalledWith({ collectionName: 'posts', keyPath: 'name' });
+    expect(getPropertyValue).toHaveBeenCalledWith(
+      expect.objectContaining({ entry, locale: 'fr', collectionName: 'posts', key: 'name' }),
+    );
+  });
+
+  test('should compare dates as numbers', () => {
+    vi.mocked(getField).mockReturnValue(/** @type {any} */ ({ name: 'date', widget: 'datetime' }));
+    vi.mocked(getSortKeyType).mockReturnValue(String);
+    vi.mocked(getPropertyValue).mockReturnValue('2026-01-01');
+    vi.mocked(getDate).mockReturnValue(new Date(1000));
+
+    const { getSortKey, isStringType } = getEntrySortKeyGetter({
+      collection,
+      key: 'date',
+      locale: 'fr',
+    });
+
+    expect(isStringType).toBe(false);
+    expect(getSortKey(entry)).toBe(1000);
   });
 });

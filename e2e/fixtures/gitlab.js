@@ -10,6 +10,7 @@ import { getBlobSHA, MockGitRepository } from './git.js';
  * @property {number} iid Merge request number in the project.
  * @property {number} id Global ID.
  * @property {string} title Title, with a `Draft: ` prefix for a draft.
+ * @property {string} [description] Description.
  * @property {string} sourceBranch Branch the changes come from, as {@link MockGitLab.refs} keys it,
  * so a branch in a fork reads `owner:branch`.
  * @property {number} sourceProjectId ID of the project the source branch lives in, which is the
@@ -20,6 +21,8 @@ import { getBlobSHA, MockGitRepository } from './git.js';
  * @property {MockUser} author Author.
  * @property {Date} createdAt Creation date.
  * @property {Date} updatedAt Last update date.
+ * @property {{ login: string, sha?: string }[]} [approvals] Approvals the merge request has been
+ * given.
  * @property {string} [lastHead] Head of the source branch when the merge request was closed or
  * merged, which stays known after the branch is deleted.
  * @property {string} [mergeCommit] SHA of the commit that merged the merge request.
@@ -105,7 +108,7 @@ export class MockGitLab extends MockGitRepository {
   forkPendingRequests = 0;
 
   /**
-   * Maximum number of files in a page of the file list, which GitLab limits to 100.
+   * Maximum number of entries in a page of a directory listing, which GitLab limits to 100.
    */
   treePageSize = 100;
 
@@ -226,6 +229,7 @@ export class MockGitLab extends MockGitRepository {
    * Open a merge request, as the CMS or a colleague does.
    * @param {object} args Arguments.
    * @param {string} args.title Title, with a `Draft: ` prefix for a draft.
+   * @param {string} [args.description] Description.
    * @param {string} args.sourceBranch Branch the changes come from.
    * @param {string} [args.targetBranch] Branch the changes go to, the default branch by default.
    * @param {string[]} [args.labels] Label names.
@@ -236,6 +240,7 @@ export class MockGitLab extends MockGitRepository {
    */
   openMergeRequest({
     title,
+    description = '',
     sourceBranch,
     targetBranch = this.branch,
     labels = [],
@@ -249,6 +254,7 @@ export class MockGitLab extends MockGitRepository {
       iid: this.mergeRequests.length + 1,
       id: 1000 + this.mergeRequests.length + 1,
       title,
+      description,
       sourceBranch,
       sourceProjectId,
       targetBranch,
@@ -359,6 +365,7 @@ export class MockGitLab extends MockGitRepository {
     const { iid, id, title, sourceBranch, sourceProjectId, targetBranch, labels, state, author } =
       mergeRequest;
 
+    const { description } = mergeRequest;
     const open = state === 'opened' && this.refs.has(sourceBranch);
     const head = open ? this.getMergeRequestHead(mergeRequest) : undefined;
     // A merge request from a fork names its source branch without the owner prefix the mock keys it
@@ -369,6 +376,7 @@ export class MockGitLab extends MockGitRepository {
       id,
       iid,
       title,
+      description,
       state,
       // GitLab has no draft field to set: the read-only one is derived from the title
       // @see https://docs.gitlab.com/user/project/merge_requests/drafts/
@@ -441,6 +449,7 @@ export class MockGitLab extends MockGitRepository {
       if (method === 'POST') {
         const {
           title,
+          description,
           source_branch: sourceBranch,
           target_branch: targetBranch,
           labels = '',
@@ -460,6 +469,7 @@ export class MockGitLab extends MockGitRepository {
 
         const mergeRequest = this.openMergeRequest({
           title,
+          description,
           sourceBranch: branchKey,
           sourceProjectId: fromFork ? this.forkProjectId : this.projectId,
           targetBranch,
@@ -508,6 +518,10 @@ export class MockGitLab extends MockGitRepository {
         mergeRequest.title = title;
       }
 
+      if (typeof body?.description === 'string') {
+        mergeRequest.description = body.description;
+      }
+
       if (addLabels || removeLabels) {
         mergeRequest.labels = [
           ...mergeRequest.labels.filter((label) => !removed.includes(label)),
@@ -537,6 +551,49 @@ export class MockGitLab extends MockGitRepository {
 
     if (method === 'PUT' && segments[1] === 'merge') {
       return this.handleMerge(mergeRequest, body ?? {});
+    }
+
+    if (method === 'GET' && segments[1] === 'approvals') {
+      const hasApproved = !!mergeRequest.approvals?.some(({ login }) => login === this.user.login);
+
+      return {
+        json: {
+          user_has_approved: hasApproved,
+          // Like GitLab with “Prevent approval by merge request creator” turned on
+          user_can_approve: !hasApproved && mergeRequest.author.login !== this.user.login,
+        },
+      };
+    }
+
+    if (method === 'POST' && segments[1] === 'approve') {
+      const sha = body?.sha;
+
+      // Like GitLab, refuse an approval pinned to a commit the merge request is no longer at, and a
+      // second approval from the same user
+      if (sha && sha !== this.getMergeRequestHead(mergeRequest).oid) {
+        return { status: 409, json: { message: 'SHA does not match HEAD of source branch' } };
+      }
+
+      if (mergeRequest.approvals?.some(({ login }) => login === this.user.login)) {
+        return { status: 401, json: { message: '401 Unauthorized' } };
+      }
+
+      mergeRequest.approvals = [...(mergeRequest.approvals ?? []), { login: this.user.login, sha }];
+
+      return { status: 201, json: { iid: mergeRequest.iid, approved: true } };
+    }
+
+    if (method === 'POST' && segments[1] === 'unapprove') {
+      // Like GitLab, answer a withdrawal of an approval the user hasn’t given with 404 Not Found
+      if (!mergeRequest.approvals?.some(({ login }) => login === this.user.login)) {
+        return { status: 404, json: { message: '404 Not Found' } };
+      }
+
+      mergeRequest.approvals = mergeRequest.approvals.filter(
+        ({ login }) => login !== this.user.login,
+      );
+
+      return { status: 201, json: { iid: mergeRequest.iid, approved: false } };
     }
 
     return undefined;
@@ -816,6 +873,52 @@ export class MockGitLab extends MockGitRepository {
         : { status: 404, json: { message: '404 Not Found' } };
     }
 
+    // The direct children of a directory at a branch or commit, a page at a time with keyset
+    // pagination: subtrees first, then files, like GitLab. The token of the next page, the index of
+    // its first entry here, comes in the `Link` header
+    if (method === 'GET' && resource === 'tree' && !onFork) {
+      const ref = searchParams.get('ref') ?? this.branch;
+      const commit = this.refs.has(ref) ? this.getHead(ref) : this.getCommit(ref);
+      const dir = searchParams.get('path') ?? '';
+      const prefix = dir ? `${dir}/` : '';
+      const tree = commit?.tree ?? new Map();
+      const paths = [...tree.keys()].filter((path) => path.startsWith(prefix));
+
+      if (!paths.length) {
+        return { status: 404, json: { message: '404 Tree Not Found' } };
+      }
+
+      const names = paths.map((path) => path.slice(prefix.length));
+
+      const subdirectories = new Set(
+        names.filter((name) => name.includes('/')).map((name) => name.split('/')[0]),
+      );
+
+      const entries = [
+        ...[...subdirectories].sort().map((name) => ({
+          type: 'tree',
+          name,
+          id: MockGitRepository.getDirSHA(tree, `${prefix}${name}`),
+        })),
+        ...names
+          .filter((name) => !name.includes('/'))
+          .sort()
+          .map((name) => ({ type: 'blob', name, id: tree.get(`${prefix}${name}`) })),
+      ];
+
+      const start = Number(searchParams.get('page_token') || 0);
+      const end = start + this.treePageSize;
+      const next = new URL(`${this.apiRoot}${pathname}`);
+
+      searchParams.forEach((value, key) => next.searchParams.set(key, value));
+      next.searchParams.set('page_token', String(end));
+
+      return {
+        json: entries.slice(start, end),
+        headers: end < entries.length ? { Link: `<${next.href}>; rel="next"` } : {},
+      };
+    }
+
     /**
      * Get the key a branch of the project being addressed has in {@link refs}.
      * @param {string} branch Branch name.
@@ -1029,36 +1132,6 @@ export class MockGitLab extends MockGitRepository {
       };
     }
 
-    // The file list, a page at a time, with the index of the next file as the cursor. Like GitLab,
-    // only the files in the directory given as `path` are listed, with full paths
-    if (query.includes('blobs(after:')) {
-      const prefix = variables.path ? `${variables.path}/` : '';
-
-      const entries = [...(head?.tree ?? [])]
-        .filter(([path]) => path.startsWith(prefix))
-        .sort(([a], [b]) => a.localeCompare(b));
-
-      const start = Number(variables.cursor || 0);
-      const end = start + this.treePageSize;
-
-      return {
-        data: {
-          project: {
-            repository: {
-              tree: {
-                blobs: {
-                  nodes: entries
-                    .slice(start, end)
-                    .map(([path, sha]) => ({ type: 'blob', path, sha })),
-                  pageInfo: { endCursor: String(end), hasNextPage: end < entries.length },
-                },
-              },
-            },
-          },
-        },
-      };
-    }
-
     // The blob IDs of files, which GitLab leaves out for a path that isn’t on the branch
     if (query.includes('blobs(ref:') && !query.includes('rawTextBlob')) {
       return {
@@ -1235,8 +1308,18 @@ export class MockGitLab extends MockGitRepository {
           }
 
           if (action === 'move') {
+            const previousSha = /** @type {string} */ (tree.get(previousPath));
+
             tree.delete(previousPath);
             paths.push(previousPath);
+
+            // Like GitLab, a move without content keeps the file’s content
+            if (content === undefined) {
+              tree.set(path, previousSha);
+              paths.push(path);
+
+              return undefined;
+            }
           }
 
           const buffer = Buffer.from(content, encoding === 'base64' ? 'base64' : 'utf8');

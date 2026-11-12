@@ -1,32 +1,37 @@
 import { toRaw } from '@sveltia/utils/object';
 
+import { hasTemplateTags } from '$lib/services/common/template/tags';
 import { suspendAutoDuplication } from '$lib/services/contents/draft';
-import { createProxy, isDuplicatedField } from '$lib/services/contents/draft/create/proxy.svelte';
+import { createProxy, getListItemMatcher } from '$lib/services/contents/draft/create/proxy.svelte';
+import { getRenewedUniqueValue } from '$lib/services/contents/draft/create/unique-values';
 import { getDefaultValues } from '$lib/services/contents/draft/defaults';
 import { getDraftFieldArgs, getField } from '$lib/services/contents/entry/fields';
 import { isKeyPathWithin } from '$lib/services/contents/entry/key-paths';
 import { TEXT_FIELD_TYPES } from '$lib/services/contents/fields';
-import { hasUuidTag } from '$lib/services/contents/fields/compute/helpers';
 import { getDuplicateKeysFieldKeyPaths } from '$lib/services/contents/fields/key-value/duplicate-keys';
 import { getPairsFromContent, setPairs } from '$lib/services/contents/fields/key-value/pairs';
+import { getLocalizedFieldValue } from '$lib/services/contents/fields/locale';
 import { getInitialValue as getInitialUuidValue } from '$lib/services/contents/fields/uuid/helpers';
 import { getDraftI18nConfig } from '$lib/services/contents/i18n/config';
 import {
   isFieldI18nDisabled,
   isFieldLocalized,
+  isFieldMirrored,
   isFieldTranslatable,
 } from '$lib/services/contents/i18n/fields';
+import { isDuplicatedField } from '$lib/services/contents/i18n/shared-values';
 
 /**
  * @import { EntryDraft, FlattenedEntryContent, InternalLocaleCode } from '$lib/types/private';
- * @import { ComputeField, Field, FieldKeyPath, HiddenField, UuidField } from '$lib/types/public';
+ * @import { Field, FieldKeyPath, HiddenField, UuidField } from '$lib/types/public';
  */
 
 /**
  * Run the given callback for every locale a field update has to be written to.
  *
- * A field with the `duplicate` i18n strategy holds the same value in every locale, so an update has
- * to reach all of them; any other field is written to the given locale only.
+ * A field with the `duplicate` or `sync` i18n strategy holds the same value in every locale, so an
+ * update has to reach all of them, whichever locale it’s made in; any other field is written to the
+ * given locale only.
  *
  * The draft proxy duplicates a `duplicate` field on its own whenever a value is assigned, which
  * would write every value twice here, so the callback runs with that suspended. Suspensions nest,
@@ -46,42 +51,50 @@ import {
  * to run for each target locale, taking that locale’s content and the locale code.
  */
 export const forEachTargetLocale = ({ valueStore, locale, i18n, draft, keyPath }, callback) => {
-  /**
-   * Check if the field is nested in a duplicated List or Object field.
-   * @param {EntryDraft} _draft Entry draft.
-   * @param {FieldKeyPath} _keyPath Key path of the field.
-   * @returns {boolean} Result.
-   */
-  const isNestedInDuplicatedField = (_draft, _keyPath) => {
-    const getFieldArgs = getDraftFieldArgs(_draft, {
-      keyPath: _keyPath,
-      valueMap: valueStore?.[locale],
-    });
+  // The field configuration can only be looked up for the entry’s own values, not for those of a
+  // rich text editor component, which live in another value store
+  const getFieldArgs =
+    draft && keyPath && valueStore === draft.currentValues
+      ? getDraftFieldArgs(draft, { keyPath, valueMap: valueStore[locale] })
+      : undefined;
 
-    // Look up the configuration rather than relying on the given `i18n`, which the caller may have
-    // defaulted to `false` for a field without the option, which would hide the ancestor’s strategy
-    return isDuplicatedField({
-      fieldConfig: getField(getFieldArgs) ?? /** @type {Field} */ ({ i18n }),
-      getFieldArgs,
-    });
-  };
+  // Resolve the field before any callback changes the values it’s resolved from. Look up the
+  // configuration rather than relying on the given `i18n`, which the caller may have defaulted to
+  // `false` for a field without the option, which would hide the ancestor’s strategy
+  const fieldConfig = getFieldArgs ? getField(getFieldArgs) : undefined;
 
   const duplicated =
-    i18n === 'duplicate' ||
-    // The field configuration can only be looked up for the entry’s own values, not for those of a
-    // rich text editor component, which live in another value store
-    (!!draft &&
-      !!keyPath &&
-      valueStore === draft.currentValues &&
-      isNestedInDuplicatedField(draft, keyPath));
+    isFieldMirrored(i18n) ||
+    (!!getFieldArgs &&
+      isDuplicatedField({
+        fieldConfig: fieldConfig ?? /** @type {Field} */ ({ i18n }),
+        getFieldArgs,
+      }));
+
+  // A field in an item of a translatable List field is only written to the locales that have the
+  // same item
+  const matchesListItems =
+    duplicated && getFieldArgs ? getListItemMatcher({ fieldConfig, getFieldArgs }) : () => true;
 
   suspendAutoDuplication(() => {
     Object.entries(valueStore ?? {}).forEach(([_locale, valueMap]) => {
-      if (_locale === locale || duplicated) {
+      if (_locale === locale || (duplicated && matchesListItems(valueMap))) {
         callback(valueMap, _locale);
       }
     });
   });
+};
+
+/**
+ * Check whether the given field is a Hidden field whose default value is a template, e.g.
+ * `{{uuid}}`, which is filled in for each entry rather than shared by all of them.
+ * @param {Field} field Field configuration.
+ * @returns {boolean} Result.
+ */
+const hasTemplateDefault = (field) => {
+  const { widget, default: defaultValue } = /** @type {HiddenField} */ (field);
+
+  return widget === 'hidden' && typeof defaultValue === 'string' && hasTemplateTags(defaultValue);
 };
 
 /**
@@ -118,7 +131,8 @@ export const copyDefaultLocaleValues = ({ draft, content, targetLanguage, keyPat
     const { widget: fieldType = 'text' } = field;
 
     // A field without an `i18n` option of its own is duplicated along with a List or Object field
-    // using the `duplicate` strategy, so it has to be kept rather than removed as non-i18n
+    // using the `duplicate` or `sync` strategy, so it has to be kept rather than removed as
+    // non-i18n
     const i18n =
       field.i18n ??
       (isDuplicatedField({ fieldConfig: field, getFieldArgs: { ...getFieldArgs, keyPath } })
@@ -127,33 +141,47 @@ export const copyDefaultLocaleValues = ({ draft, content, targetLanguage, keyPat
 
     // Reset the field value to the default value or an empty string if the field is a text-like
     // field type and i18n is enabled, because the content would likely be translated by the user.
-    // Otherwise, the content would be copied from the default locale.
-    if (TEXT_FIELD_TYPES.includes(fieldType) && isFieldTranslatable(i18n)) {
+    // Otherwise, the content would be copied from the default locale. A `duplicate_if_empty` field
+    // keeps the default locale’s value until the user enters one of their own
+    if (
+      TEXT_FIELD_TYPES.includes(fieldType) &&
+      isFieldTranslatable(i18n) &&
+      i18n !== 'duplicate_if_empty'
+    ) {
       newContent[keyPath] = content[keyPath] ?? '';
     }
 
-    // A translatable UUID field gets a UUID of its own rather than the default locale’s, just like
-    // each locale of a new draft does (see `fillUuidValues()`). A Compute field generating UUIDs is
-    // cleared for the same reason, as it keeps the UUIDs found in its value when resolved again
+    // A translatable field holding a value unique to the locale gets one of its own rather than the
+    // default locale’s, just like each locale of a new draft does. A UUID field keeps a UUID the
+    // locale already has (see `fillUuidValues()`); a Compute field generating UUIDs is cleared,
+    // and a Hidden field whose default is a template, like `{{locale}}` or `{{uuid}}`, gets it
+    // filled in again (see `getRenewedUniqueValue()`). A Hidden field with a static default is
+    // copied like any other value, so an entry keeps a value saved with an older configuration
     if (isFieldTranslatable(i18n)) {
       if (fieldType === 'uuid') {
         newContent[keyPath] =
           content[keyPath] || getInitialUuidValue(/** @type {UuidField} */ (field));
-      }
-
-      if (fieldType === 'compute' && hasUuidTag(/** @type {ComputeField} */ (field).value)) {
-        newContent[keyPath] = '';
+      } else if (fieldType === 'compute' || hasTemplateDefault(field)) {
+        newContent[keyPath] = getRenewedUniqueValue({
+          fieldConfig: field,
+          keyPath,
+          value: newContent[keyPath],
+          locale: targetLanguage,
+          defaultLocale,
+        });
       }
     }
 
-    // Support special case for the Hidden field with `default` value set to `{{locale}}`: if the
-    // field value is `{{locale}}`, replace it with the target locale
-    if (fieldType === 'hidden' && isFieldTranslatable(i18n)) {
-      const { default: defaultValue } = /** @type {HiddenField} */ (field);
-
-      if (defaultValue === '{{locale}}') {
-        newContent[keyPath] = targetLanguage;
-      }
+    // A value copied from the default locale may be a Relation field value holding that locale as a
+    // prefix, or a DateTime field value written in its language with the `localize_format` option,
+    // so localize it for the target locale
+    if (keyPath in defaultLocaleContent) {
+      newContent[keyPath] = getLocalizedFieldValue({
+        fieldConfig: field,
+        value: newContent[keyPath],
+        sourceLocale: defaultLocale,
+        targetLocale: targetLanguage,
+      });
     }
 
     // Remove `null` values for object fields if i18n is enabled and the field is enabled in the

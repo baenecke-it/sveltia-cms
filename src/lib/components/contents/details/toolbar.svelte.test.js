@@ -3,6 +3,7 @@ import { page, userEvent } from 'vitest/browser';
 
 import { allAssetFolders } from '$lib/services/assets/folders';
 import { backendName } from '$lib/services/backends';
+import { reportCommits } from '$lib/services/backends/commit-progress';
 import { createLocalizedError } from '$lib/services/backends/git/shared/errors';
 import { getCollection } from '$lib/services/contents/collection';
 import {
@@ -13,7 +14,7 @@ import { deleteEntries } from '$lib/services/contents/collection/data/delete';
 import { nestedFilterPath } from '$lib/services/contents/collection/nested';
 import { duplicateDraft } from '$lib/services/contents/draft/create/duplicate';
 import { saveEntry } from '$lib/services/contents/draft/save';
-import { copyFromLocaleToast } from '$lib/services/contents/editor';
+import { copyFromLocaleToast, listItemClipboardToast } from '$lib/services/contents/editor';
 import { trackPendingFieldUpdate } from '$lib/services/contents/editor/pending';
 import { entryEditorSettings } from '$lib/services/contents/editor/settings';
 import { sidebarSheetPanel } from '$lib/services/contents/editor/sidebar';
@@ -58,6 +59,7 @@ vi.mock('$lib/services/workflow/save', () => ({
   saveWorkflowChanges: vi.fn(),
   updateWorkflowStatus: vi.fn(),
   publishWorkflowEntry: vi.fn(),
+  publishReviewedEntry: vi.fn(),
   discardWorkflowEntry: vi.fn(),
   deleteWorkflowEntry: vi.fn(),
   discardWorkflowEntries: vi.fn(),
@@ -203,6 +205,31 @@ describe('Toolbar', () => {
     await expect.element(save).toBeDisabled();
     draft.currentValues._default.title = 'Hi';
     await expect.element(save).toBeEnabled();
+  });
+
+  test('reports the progress of a long save, and keeps the button disabled until it ends', async () => {
+    const { draft } = await renderExisting();
+    const save = page.getByRole('button', { name: 'Save' });
+    const { promise, resolve } = Promise.withResolvers();
+
+    vi.mocked(saveEntry).mockImplementation(async () => {
+      reportCommits(12, 26);
+      await promise;
+
+      return /** @type {any} */ (helloEntry);
+    });
+
+    draft.currentValues._default.title = 'Hi';
+    await expect.element(save).toBeEnabled();
+    await save.click();
+
+    const status = /** @type {HTMLElement} */ (document.querySelector('.save-progress'));
+
+    await expect.element(status).toMatchTextContent('Saving to GitHub: 12 of about 26 commits');
+    expect(status.getAttribute('aria-live')).toBe('polite');
+    await expect.element(page.getByRole('button', { name: 'Saving…' })).toBeDisabled();
+    resolve(undefined);
+    await expect.element(page.getByText('Saving to GitHub')).not.toBeInTheDocument();
   });
 
   test('can be saved while a change is on its way to the draft', async () => {
@@ -1039,7 +1066,7 @@ describe('Toolbar', () => {
     expect(menu.getByRole('menuitem', { name: 'Delete Entry' }).elements()).toHaveLength(0);
   });
 
-  test('goes back to the folder being browsed in a nested collection', async () => {
+  test('goes back to the folder being browsed in a collection with nested entries', async () => {
     await initTestConfig({
       collections: [
         {
@@ -1117,6 +1144,15 @@ describe('Toolbar', () => {
     } finally {
       setAssets([]);
     }
+  });
+
+  test('shows the toast of the list item clipboard', async () => {
+    await renderExisting();
+
+    listItemClipboardToast.current = { id: 1, show: true, status: 'success', message: 'Copied.' };
+    await expect.poll(getShownToastText).toBe('check_circle Success Copied.');
+    await waitForToastsToHide();
+    expect(listItemClipboardToast.current.show).toBe(false);
   });
 
   test('reports a copy without a source language', async () => {
@@ -1337,6 +1373,48 @@ describe('Toolbar', () => {
       // Nothing is left to hand over for review
       expect(page.getByRole('alertdialog').elements()).toHaveLength(0);
       await expect.poll(() => window.location.hash).toBe('#/collections/posts');
+    });
+
+    test('refuses to save and publish along with an entry that has to be reviewed', async () => {
+      await initTestConfig({
+        backend: { name: 'github', repo: 'me/site' },
+        publish_mode: { type: 'editorial_workflow', direct_publish: true },
+        collections: [
+          postsCollection,
+          {
+            name: 'reviewed',
+            folder: 'content/reviewed',
+            // The site-level option is inherited unless turned off
+            publish_mode: { type: 'editorial_workflow', direct_publish: false },
+            fields,
+          },
+        ],
+      });
+
+      const { entryDraft } = await renderToolbar({
+        pendingEntries: [
+          { collectionName: 'reviewed', entry: { id: 'x', locales: {} }, values: ['x'] },
+        ],
+        // Referenced from a rich text editor component
+        extraValues: { _default: { ref: 'x' } },
+      });
+
+      await page.getByRole('button', { name: 'More Options' }).first().click();
+
+      const item = page.getByRole('menuitem', {
+        name: 'Save and Publish (Related Entries Need Review)',
+      });
+
+      await expect.element(item).toHaveAttribute('aria-disabled', 'true');
+      expect(
+        page.getByRole('menuitem', { name: 'Save and Publish', exact: true }).elements(),
+      ).toHaveLength(0);
+
+      // A deselected entry isn’t saved, so it doesn’t count
+      entryDraft.current.extraValues._default.ref = '';
+      await expect
+        .element(page.getByRole('menuitem', { name: 'Save and Publish', exact: true }))
+        .not.toHaveAttribute('aria-disabled', 'true');
     });
 
     test('saves a draft as usual when direct publishing is enabled', async () => {

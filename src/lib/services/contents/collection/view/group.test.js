@@ -5,17 +5,12 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { OTHER_GROUP_NAME } from '$lib/services/common/view';
 import { selectedCollection } from '$lib/services/contents/collection';
-import { currentView } from '$lib/services/contents/collection/view/settings';
 
 import { getReorderGroupingConditions, groupEntries, parseGroupConfig, viewGroups } from './group';
 
 // Mock all dependencies
 vi.mock('$lib/services/contents/collection', () => ({
   selectedCollection: { current: undefined },
-}));
-
-vi.mock('$lib/services/contents/collection/view/settings', () => ({
-  currentView: { current: { type: 'list' } },
 }));
 
 vi.mock('@sveltia/i18n', () => ({
@@ -140,8 +135,6 @@ describe('getReorderGroupingConditions', () => {
 describe('groupEntries', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-
-    currentView.current = { sort: undefined };
   });
 
   test('should return ungrouped entries when no conditions', () => {
@@ -414,6 +407,62 @@ describe('groupEntries', () => {
     expect(result.find((g) => g.name === OTHER_GROUP_NAME)?.entries).toHaveLength(1);
   });
 
+  test('should put an entry with an empty multi-value field in the Other group', () => {
+    const entries = ['none', 'blank', 'tagged'].map((slug) => ({
+      id: slug,
+      slug,
+      subPath: slug,
+      locales: { en: { path: `${slug}.md`, slug, content: {} } },
+    }));
+
+    const values = { none: [], blank: [null, ''], tagged: ['', 'tech'] };
+
+    const collection = {
+      _type: 'entry',
+      _i18n: { defaultLocale: 'en', allLocales: ['en'] },
+      name: 'posts',
+      folder: 'content/posts',
+    };
+
+    // @ts-ignore - Mock parameter types
+    vi.mocked(getPropertyValue).mockImplementation(({ entry }) => values[entry.slug]);
+
+    // @ts-ignore - Mock data for testing
+    const result = groupEntries(entries, collection, { field: 'tags' });
+
+    // Rather than a group named with an empty string, or `,tech`
+    expect(result).toHaveLength(2);
+    expect(result).toContainEqual({ name: 'tech', entries: [entries[2]] });
+    expect(result).toContainEqual({ name: OTHER_GROUP_NAME, entries: [entries[0], entries[1]] });
+  });
+
+  test('should read the value from another locale when the entry lacks the default one', () => {
+    // A multi-file i18n entry with only `hello.fr.md`, which is listed in French
+    const entry = {
+      id: 'hello',
+      slug: 'hello',
+      subPath: 'hello',
+      locales: { fr: { path: 'hello.fr.md', slug: 'hello', content: { category: 'tech' } } },
+    };
+
+    const collection = {
+      _type: 'entry',
+      _i18n: { defaultLocale: 'en', allLocales: ['en', 'fr'] },
+      name: 'posts',
+      folder: 'content/posts',
+    };
+
+    // @ts-ignore - Mock parameter types
+    vi.mocked(getPropertyValue).mockImplementation(
+      ({ entry: _entry, locale, key }) => _entry.locales[locale]?.content[key],
+    );
+
+    // @ts-ignore - Mock data for testing
+    expect(groupEntries([entry], collection, { field: 'category' })).toEqual([
+      { name: 'tech', entries: [entry] },
+    ]);
+  });
+
   test('should handle regex patterns', async () => {
     const { getRegex } = await import('$lib/services/utils/regex');
 
@@ -565,13 +614,15 @@ describe('groupEntries', () => {
     // @ts-ignore - Mock parameter types
     vi.mocked(getRegex).mockReturnValue(/^(\d{4})/);
 
-    // Mock currentView store to return descending sort on date field
-    currentView.current = { sort: { key: 'date', order: 'descending' } };
-
     // @ts-ignore - Mock data for testing
     const conditions = { field: 'date', pattern: '(\\d{4})' };
+
+    // The view is sorted in descending order on the date field
     // @ts-ignore - Mock data for testing
-    const result = groupEntries(entries, collection, conditions);
+    const result = groupEntries(entries, collection, conditions, undefined, {
+      key: 'date',
+      order: 'descending',
+    });
 
     // Groups should be reversed (descending order)
     expect(result[0].name).toBe('2024');
@@ -629,12 +680,15 @@ describe('groupEntries', () => {
     // Regex matches only strings starting with a 4-digit year
     vi.mocked(getRegex).mockReturnValue(/^\d{4}/);
 
-    currentView.current = { sort: { key: 'tag', order: 'ascending' } };
-
     // @ts-ignore
     const conditions = { field: 'tag', pattern: '^\\d{4}' };
+
     // @ts-ignore
-    const result = groupEntries(entries, collection, conditions);
+    const result = groupEntries(entries, collection, conditions, undefined, {
+      key: 'tag',
+      order: 'ascending',
+    });
+
     // '2023-tech' matches → group '2023'; 'no-year' does not match → falls back to 'Other'
     const groupNames = result.map((g) => g.name);
 
@@ -727,10 +781,11 @@ describe('groupEntries', () => {
     });
 
     test('should keep the order regardless of the sort order', () => {
-      currentView.current = { sort: { key: 'date', order: 'descending' } };
-
       expect(
-        groupEntries(entries, collection, { field: 'date', gte: '{{today}}' }).map((g) => g.name),
+        groupEntries(entries, collection, { field: 'date', gte: '{{today}}' }, undefined, {
+          key: 'date',
+          order: 'descending',
+        }).map((g) => g.name),
       ).toEqual(['Upcoming', OTHER_GROUP_NAME]);
     });
 

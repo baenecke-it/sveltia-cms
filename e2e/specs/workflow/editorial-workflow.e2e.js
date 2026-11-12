@@ -152,12 +152,58 @@ test('moves an entry through the review stages', async ({ cms, github, page }) =
   await expect
     .poll(() => ({ labels: pullRequest.labels, draft: pullRequest.draft }))
     .toEqual({ labels: ['sveltia-cms/pending_publish'], draft: false });
+  // The pull request is the user’s own, which the GitHub doesn’t let them approve
+  expect(pullRequest.approvals).toBeUndefined();
 
   await cms.changeStatus(/Status: .*Ready/, 'Draft');
   // The labels are updated first, then the draft state
   await expect
     .poll(() => ({ labels: pullRequest.labels, draft: pullRequest.draft }))
     .toEqual({ labels: ['sveltia-cms/draft'], draft: true });
+});
+
+test('approves a colleague’s pull request while it’s marked as ready', async ({
+  cms,
+  github,
+  page,
+}) => {
+  const pullRequest = openEntryPullRequest(github, {
+    slug: 'second-post',
+    files: { 'content/posts/second-post.md': post('Second Post', 'Coming soon.') },
+    status: 'pending_review',
+  });
+
+  pullRequest.author = github.colleague;
+
+  await cms.open();
+  await openEntry(page, 'Second Post');
+  await cms.changeStatus(/Status: .*In Review/, 'Ready');
+
+  // The approval is pinned to the commit the entry was reviewed at
+  await expect
+    .poll(() => pullRequest.approvals)
+    .toEqual([
+      expect.objectContaining({
+        login: github.user.login,
+        commitId: github.getPullRequestHead(pullRequest).oid,
+      }),
+    ]);
+
+  // Moving the entry back withdraws the approval
+  await cms.changeStatus(/Status: .*Ready/, 'In Review');
+  await expect.poll(() => pullRequest.approvals).toEqual([]);
+
+  // A review can’t be deleted on GitHub, so it’s dismissed
+  expect(pullRequest.dismissals).toEqual(['The entry is no longer ready to publish.']);
+
+  // Moving the entry between the other stages approves nothing
+  await cms.changeStatus(/Status: .*In Review/, 'Draft');
+  await expect.poll(() => pullRequest.labels).toEqual(['sveltia-cms/draft']);
+  expect(pullRequest.approvals).toEqual([]);
+
+  // Marking it as ready again approves it again
+  await cms.changeStatus(/Status: .*Draft/, 'Ready');
+  await expect.poll(() => pullRequest.approvals).toHaveLength(1);
 });
 
 test('keeps the other labels of a pull request', async ({ cms, github, page }) => {
@@ -203,6 +249,45 @@ test('publishes an entry by merging its pull request', async ({ cms, github, pag
   // The branch is deleted after the merge
   await expect.poll(() => github.refs.has('cms/posts/second-post')).toBe(false);
   await expect(getEntryRows(page)).toHaveText([/First Post/, /Second Post/]);
+});
+
+// @see https://github.com/sveltia/sveltia-cms/issues/1094
+test('publishes an entry once the required check on its pull request passes', async ({
+  cms,
+  github,
+  page,
+}) => {
+  const pullRequest = openEntryPullRequest(github, {
+    slug: 'second-post',
+    files: { 'content/posts/second-post.md': post('Second Post', 'Coming soon.') },
+    status: 'pending_publish',
+  });
+
+  github.checksRunning = true;
+  await page.clock.install();
+  await cms.open();
+
+  const editor = await openEntry(page, 'Second Post');
+
+  await editor.getByRole('button', { name: 'Publish Entry' }).click();
+  await page
+    .getByRole('alertdialog', { name: 'Publish Entry' })
+    .getByRole('button', { name: 'Publish' })
+    .click();
+
+  // GitHub can’t merge it yet, so the CMS sets it to auto-merge once the check passes
+  await expect.poll(() => pullRequest.autoMerge).toMatchObject({ method: 'merge' });
+  expect(pullRequest.state).toBe('open');
+
+  // The CMS checks every 10 seconds whether it has been merged
+  github.finishChecks();
+  await page.clock.fastForward('00:11');
+
+  await expect(getEntryRows(page)).toHaveText([/First Post/, /Second Post/]);
+  expect(pullRequest.state).toBe('merged');
+  expect(github.readFile('content/posts/second-post.md')).toBe(post('Second Post', 'Coming soon.'));
+  // The branch is deleted after the merge
+  await expect.poll(() => github.refs.has('cms/posts/second-post')).toBe(false);
 });
 
 test('refuses to publish an entry whose branch holds other work', async ({ cms, github, page }) => {

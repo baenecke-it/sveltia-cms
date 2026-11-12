@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { getEntriesByCollection } from '$lib/services/contents/collection/entries';
 import { getOrderFieldKey } from '$lib/services/contents/collection/entries/reorder/config';
-import { getUnpublishedEntriesByCollection } from '$lib/services/workflow';
+import { getCompanionEntries, getUnpublishedEntriesByCollection } from '$lib/services/workflow';
 
 import { assignManualSortOrder, getMaxEntryNumber } from './sort-order';
 
@@ -14,9 +14,22 @@ vi.mock('$lib/services/contents/collection/entries/reorder/config', () => ({
   getOrderFieldKey: vi.fn(() => undefined),
 }));
 
-vi.mock('$lib/services/workflow', () => ({
-  getUnpublishedEntriesByCollection: vi.fn(() => []),
-}));
+vi.mock('$lib/services/workflow', () => {
+  /** @type {import('vitest').Mock<(name: string) => any[]>} */
+  const companionEntries = vi.fn(() => []);
+  /** @type {import('vitest').Mock<(name: string) => any[]>} */
+  const unpublishedEntriesByCollection = vi.fn(() => []);
+
+  return {
+    getCompanionEntries: companionEntries,
+    getUnpublishedEntriesByCollection: unpublishedEntriesByCollection,
+    // Mirror the real helper so the tests can drive it through the two it combines
+    getPullRequestEntries: vi.fn((/** @type {string} */ name) => [
+      ...unpublishedEntriesByCollection(name),
+      ...companionEntries(name),
+    ]),
+  };
+});
 
 /**
  * Build a draft with the given values.
@@ -67,6 +80,17 @@ describe('assignManualSortOrder', () => {
     expect(draft.currentValues.en.order).toBe(1);
   });
 
+  it('starts from 1 when the highest order is zero or below', () => {
+    vi.mocked(getEntriesByCollection).mockReturnValue(
+      /** @type {any} */ ([{ locales: { en: { content: { order: -2 } } } }]),
+    );
+
+    const draft = createDraft({ en: {} });
+
+    assignManualSortOrder(draft);
+    expect(draft.currentValues.en.order).toBe(1);
+  });
+
   it('skips the orders already taken by the given number of entries', () => {
     vi.mocked(getEntriesByCollection).mockReturnValue(
       /** @type {any} */ ([{ locales: { en: { content: { order: 5 } } } }]),
@@ -101,9 +125,36 @@ describe('getMaxEntryNumber', () => {
     vi.mocked(getUnpublishedEntriesByCollection).mockReturnValue([]);
   });
 
-  it('returns 0 when no entry has a positive number', () => {
+  it('returns `undefined` when no entry has a number', () => {
     vi.mocked(getEntriesByCollection).mockReturnValue(
-      /** @type {any} */ ([{ locales: { en: { content: { id: -3 } } } }]),
+      /** @type {any} */ ([
+        { locales: { en: { content: { id: null } } } },
+        { locales: { en: { content: { id: '' } } } },
+        { locales: { en: { content: {} } } },
+        { locales: { fr: { content: { id: 1 } } } },
+      ]),
+    );
+
+    expect(getMaxEntryNumber({ collectionName: 'tags', keyPath: 'id', locale: 'en' })).toBe(
+      undefined,
+    );
+  });
+
+  it('returns a highest number of zero or below', () => {
+    vi.mocked(getEntriesByCollection).mockReturnValue(
+      /** @type {any} */ ([
+        { locales: { en: { content: { id: -3 } } } },
+        { locales: { en: { content: { id: '-7' } } } },
+      ]),
+    );
+
+    expect(getMaxEntryNumber({ collectionName: 'tags', keyPath: 'id', locale: 'en' })).toBe(-3);
+
+    vi.mocked(getEntriesByCollection).mockReturnValue(
+      /** @type {any} */ ([
+        { locales: { en: { content: { id: -3 } } } },
+        { locales: { en: { content: { id: 0 } } } },
+      ]),
     );
 
     expect(getMaxEntryNumber({ collectionName: 'tags', keyPath: 'id', locale: 'en' })).toBe(0);
@@ -128,5 +179,19 @@ describe('getMaxEntryNumber', () => {
     );
     expect(getEntriesByCollection).toHaveBeenCalledWith('tags');
     expect(getUnpublishedEntriesByCollection).toHaveBeenCalledWith('tags');
+  });
+
+  it('counts the new entries riding along in the pull request of another entry', () => {
+    vi.mocked(getEntriesByCollection).mockReturnValue(
+      /** @type {any} */ ([{ locales: { en: { content: { id: 2 } } } }]),
+    );
+    // A new entry created from a Relation field of an entry of another collection, which is saved
+    // to that entry’s pull request, has taken the next number there
+    vi.mocked(getCompanionEntries).mockReturnValueOnce(
+      /** @type {any} */ ([{ locales: { en: { content: { id: 3 } } } }]),
+    );
+
+    expect(getMaxEntryNumber({ collectionName: 'tags', keyPath: 'id', locale: 'en' })).toBe(3);
+    expect(getCompanionEntries).toHaveBeenCalledWith('tags');
   });
 });

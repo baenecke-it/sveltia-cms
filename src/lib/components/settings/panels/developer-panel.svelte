@@ -19,11 +19,7 @@
    */
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    onChange = undefined,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { onChange = undefined } = $props();
 
   /**
    * Check whether the saved changes can be committed to the local Git repository. The Settings are
@@ -32,6 +28,26 @@
    */
   const getLocalGitStatus = async () => /** @type {LocalGitStatus} */ (await checkLocalGitStatus());
 </script>
+
+{#snippet deployHookInput(
+  /** @type {'deployHookURL' | 'deployHookAuthHeader'} */ prop,
+  /** @type {string} */ ariaLabel,
+  /** @type {string} */ savedMessage,
+  /** @type {string} */ removedMessage,
+)}
+  <div role="none">
+    <TextInput
+      dir="ltr"
+      bind:value={prefs[prop]}
+      flex
+      {ariaLabel}
+      showInlineLabel={true}
+      onchange={() => {
+        onChange?.({ message: prefs[prop] ? savedMessage : removedMessage });
+      }}
+    />
+  </div>
+{/snippet}
 
 <section>
   <h3>
@@ -84,41 +100,17 @@
     <p>
       {_('prefs.developer.deploy_hook.description')}
     </p>
-    <div role="none">
-      <TextInput
-        dir="ltr"
-        bind:value={prefs.deployHookURL}
-        flex
-        ariaLabel={_('prefs.developer.deploy_hook.url.field_label')}
-        showInlineLabel={true}
-        onchange={() => {
-          onChange?.({
-            message: _(
-              prefs.deployHookURL
-                ? 'prefs.developer.deploy_hook.url.saved'
-                : 'prefs.developer.deploy_hook.url.removed',
-            ),
-          });
-        }}
-      />
-    </div>
-    <div role="none">
-      <TextInput
-        dir="ltr"
-        bind:value={prefs.deployHookAuthHeader}
-        flex
-        ariaLabel={_('prefs.developer.deploy_hook.auth.field_label')}
-        showInlineLabel={true}
-        onchange={() => {
-          onChange?.({
-            message: _(
-              prefs.deployHookAuthHeader
-                ? 'prefs.developer.deploy_hook.auth.saved'
-                : 'prefs.developer.deploy_hook.auth.removed',
-            ),
-          });
-        }}
-      />
-    </div>
+    {@render deployHookInput(
+      'deployHookURL',
+      _('prefs.developer.deploy_hook.url.field_label'),
+      _('prefs.developer.deploy_hook.url.saved'),
+      _('prefs.developer.deploy_hook.url.removed'),
+    )}
+    {@render deployHookInput(
+      'deployHookAuthHeader',
+      _('prefs.developer.deploy_hook.auth.field_label'),
+      _('prefs.developer.deploy_hook.auth.saved'),
+      _('prefs.developer.deploy_hook.auth.removed'),
+    )}
   </section>
 {/if}

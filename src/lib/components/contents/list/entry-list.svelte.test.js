@@ -44,10 +44,31 @@ const NOTES = {
   fields: [{ name: 'title', label: 'Title', widget: 'string' }],
 };
 
-describe('EntryList', () => {
-  beforeAll(async () => {
-    await initTestConfig({ collections: [structuredClone(POSTS), structuredClone(NOTES)] });
+/**
+ * Configuration of a collection whose groups start collapsed.
+ */
+const PHOTOS = {
+  name: 'photos',
+  label: 'Photos',
+  folder: 'content/photos',
+  fields: [
+    { name: 'title', label: 'Title', widget: 'string' },
+    { name: 'case', label: 'Case', widget: 'string' },
+  ],
+  view_groups: { groups: [{ name: 'case', label: 'Case', field: 'case', collapsed: true }] },
+};
+
+/**
+ * Load the configuration of all the collections the tests list the entries of.
+ */
+const initConfig = async () => {
+  await initTestConfig({
+    collections: [structuredClone(POSTS), structuredClone(NOTES), structuredClone(PHOTOS)],
   });
+};
+
+describe('EntryList', () => {
+  beforeAll(initConfig);
 
   /**
    * Select the collection, with the given saved view. The view is restored from the settings when
@@ -89,19 +110,23 @@ describe('EntryList', () => {
 
     await expect.element(grid).toHaveAttribute('aria-rowcount', '3');
     await expect.poll(() => grid.getByRole('row').elements().length).toBe(3);
-    // The French entry has no title in the default locale to sort by, so it comes last
+    // The French entry has no title in the default locale, so it’s sorted by the title it’s listed
+    // with, like it’s filtered and grouped
     expect(
       grid
         .getByRole('row')
         .elements()
         .map((el) => el.textContent?.trim()),
-    ).toEqual(['Hello', 'World', 'Bonjour']);
+    ).toEqual(['Bonjour', 'Hello', 'World']);
 
     // The thumbnail is shown in the view’s size
     await expect
       .poll(() => grid.element().querySelector('.image img')?.getAttribute('src'))
       .toBe(TEST_IMAGE_URL);
-    expect(grid.element().querySelector('.image .preview')).toHaveClass('icon');
+    // The thumbnail is loaded once the row has stayed in view for a moment
+    await expect
+      .poll(() => grid.element().querySelector('.image .preview')?.classList.contains('icon'))
+      .toBe(true);
 
     await grid.getByRole('row', { name: 'World' }).click();
     await expect.poll(() => window.location.hash).toBe('#/collections/posts/entries/world');
@@ -143,7 +168,10 @@ describe('EntryList', () => {
     await expect
       .poll(() => container.querySelector('[data-key="category"]')?.textContent?.trim())
       .toBe('news');
-    expect(grid.element().querySelector('.image .preview')).toHaveClass('icon');
+    // The thumbnail is loaded once the row has stayed in view for a moment
+    await expect
+      .poll(() => grid.element().querySelector('.image .preview')?.classList.contains('icon'))
+      .toBe(true);
 
     // The header sorts the entries
     await grid.getByRole('columnheader', { name: 'Title' }).getByRole('button').click();
@@ -159,14 +187,13 @@ describe('EntryList', () => {
           .map((el) => el.querySelector('.title')?.textContent?.trim()),
       )
       .toEqual(['World', 'Hello']);
-    // The data rows come after the header row
+    // The data rows come after the header row, numbered in the order they are shown
     expect(
       grid
         .getByRole('row')
         .elements()
         .slice(1)
-        .map((el) => el.getAttribute('aria-rowindex'))
-        .sort(),
+        .map((el) => el.getAttribute('aria-rowindex')),
     ).toEqual(['2', '3']);
   });
 
@@ -362,6 +389,17 @@ describe('EntryList', () => {
 
     await expect.element(grid).toHaveAttribute('aria-rowcount', '2');
     await expect.poll(() => grid.getByRole('row').elements().length).toBe(2);
+    // The entry rows are numbered across both groups, the unpublished one first. Each group also
+    // has a header row, which isn’t numbered
+    await expect
+      .poll(() =>
+        grid
+          .getByRole('row')
+          .elements()
+          .filter((el) => !el.querySelector('[role="columnheader"]'))
+          .map((el) => el.getAttribute('aria-rowindex')),
+      )
+      .toEqual(['1', '2']);
     await expect
       .poll(() =>
         grid
@@ -419,7 +457,7 @@ describe('EntryList', () => {
         .toBe(TEST_IMAGE_URL);
     } finally {
       setReorderMode(false);
-      await initTestConfig({ collections: [structuredClone(POSTS)] });
+      await initConfig();
     }
   });
 
@@ -518,6 +556,48 @@ describe('EntryList', () => {
     expect(currentView.current.collapsedGroups).toEqual({
       '["category"]': ['blog', OTHER_GROUP_NAME],
     });
+  });
+
+  test('starts the groups collapsed with the `collapsed` option, remembering expanded ones', async () => {
+    setEntries([
+      createMockEntry({
+        folder: 'content/photos',
+        slug: 'a',
+        content: { _default: { title: 'A', case: 'one' } },
+      }),
+      createMockEntry({
+        folder: 'content/photos',
+        slug: 'b',
+        content: { _default: { title: 'B', case: 'two' } },
+      }),
+    ]);
+    window.location.hash = '#/collections/photos';
+    entryListSettings.current = {
+      photos: { type: 'list', group: { field: 'case' }, expandedGroups: { '["case"]': ['two'] } },
+    };
+    selectedCollection.current = getCollection('photos');
+
+    await render(EntryList, {});
+
+    const grid = page.getByRole('grid', { name: 'Entries' });
+    const one = grid.getByRole('button', { name: 'one' });
+    const two = grid.getByRole('button', { name: 'two' });
+
+    // A group is collapsed unless the user has expanded it
+    await expect.element(one).toHaveAttribute('aria-expanded', 'false');
+    await expect.element(two).toHaveAttribute('aria-expanded', 'true');
+    await expect.element(grid.getByRole('row', { name: 'B' })).toBeInTheDocument();
+    expect(grid.getByRole('row', { name: 'A' }).elements()).toHaveLength(0);
+
+    await one.click();
+    await expect.element(one).toHaveAttribute('aria-expanded', 'true');
+    await expect.element(grid.getByRole('row', { name: 'A' })).toBeInTheDocument();
+    expect(currentView.current.expandedGroups).toEqual({ '["case"]': ['two', 'one'] });
+    expect(currentView.current.collapsedGroups).toBeUndefined();
+
+    await two.click();
+    await expect.element(two).toHaveAttribute('aria-expanded', 'false');
+    expect(currentView.current.expandedGroups).toEqual({ '["case"]': ['one'] });
   });
 
   test('offers to create an entry when there is none', async () => {

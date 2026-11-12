@@ -1,7 +1,8 @@
+import deepmerge from '@fastify/deepmerge';
 import { _ } from '@sveltia/i18n';
 import { isObject } from '@sveltia/utils/object';
-import merge from 'deepmerge';
 
+import { DOCS_BASE_URL } from '$lib/services/app';
 import {
   DEV_CONFIG_PATH,
   DEV_SITE_URL,
@@ -19,10 +20,12 @@ import { makeLink } from '$lib/services/utils/string';
  * @property {string} [type] MIME type.
  */
 
-const LOAD_CONFIG_DOC_URL =
-  'https://sveltiacms.app/en/docs/api/initialization#providing-a-full-configuration';
-
-const SCHEMA_TIP_URL = 'https://sveltiacms.app/en/docs/config-basics#validation-and-autocomplete';
+const LOAD_CONFIG_DOC_URL = `${DOCS_BASE_URL}/api/initialization#providing-a-full-configuration`;
+const SCHEMA_TIP_URL = `${DOCS_BASE_URL}/config-basics#validation-and-autocomplete`;
+/**
+ * Deep merge any number of config objects, concatenating arrays.
+ */
+const mergeAll = deepmerge({ all: true });
 /**
  * Responses of config files requested ahead of time with {@link prefetchCmsConfig}, keyed by the
  * absolute file URL. Each is consumed once by {@link fetchFile}.
@@ -276,5 +279,5 @@ export const fetchCmsConfig = async ({ manualInit = false } = {}) => {
     return objects[0];
   }
 
-  return merge.all(objects);
+  return mergeAll(...objects);
 };

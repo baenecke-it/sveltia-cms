@@ -39,11 +39,7 @@
   const entryDraft = getEntryDraftContext();
 
   /** @type {Props} */
-  let {
-    /* eslint-disable prefer-const */
-    locale,
-    /* eslint-enable prefer-const */
-  } = $props();
+  let { locale } = $props();
 
   const fieldId = $props.id();
 
@@ -76,7 +72,7 @@
     }),
   );
 
-  /* v8 ignore next -- the editor is only rendered for a nested collection, where the path is set */
+  /* v8 ignore next -- the editor is only rendered for nested entries, where the path is set */
   const currentPath = $derived(stripSlashes(entryDraft.current?.currentPath ?? ''));
   /** Folder the entry is filed in, which is the parent of its own folder if it has one. */
   const selectedPath = $derived(ownFolderName ? getEntryDirPath(currentPath) : currentPath);

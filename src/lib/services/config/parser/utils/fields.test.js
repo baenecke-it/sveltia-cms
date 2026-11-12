@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { findFields, getCanonicalSlugKey, getRootFields, getSubFields, hasField } from './fields';
+import {
+  findFields,
+  getCanonicalSlugKey,
+  getRootFields,
+  getSubFields,
+  hasField,
+  isNonFieldSortKey,
+} from './fields';
 
 /**
  * @import { Field } from '$lib/types/public';
@@ -108,6 +115,39 @@ describe('Test findFields()', () => {
     expect(findFields(blocks, 'blocks.meta.alt').map(({ name }) => name)).toEqual(['alt']);
     expect(findFields(blocks, 'blocks.meta.title').map(({ name }) => name)).toEqual(['title']);
     expect(findFields(blocks, 'blocks.meta.src')).toEqual([]);
+  });
+
+  it('should resolve a key of a KeyValue or Code field value to the field', () => {
+    /** @type {Field[]} */
+    const valueFields = [
+      { name: 'meta', label: 'Meta', widget: 'keyvalue' },
+      { name: 'snippet', label: 'Snippet', widget: 'code' },
+      { name: 'custom', label: 'Custom', widget: 'code', keys: { code: 'src', lang: 'syntax' } },
+      { name: 'plain', label: 'Plain', widget: 'code', output_code_only: true },
+      {
+        name: 'blocks',
+        label: 'Blocks',
+        widget: 'list',
+        fields: [{ name: 'attrs', label: 'Attributes', widget: 'keyvalue' }],
+      },
+    ];
+
+    // The pairs and the code are stored under the key paths, e.g. `meta.author`, which a template
+    // can refer to
+    expect(findFields(valueFields, 'meta.author')).toEqual([valueFields[0]]);
+    expect(findFields(valueFields, 'snippet.code')).toEqual([valueFields[1]]);
+    expect(findFields(valueFields, 'snippet.lang')).toEqual([valueFields[1]]);
+    expect(findFields(valueFields, 'custom.syntax')).toEqual([valueFields[2]]);
+    expect(findFields(valueFields, 'blocks.0.attrs.id')).toEqual([
+      /** @type {any} */ (valueFields[4]).fields[0],
+    ]);
+
+    // A key the value doesn’t have, or anything below a key, points to nothing
+    expect(findFields(valueFields, 'snippet.name')).toEqual([]);
+    expect(findFields(valueFields, 'custom.code')).toEqual([]);
+    expect(findFields(valueFields, 'plain.code')).toEqual([]);
+    expect(findFields(valueFields, 'meta.author.name')).toEqual([]);
+    expect(findFields(valueFields, 'meta.author.0')).toEqual([]);
   });
 
   it('should return an empty array for a key path that points to no field', () => {
@@ -291,5 +331,28 @@ describe('Test getCanonicalSlugKey()', () => {
     expect(getKey({ cmsConfig: { i18n: { locales: [] } } })).toBeUndefined();
     expect(getKey({ cmsConfig, collection: { name: 'posts' } })).toBeUndefined();
     expect(getKey({ cmsConfig, file: { i18n: false } })).toBeUndefined();
+  });
+});
+
+describe('Test isNonFieldSortKey()', () => {
+  const args = { canonicalSlugKey: 'translationKey', orderFieldKey: 'weight' };
+
+  it('should accept the entry metadata keys and the manual order', () => {
+    ['slug', 'commit_author', 'commit_date', '_manual'].forEach((key) => {
+      expect(isNonFieldSortKey(key, args)).toBe(true);
+    });
+  });
+
+  it('should accept the canonical slug key and the reorder field key', () => {
+    expect(isNonFieldSortKey('translationKey', args)).toBe(true);
+    expect(isNonFieldSortKey('weight', args)).toBe(true);
+  });
+
+  it('should reject any other key, including the summary', () => {
+    expect(isNonFieldSortKey('title', args)).toBe(false);
+    expect(isNonFieldSortKey('_summary', args)).toBe(false);
+    expect(
+      isNonFieldSortKey('weight', { canonicalSlugKey: undefined, orderFieldKey: undefined }),
+    ).toBe(false);
   });
 });

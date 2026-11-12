@@ -17,10 +17,17 @@ import {
   getIndexFile,
   isCollectionIndexFile,
 } from '$lib/services/contents/collection/entries/index-file';
+import {
+  getCollectionFile,
+  getCollectionFileEntry,
+  getCollectionFileLabel,
+} from '$lib/services/contents/collection/files';
+import { getIdentifierFieldName } from '$lib/services/contents/collection/identifier';
 import { getField } from '$lib/services/contents/entry/fields';
 import { getEntryDirName } from '$lib/services/contents/entry/paths';
 import { getFieldDisplayValue } from '$lib/services/contents/entry/values';
 import { getOrCreate } from '$lib/services/utils/cache';
+import { getCommitAuthorName } from '$lib/services/utils/commit-author';
 
 /**
  * @import {
@@ -28,9 +35,16 @@ import { getOrCreate } from '$lib/services/utils/cache';
  * Entry,
  * FlattenedEntryContent,
  * InternalCollection,
+ * InternalCollectionFile,
  * InternalLocaleCode,
  * } from '$lib/types/private';
- * @import { RawEntryContent } from '$lib/types/public';
+ * @import {
+ * Field,
+ * ListFieldWithSubField,
+ * ListFieldWithSubFields,
+ * ListFieldWithTypes,
+ * RawEntryContent,
+ * } from '$lib/types/public';
  */
 
 /**
@@ -51,8 +65,13 @@ import { getOrCreate } from '$lib/services/utils/cache';
  * @typedef {object} ReplaceContext
  * @property {FlattenedEntryContent} content Entry content.
  * @property {string} collectionName Collection name.
+ * @property {string} [fileName] Collection file name, whose fields the tags refer to. File
+ * collection only.
+ * @property {boolean} [isIndexFile] Whether the tags refer to the fields of the collection’s index
+ * file.
  * @property {ReplacerSubContext} replaceSubContext Context for the `replaceSub` function.
- * @property {InternalLocaleCode} defaultLocale Default locale.
+ * @property {InternalLocaleCode} locale Locale of the content, which a field value is displayed
+ * and transformed in: a DateTime field value may be written in it.
  * @property {string | undefined} [fallbackSummary] Fallback summary for the entry.
  */
 
@@ -110,18 +129,30 @@ const getBodyHeader = (markdown) =>
     .find((header) => !!header) ?? '';
 
 /**
+ * Character standing in for a `<` that doesn’t start one of the formatting tags a summary can
+ * contain, from the Private Use Area, so it’s neither parsed as Markdown nor as HTML.
+ */
+const LT_PLACEHOLDER = '\uE000';
+/**
+ * Match a `<` that doesn’t start a `strong`, `em` or `code` tag. Any other tag in a field value is
+ * text, like `<T>` in `Vec<T> in Rust` or `<script>` in a title about it, which would otherwise be
+ * sanitized away, and an unclosed one would take the rest of the summary with it.
+ */
+const NON_FORMATTING_TAG_REGEX = /<(?!\/?(?:strong|em|code)(?:\s[^>]*)?>)/g;
+
+/**
  * Parse the given entry summary as Markdown and sanitize HTML with a few exceptions if the Markdown
  * option is enabled. Also, parse HTML character references (entities).
  * Without the Markdown option, the references are decoded after sanitizing, so the result can
  * contain markup, e.g. `&lt;img&gt;` becomes `<img>`: it’s only safe as text, never with Svelte’s
- * `@html` tag or `innerHTML`.
+ * `@html` tag or `innerHTML`. A raw `<` that doesn’t start a formatting tag is kept as text.
  * @param {string} str Original string.
  * @param {object} [options] Options.
  * @param {boolean} [options.allowMarkdown] Whether to allow Markdown and return HTML string.
  * @returns {string} Parsed string.
  */
 export const sanitizeEntrySummary = (str, { allowMarkdown = false } = {}) => {
-  str = /** @type {string} */ (parseInline(str));
+  str = /** @type {string} */ (parseInline(str.replace(NON_FORMATTING_TAG_REGEX, LT_PLACEHOLDER)));
 
   if (allowMarkdown) {
     str = parseEntities(str);
@@ -138,7 +169,7 @@ export const sanitizeEntrySummary = (str, { allowMarkdown = false } = {}) => {
     str = parseEntities(str);
   }
 
-  return str.trim();
+  return str.replaceAll(LT_PLACEHOLDER, allowMarkdown ? '&lt;' : '<').trim();
 };
 
 /**
@@ -212,7 +243,7 @@ export const replaceSub = (tag, context) => {
   }
 
   if (tag === 'commit_author') {
-    return commitAuthor?.name || commitAuthor?.login || commitAuthor?.email;
+    return getCommitAuthorName(commitAuthor);
   }
 
   return undefined;
@@ -226,6 +257,30 @@ export const replaceSub = (tag, context) => {
 let relationLabelResolved = false;
 
 /**
+ * Check whether the display value of the given field is resolved from other entries: a Relation
+ * field shows a label taken from the referenced entry, and so does each item of a List field with a
+ * Relation field as its single subfield, as {@link getFieldDisplayValue} resolves those items like
+ * the subfield itself.
+ * @param {Field | undefined} field Field configuration.
+ * @returns {boolean} Result.
+ */
+export const isDisplayValueFromOtherEntries = (field) => {
+  if (field?.widget === 'relation') {
+    return true;
+  }
+
+  if (field?.widget === 'list') {
+    const { field: subField } = /** @type {ListFieldWithSubField} */ (field);
+    const { fields } = /** @type {ListFieldWithSubFields} */ (field);
+    const { types } = /** @type {ListFieldWithTypes} */ (field);
+
+    return !fields && !types && isDisplayValueFromOtherEntries(subField);
+  }
+
+  return false;
+};
+
+/**
  * Replacer.
  * @param {string} placeholder Field name or one of special tags. May contain transformations.
  * @param {ReplaceContext} context Context.
@@ -235,14 +290,16 @@ export const replace = (placeholder, context) => {
   const {
     content: valueMap,
     collectionName,
+    fileName,
+    isIndexFile,
     replaceSubContext,
-    defaultLocale,
+    locale,
     fallbackSummary,
   } = context;
 
   const { value: tag, transformations: parsedTransformations } = parseTransformations(placeholder);
   const keyPath = stripFieldTagPrefix(tag);
-  const getFieldArgs = { collectionName, valueMap, keyPath };
+  const getFieldArgs = { collectionName, fileName, valueMap, keyPath, isIndexFile };
   let value = replaceSub(tag, replaceSubContext);
 
   // Process nested templates in transformation arguments
@@ -259,11 +316,11 @@ export const replace = (placeholder, context) => {
       value = Object.hasOwn(valueMap, keyPath) ? valueMap[keyPath] : undefined;
     } else {
       // A Relation field is displayed with a label taken from the referenced entry
-      if (getField(getFieldArgs)?.widget === 'relation') {
+      if (isDisplayValueFromOtherEntries(getField(getFieldArgs))) {
         relationLabelResolved = true;
       }
 
-      value = getFieldDisplayValue({ ...getFieldArgs, locale: defaultLocale });
+      value = getFieldDisplayValue({ ...getFieldArgs, locale });
     }
 
     // If the field is `title` and the value is empty, use the fallback summary if available
@@ -287,7 +344,7 @@ export const replace = (placeholder, context) => {
       fieldConfig: getField({ ...getFieldArgs }),
       value,
       transformations,
-      locale: defaultLocale,
+      locale,
     });
   }
 
@@ -332,6 +389,34 @@ const getEntriesGeneration = () => {
 };
 
 /**
+ * Get the label and the `summary` template of the collection file or index file the given entry
+ * is, which are used in place of the collection’s.
+ * @param {InternalCollection} collection Entry’s collection.
+ * @param {Entry} entry Entry.
+ * @param {string} [fileName] Collection file name. File collection only.
+ * @returns {{ collectionFile?: InternalCollectionFile, isIndexFile: boolean, label?: string,
+ * template?: string }} The collection file, whether the entry is the index file, and its label and
+ * template. The label is `undefined` for a regular entry.
+ */
+const getOwnSummaryOptions = (collection, entry, fileName) => {
+  const collectionFile = fileName ? getCollectionFile(collection, fileName) : undefined;
+
+  if (collectionFile) {
+    return {
+      collectionFile,
+      isIndexFile: false,
+      label: getCollectionFileLabel(collectionFile),
+      template: collectionFile.summary,
+    };
+  }
+
+  const isIndexFile = isCollectionIndexFile(collection, entry);
+  const { label, summary: template } = (isIndexFile && getIndexFile(collection)) || {};
+
+  return { isIndexFile, label, template };
+};
+
+/**
  * Format the given entry’s summary. This is the uncached implementation of
  * {@link getEntrySummary}.
  * @param {InternalCollection} collection Entry’s collection.
@@ -346,37 +431,59 @@ const getEntriesGeneration = () => {
  * option.
  * @param {boolean} [options.useIndexFileLabel] Whether to use the label of the collection’s index
  * file as its summary. Default: `true`.
+ * @param {string} [options.fileName] Name of the collection file the entry belongs to. File
+ * collection only.
  * @returns {string} Formatted entry summary.
  */
 const formatEntrySummary = (
   collection,
   entry,
-  { locale, useTemplate = false, allowMarkdown = false, template, useIndexFileLabel = true } = {},
+  {
+    locale,
+    useTemplate = false,
+    allowMarkdown = false,
+    template,
+    useIndexFileLabel = true,
+    fileName,
+  } = {},
 ) => {
-  if (useIndexFileLabel && isCollectionIndexFile(collection, entry)) {
-    return /** @type {string} */ (getIndexFile(collection)?.label);
+  const { _type, name: collectionName } = collection;
+
+  const {
+    collectionFile,
+    isIndexFile,
+    label,
+    template: ownTemplate,
+  } = getOwnSummaryOptions(collection, entry, fileName);
+
+  const useOwnTemplate = useTemplate && template === undefined && !!ownTemplate;
+
+  // A collection file or index file is labelled unless its own summary template is requested. A
+  // given template, such as `nested.summary` for the tree folder labels, doesn’t apply to it
+  if ((collectionFile || (isIndexFile && useIndexFileLabel)) && !useOwnTemplate) {
+    return /** @type {string} */ (label);
   }
 
-  const {
-    _type,
-    name: collectionName,
-    _i18n: { defaultLocale },
-  } = collection;
+  // A collection file has an i18n configuration of its own
+  const { defaultLocale } = (collectionFile ?? collection)._i18n;
 
-  const {
-    _file: { basePath, fullPathRegEx } = {},
-    identifier_field: identifierField = 'title',
-    summary: collectionSummaryTemplate,
-  } = _type === 'entry' ? collection : {};
+  const { _file: { basePath, fullPathRegEx } = {}, summary: collectionSummaryTemplate } =
+    _type === 'entry' ? collection : {};
 
-  const summaryTemplate = template ?? collectionSummaryTemplate;
+  const identifierField = getIdentifierFieldName(_type === 'entry' ? collection : undefined);
+  const summaryTemplate = template ?? ownTemplate ?? collectionSummaryTemplate;
   const { locales, slug, commitDate, commitAuthor } = entry;
+  const requestedLocale = locale ?? defaultLocale;
 
-  const { content = {}, path: entryPath = '' } =
-    locales[locale ?? defaultLocale] ?? Object.values(locales)[0] ?? {};
+  // An entry may lack the locale, e.g. one only written in another locale
+  const contentLocale = Object.hasOwn(locales, requestedLocale)
+    ? requestedLocale
+    : (Object.keys(locales)[0] ?? requestedLocale);
+
+  const { content = {}, path: entryPath = '' } = locales[contentLocale] ?? {};
 
   const fallbackSummary =
-    getEntrySummaryFromContent(content, { identifierField }) || slug.replaceAll('-', ' ');
+    getEntrySummaryFromContent(content, { identifierField }) || label || slug.replaceAll('-', ' ');
 
   if (!useTemplate || !summaryTemplate) {
     return sanitizeEntrySummary(fallbackSummary, { allowMarkdown });
@@ -386,17 +493,19 @@ const formatEntrySummary = (
   const replaceContext = {
     content,
     collectionName,
+    fileName: collectionFile?.name,
+    isIndexFile,
     replaceSubContext: {
       slug,
       entryPath,
       basePath,
       fullPathRegEx,
       locales: Object.keys(locales),
-      localeSuffixes: getFileNameLocaleSuffixes(collection),
+      localeSuffixes: getFileNameLocaleSuffixes(collectionFile ?? collection),
       commitDate,
       commitAuthor,
     },
-    defaultLocale,
+    locale: contentLocale,
     fallbackSummary,
   };
 
@@ -424,11 +533,15 @@ const formatEntrySummary = (
  * available.
  * @param {boolean} [options.allowMarkdown] Whether to allow Markdown and return HTML string.
  * @param {string} [options.template] Summary template that overrides the collection’s `summary`
- * option. Used for the folder labels in a nested collection’s tree, which have their own
+ * option. Used for the folder labels in the tree of nested entries, which have their own
  * `nested.summary` option, and the template columns of the entry list’s table view.
  * @param {boolean} [options.useIndexFileLabel] Whether to use the label of the collection’s index
  * file as its summary, instead of formatting it. Default: `true`. A table view column showing a
- * template, such as `{{filename}}`, formats it for the index file too.
+ * template, such as `{{filename}}`, formats it for the index file too. With `useTemplate`, the
+ * index file’s own `summary` template is used instead of the label if defined.
+ * @param {string} [options.fileName] Name of the collection file the entry belongs to. File
+ * collection only. The file’s label is returned, or with `useTemplate`, the file’s own `summary`
+ * template is formatted with its fields if defined.
  * @returns {string} Formatted entry summary.
  * @see https://decapcms.org/docs/configuration-options/#summary
  * @see https://sveltiacms.app/en/docs/collections/entries/listings#summaries
@@ -440,6 +553,7 @@ export const getEntrySummary = (collection, entry, options = {}) => {
     allowMarkdown = false,
     template,
     useIndexFileLabel = true,
+    fileName,
   } = options;
 
   const optionCache = getOrCreate(
@@ -456,6 +570,7 @@ export const getEntrySummary = (collection, entry, options = {}) => {
     allowMarkdown ? '1' : '0',
     template ?? '',
     useIndexFileLabel ? '1' : '0',
+    fileName ?? '',
     // `Array.join()` turns an unset locale into an empty string
     appLocale.current,
   ].join('\n');
@@ -480,4 +595,25 @@ export const getEntrySummary = (collection, entry, options = {}) => {
   optionCache.set(cacheKey, { summary, generation: dependsOnEntries ? generation : undefined });
 
   return summary;
+};
+
+/**
+ * Get the summary of a file in a file collection, formatted with the file’s own `summary` template
+ * to be displayed in the file list.
+ * @param {InternalCollection} collection File collection.
+ * @param {string} fileName Collection file name.
+ * @returns {string | undefined} Summary as HTML, which can contain Markdown formatting, or
+ * `undefined` if the file has no `summary` template or doesn’t exist in the repository yet, so the
+ * file label is displayed instead.
+ */
+export const getCollectionFileSummary = (collection, fileName) => {
+  if (!getCollectionFile(collection, fileName)?.summary) {
+    return undefined;
+  }
+
+  const entry = getCollectionFileEntry(collection.name, fileName);
+
+  return entry
+    ? getEntrySummary(collection, entry, { fileName, useTemplate: true, allowMarkdown: true })
+    : undefined;
 };

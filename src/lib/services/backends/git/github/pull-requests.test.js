@@ -7,8 +7,8 @@ import {
   fetchBranchHead,
   fetchPullRequestFileList,
   fetchPullRequestFiles,
+  parseAuthor,
   parseFileNodes,
-  parseRestFiles,
   updateDraftState,
   updateLabels,
 } from '$lib/services/backends/git/github/pull-requests';
@@ -60,22 +60,6 @@ describe('GitHub pull request helpers', () => {
         { path: 'b.md', sha: '', size: 0, deleted: false, renamed: false },
         { path: 'c.md', sha: '', size: 0, deleted: true, renamed: false },
         { path: 'd.md', sha: '', size: 0, deleted: false, renamed: true },
-      ]);
-    });
-  });
-
-  describe('parseRestFiles', () => {
-    test('converts the REST files to workflow files with the previous path of a rename', () => {
-      expect(
-        parseRestFiles([
-          { filename: 'a.md', status: 'added', patch: '@@' },
-          { filename: 'b.md', status: 'removed' },
-          { filename: 'new.md', status: 'renamed', previous_filename: 'old.md' },
-        ]),
-      ).toEqual([
-        { path: 'a.md', sha: '', size: 0, deleted: false, previousPath: undefined },
-        { path: 'b.md', sha: '', size: 0, deleted: true, previousPath: undefined },
-        { path: 'new.md', sha: '', size: 0, deleted: false, previousPath: 'old.md' },
       ]);
     });
   });
@@ -419,7 +403,65 @@ describe('GitHub pull request helpers', () => {
     });
   });
 
+  describe('parseAuthor', () => {
+    test('should parse a user from the REST API, which has no name or email address', () => {
+      expect(parseAuthor({ login: 'octocat', id: 1 })).toEqual({
+        name: 'octocat',
+        email: '',
+        id: 1,
+        login: 'octocat',
+      });
+    });
+
+    test('should parse a user from the GraphQL API', () => {
+      expect(
+        parseAuthor({ login: 'octocat', name: 'Mona', email: 'mona@example.com', databaseId: 2 }),
+      ).toEqual({ name: 'Mona', email: 'mona@example.com', id: 2, login: 'octocat' });
+      expect(parseAuthor({ login: 'octocat', name: null, email: null, databaseId: 2 })).toEqual({
+        name: 'octocat',
+        email: '',
+        id: 2,
+        login: 'octocat',
+      });
+    });
+
+    test('should fall back to the login for an empty display name', () => {
+      expect(parseAuthor({ login: 'octocat', name: '', databaseId: 2 })).toEqual({
+        name: 'octocat',
+        email: '',
+        id: 2,
+        login: 'octocat',
+      });
+    });
+
+    test('should return undefined for an unknown user', () => {
+      expect(parseAuthor(undefined)).toBeUndefined();
+      expect(parseAuthor({ id: 3 })).toBeUndefined();
+    });
+  });
+
   describe('createPullRequest', () => {
+    test('opens the pull request with the given description', async () => {
+      const description = 'Automatically generated\n\n<!-- sveltia-cms:deletion-group=group-1 -->';
+
+      vi.mocked(fetchAPI)
+        .mockResolvedValueOnce({ number: 5, created_at: '2026-01-01T00:00:00Z' })
+        .mockResolvedValueOnce({});
+
+      const result = await createPullRequest({
+        branch: 'cms/posts/hello',
+        title: 'Delete Post “hello”',
+        status: 'pending_deletion',
+        description,
+      });
+
+      expect(fetchAPI).toHaveBeenNthCalledWith(1, '/repos/owner/repo/pulls', {
+        method: 'POST',
+        body: expect.objectContaining({ body: description }),
+      });
+      expect(result.description).toBe(description);
+    });
+
     test('creates a draft pull request and applies the draft label', async () => {
       vi.mocked(fetchAPI)
         .mockResolvedValueOnce({
@@ -437,6 +479,7 @@ describe('GitHub pull request helpers', () => {
         branch: 'cms/posts/hello',
         title: 'Create Post “hello”',
         status: 'draft',
+        description: 'Description',
       });
 
       expect(fetchAPI).toHaveBeenNthCalledWith(1, '/repos/owner/repo/pulls', {
@@ -465,6 +508,22 @@ describe('GitHub pull request helpers', () => {
           files: [],
         }),
       );
+    });
+
+    test('records the user who opened the pull request as its author', async () => {
+      vi.mocked(fetchAPI)
+        .mockResolvedValueOnce({ number: 5, user: { login: 'alice', id: 7 } })
+        .mockResolvedValueOnce({});
+
+      const result = await createPullRequest({
+        branch: 'cms/posts/hello',
+        title: 'Create Post “hello”',
+        status: 'draft',
+        description: 'Description',
+      });
+
+      // The same author a listed pull request has, so a later save recognizes it as the user’s own
+      expect(result.author).toEqual({ name: 'alice', email: '', id: 7, login: 'alice' });
     });
   });
 
@@ -502,6 +561,7 @@ describe('GitHub pull request helpers', () => {
           branch: 'cms/contributor/repo/posts/hello',
           title: 'Create Post “hello”',
           status: 'pending_review',
+          description: 'Description',
         });
 
         expect(fetchAPI).toHaveBeenCalledWith('/repos/owner/repo/pulls', {

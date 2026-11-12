@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  countAssetsInFolder,
   fillInternalPathTemplate,
   getAssetByAbsolutePath,
   getAssetByInternalPath,
@@ -17,6 +18,7 @@ import {
   getAssetsByDirName,
   getAssetsByFolder,
   getDuplicateFiles,
+  getTakenNamesInDir,
   isAssetInFolder,
   isRelativePath,
 } from '$lib/services/assets';
@@ -33,7 +35,8 @@ import {
   selectedOrFocusedAssets,
   uploadingAssets,
 } from '$lib/services/assets/state';
-import { createMockAssetFolder } from '$lib/test/factories';
+import { allEntries } from '$lib/services/contents';
+import { createMockAsset, createMockAssetFolder } from '$lib/test/factories';
 
 // Mock all dependencies
 vi.mock('@sveltia/utils/file', async (importOriginal) => {
@@ -91,6 +94,7 @@ vi.mock('$lib/services/utils/file', async (importOriginal) => {
   return {
     ...Object.fromEntries(Object.keys(actual).map((key) => [key, vi.fn()])),
     stripPathPrefix: actual.stripPathPrefix,
+    getBaseName: actual.getBaseName,
     getDirName: actual.getDirName,
     sanitizeFileName: actual.sanitizeFileName,
   };
@@ -1107,6 +1111,8 @@ describe('assets/index', () => {
 
       const result = getAssetsByFolder(folder);
 
+      expect(countAssetsInFolder(folder)).toBe(getAssetsByFolder(folder).length);
+
       expect(result).toEqual([matchingAsset]);
     });
 
@@ -1126,6 +1132,7 @@ describe('assets/index', () => {
 
       expect(isAssetInFolder(/** @type {any} */ (matchingAsset), folder)).toBe(true);
       expect(getAssetsByFolder(folder)).toEqual([matchingAsset]);
+      expect(countAssetsInFolder(folder)).toBe(getAssetsByFolder(folder).length);
     });
 
     it('should return empty array when no assets match', () => {
@@ -1146,6 +1153,8 @@ describe('assets/index', () => {
       allAssets.current = [asset];
 
       const result = getAssetsByFolder(folder);
+
+      expect(countAssetsInFolder(folder)).toBe(getAssetsByFolder(folder).length);
 
       expect(result).toEqual([]);
     });
@@ -1193,8 +1202,15 @@ describe('assets/index', () => {
       // The asset is assigned to the field-level folder, but every folder with its path lists it,
       // while a folder nested in it keeps its own assets
       expect(getAssetsByFolder(assetCollectionFolder)).toEqual([asset]);
+      expect(countAssetsInFolder(assetCollectionFolder)).toBe(
+        getAssetsByFolder(assetCollectionFolder).length,
+      );
       expect(getAssetsByFolder(collectionFolder)).toEqual([asset]);
+      expect(countAssetsInFolder(collectionFolder)).toBe(
+        getAssetsByFolder(collectionFolder).length,
+      );
       expect(getAssetsByFolder(nestedFolder)).toEqual([nestedAsset]);
+      expect(countAssetsInFolder(nestedFolder)).toBe(getAssetsByFolder(nestedFolder).length);
     });
 
     it('should only return the assets of the same entry-relative folder', () => {
@@ -1228,8 +1244,36 @@ describe('assets/index', () => {
 
       // An entry-relative folder’s path is the collection’s, so it isn’t shared by path
       expect(getAssetsByFolder({ ...postsFolder })).toEqual([asset]);
+      expect(countAssetsInFolder({ ...postsFolder })).toBe(1);
       expect(getAssetsByFolder(pagesFolder)).toEqual([]);
+      expect(countAssetsInFolder(pagesFolder)).toBe(0);
+      expect(countAssetsInFolder(pagesFolder)).toBe(getAssetsByFolder(pagesFolder).length);
       expect(getAssetsByFolder(fixedFolder)).toEqual([fixedAsset]);
+      expect(countAssetsInFolder(fixedFolder)).toBe(getAssetsByFolder(fixedFolder).length);
+    });
+  });
+
+  describe('getTakenNamesInDir', () => {
+    it('should list the assets, the other files and the subfolders in the directory', () => {
+      allAssets.current = [
+        createMockAsset({ name: 'photo.jpg', folderPath: 'content/posts/hello' }),
+        createMockAsset({ name: 'icon.png', folderPath: 'content/posts/hello/images' }),
+        createMockAsset({ name: 'other.jpg', folderPath: 'content/posts/other' }),
+      ];
+      allEntries.current = /** @type {any[]} */ ([
+        { locales: { _default: { path: 'content/posts/hello/index.md' } } },
+      ]);
+
+      try {
+        expect(getTakenNamesInDir('content/posts/hello')).toEqual([
+          'photo.jpg',
+          'index.md',
+          'images',
+        ]);
+      } finally {
+        allAssets.current = [];
+        allEntries.current = [];
+      }
     });
   });
 
@@ -1430,6 +1474,82 @@ describe('assets/index', () => {
       expect(result).toEqual(mockAsset);
       expect(createPath).toHaveBeenCalledWith(['content/posts', 'images', 'photo.jpg']);
       expect(resolvePath).toHaveBeenCalledWith('content/posts/images/photo.jpg');
+    });
+
+    it('should resolve a path against the folder named after an entry in subfolders', async () => {
+      const { resolvePath, createPath } = await import('$lib/services/utils/file');
+
+      const mockAsset = {
+        path: 'content/posts/2025/06/my-post/cover.png',
+        name: 'cover.png',
+        sha: 'abc123',
+        size: 1024,
+        kind: /** @type {import('$lib/types/private').AssetKind} */ ('image'),
+        folder: createMockAssetFolder({ collectionName: 'posts', internalPath: 'content/posts' }),
+      };
+
+      const mockEntry = /** @type {any} */ ({
+        id: 'my-post',
+        slug: 'my-post',
+        subPath: '2025/06/my-post',
+        locales: {
+          en: {
+            path: 'content/posts/2025/06/my-post.md',
+            sha: 'sha123',
+            slug: 'my-post',
+            content: { title: 'My Post' },
+          },
+        },
+      });
+
+      // The `path` option puts the entry in subfolders, so the entry’s relative assets are saved to
+      // a folder named after it, next to the entry file
+      const mockCollection = /** @type {any} */ ({
+        name: 'posts',
+        _type: 'entry',
+        media_folder: '',
+        public_folder: '',
+        _file: { basePath: 'content/posts', subPath: '{{year}}/{{month}}/{{slug}}' },
+        _i18n: { defaultLocale: 'en' },
+      });
+
+      vi.mocked(createPath).mockReturnValue('content/posts/2025/06/my-post/cover.png');
+      vi.mocked(resolvePath).mockReturnValue('content/posts/2025/06/my-post/cover.png');
+      allAssets.current = [mockAsset];
+
+      const result = getAssetByRelativePathAndCollection({
+        path: 'cover.png',
+        entry: mockEntry,
+        collection: mockCollection,
+      });
+
+      expect(result).toEqual(mockAsset);
+      // Not next to the entry file in `content/posts/2025/06`, where the saved asset isn’t
+      expect(createPath).toHaveBeenCalledWith(['content/posts/2025/06/my-post', '', 'cover.png']);
+      expect(createPath).not.toHaveBeenCalledWith(['content/posts/2025/06', '', 'cover.png']);
+
+      // An asset stored next to the entry file, as before the entry had a folder of its own, is
+      // still found
+      const legacyAsset = { ...mockAsset, path: 'content/posts/2025/06/old.png', name: 'old.png' };
+
+      allAssets.current = [mockAsset, legacyAsset];
+      vi.mocked(createPath).mockImplementation((segments) => segments.filter(Boolean).join('/'));
+      vi.mocked(resolvePath).mockImplementation((value) => value);
+
+      expect(
+        getAssetByRelativePathAndCollection({
+          path: 'old.png',
+          entry: mockEntry,
+          collection: mockCollection,
+        }),
+      ).toEqual(legacyAsset);
+      expect(
+        getAssetByRelativePathAndCollection({
+          path: 'missing.png',
+          entry: mockEntry,
+          collection: mockCollection,
+        }),
+      ).toBeUndefined();
     });
 
     it('should pass componentName to getAssetFolder when resolving a field-level asset', async () => {
@@ -2583,6 +2703,198 @@ describe('assets/index', () => {
       // The resolved 'abc' folder (not the literal '{{filename}}') must be used
       expect(createPath).toHaveBeenCalledWith(['source/_posts', 'abc', 'img0.jpg']);
     });
+
+    it('should resolve template tags in public_folder before stripping it from the stored path', async () => {
+      // An absolute `media_folder` and an entry-relative `public_folder` that both have `{{slug}}`:
+      // the raw `public_folder` never matched the stored value, so the whole value was appended to
+      // the `media_folder` and the asset couldn’t be found
+      // @see https://github.com/sveltia/sveltia-cms/issues/1104
+      const { resolvePath, createPath } = await import('$lib/services/utils/file');
+      const { fillTemplate } = await import('$lib/services/common/template');
+      const { hasTemplateTags } = await import('$lib/services/common/template/tags');
+
+      const mockAsset = {
+        path: 'assets/realisations/my-project/photo-1.jpg',
+        name: 'photo-1.jpg',
+        sha: 'abc123',
+        size: 1024,
+        kind: /** @type {import('$lib/types/private').AssetKind} */ ('image'),
+        folder: createMockAssetFolder({
+          collectionName: 'realisations',
+          internalPath: 'assets/realisations/{{slug}}',
+          publicPath: '../../assets/realisations/{{slug}}',
+        }),
+      };
+
+      const mockEntry = /** @type {any} */ ({
+        id: 'my-project',
+        slug: 'my-project',
+        locales: {
+          en: {
+            path: 'content/realisations/my-project.md',
+            sha: 'sha123',
+            slug: 'my-project',
+            content: { cover: '../../assets/realisations/my-project/photo-1.jpg' },
+          },
+        },
+      });
+
+      const mockCollection = /** @type {any} */ ({
+        name: 'realisations',
+        folder: 'content/realisations',
+        media_folder: '/assets/realisations/{{slug}}',
+        public_folder: '../../assets/realisations/{{slug}}',
+        _i18n: { defaultLocale: 'en' },
+      });
+
+      vi.mocked(hasTemplateTags).mockReturnValueOnce(true).mockReturnValueOnce(true);
+      vi.mocked(fillTemplate)
+        .mockReturnValueOnce('/assets/realisations/my-project')
+        .mockReturnValueOnce('../../assets/realisations/my-project');
+      vi.mocked(createPath).mockReturnValue('assets/realisations/my-project/photo-1.jpg');
+      vi.mocked(resolvePath).mockReturnValue('assets/realisations/my-project/photo-1.jpg');
+      allAssets.current = [mockAsset];
+
+      const result = getAssetByRelativePathAndCollection({
+        path: '../../assets/realisations/my-project/photo-1.jpg',
+        entry: mockEntry,
+        collection: mockCollection,
+      });
+
+      expect(result).toEqual(mockAsset);
+      expect(fillTemplate).toHaveBeenCalledWith(
+        '../../assets/realisations/{{slug}}',
+        expect.objectContaining({
+          type: 'media_folder',
+          collection: mockCollection,
+          entryFilePath: 'content/realisations/my-project.md',
+        }),
+      );
+      // The resolved `public_folder` prefix is stripped, leaving only the file name
+      expect(createPath).toHaveBeenCalledWith(['assets/realisations/my-project', 'photo-1.jpg']);
+    });
+
+    describe('with the global folder tags in the collection folders', () => {
+      const entry = /** @type {any} */ ({
+        id: 'my-post',
+        slug: 'my-post',
+        locales: {
+          en: {
+            path: 'src/content/blog/my-post.md',
+            sha: 'sha123',
+            slug: 'my-post',
+            content: { title: 'My Post' },
+          },
+        },
+      });
+
+      /**
+       * Find an asset with the given collection folders and global configuration.
+       * @param {object} args
+       * @param {string} args.path
+       * @param {string} args.assetPath
+       * @param {Record<string, any>} args.folders
+       * @param {Record<string, any> | undefined} args.config
+       * @returns {Promise<any>}
+       */
+      const findAsset = async ({ path, assetPath, folders, config }) => {
+        const { resolvePath, createPath } = await import('$lib/services/utils/file');
+        const { stripSlashes } = await import('@sveltia/utils/string');
+        const { cmsConfig } = await import('$lib/services/config/state');
+
+        const actual = /** @type {Record<string, any>} */ (
+          await vi.importActual('@sveltia/utils/string')
+        );
+
+        vi.mocked(stripSlashes).mockImplementation(actual.stripSlashes);
+        vi.mocked(createPath).mockImplementation((segments) => segments.filter(Boolean).join('/'));
+        vi.mocked(resolvePath).mockImplementation((p) => p);
+        cmsConfig.current = /** @type {any} */ (config);
+        allAssets.current = [/** @type {any} */ ({ path: assetPath, name: 'photo.jpg' })];
+
+        try {
+          return getAssetByRelativePathAndCollection({
+            path,
+            entry,
+            collection: /** @type {any} */ ({
+              name: 'blog',
+              folder: 'src/content/blog',
+              ...folders,
+              _i18n: { defaultLocale: 'en' },
+            }),
+          });
+        } finally {
+          cmsConfig.current = undefined;
+        }
+      };
+
+      it('should replace `{{media_folder}}` with the global media folder', async () => {
+        const result = await findAsset({
+          path: '../../assets/images/blog/photo.jpg',
+          assetPath: 'src/assets/images/blog/photo.jpg',
+          folders: {
+            media_folder: '{{media_folder}}/blog',
+            public_folder: '../../assets/images/blog',
+          },
+          config: { media_folder: 'src/assets/images', public_folder: '/images' },
+        });
+
+        expect(result?.path).toBe('src/assets/images/blog/photo.jpg');
+      });
+
+      it('should replace `{{public_folder}}` with the global public folder', async () => {
+        const result = await findAsset({
+          path: '/images/blog/photo.jpg',
+          assetPath: 'src/assets/images/blog/photo.jpg',
+          folders: {
+            media_folder: '{{media_folder}}/blog',
+            public_folder: '{{public_folder}}/blog',
+          },
+          config: { media_folder: 'src/assets/images', public_folder: '/images' },
+        });
+
+        expect(result?.path).toBe('src/assets/images/blog/photo.jpg');
+      });
+
+      it('should not add a slash before a global public folder starting with `@`', async () => {
+        const result = await findAsset({
+          path: '@assets/blog/photo.jpg',
+          assetPath: 'src/assets/blog/photo.jpg',
+          folders: {
+            media_folder: '{{media_folder}}/blog',
+            public_folder: '{{public_folder}}/blog',
+          },
+          config: { media_folder: 'src/assets', public_folder: '@assets' },
+        });
+
+        expect(result?.path).toBe('src/assets/blog/photo.jpg');
+      });
+
+      it('should leave the tags as they are without the global media folder', async () => {
+        const { fillTemplate } = await import('$lib/services/common/template');
+
+        vi.mocked(fillTemplate).mockReturnValue('');
+
+        const withoutGlobalFolder = await findAsset({
+          path: 'photo.jpg',
+          assetPath: 'src/content/blog/photo.jpg',
+          folders: { media_folder: '{{media_folder}}/blog' },
+          config: { public_folder: '/images' },
+        });
+
+        const withoutConfig = await findAsset({
+          path: 'photo.jpg',
+          assetPath: 'src/content/blog/photo.jpg',
+          folders: { media_folder: '{{media_folder}}/blog' },
+          config: undefined,
+        });
+
+        // The tags are then filled in as entry template tags, as before
+        expect(fillTemplate).toHaveBeenCalledWith('{{media_folder}}/blog', expect.anything());
+        expect(withoutGlobalFolder?.path).toBe('src/content/blog/photo.jpg');
+        expect(withoutConfig?.path).toBe('src/content/blog/photo.jpg');
+      });
+    });
   });
 
   describe('entry-relative assets with a locale folder per locale', () => {
@@ -2672,6 +2984,17 @@ describe('assets/index', () => {
       expect(
         getAssetByPath({ value: 'photo-fr.jpg', entry, collectionName: 'posts' }),
       ).toBeUndefined();
+    });
+
+    it('should fall back to the default locale’s copy of a file only that locale has', () => {
+      const enOnlyPhoto = createAsset('content/posts/en/hello/cover.jpg');
+
+      allAssets.current = [enPhoto, frPhoto, frOnlyPhoto, enOnlyPhoto];
+
+      // A file in a duplicated or synced field is stored once, beside the default locale’s entry
+      expect(
+        getAssetByPath({ value: 'cover.jpg', entry, collectionName: 'posts', locale: 'fr' }),
+      ).toBe(enOnlyPhoto);
     });
 
     it('should look beside the default locale’s entry file if the entry lacks the locale', () => {
@@ -3020,6 +3343,7 @@ describe('assets/index', () => {
       const mockCollection = /** @type {any} */ ({
         name: 'posts',
         _type: 'entry',
+        _file: { basePath: 'content/posts' },
         _i18n: {
           defaultLocale: 'en',
           i18nEnabled: true,
@@ -3076,6 +3400,7 @@ describe('assets/index', () => {
       const mockCollection = /** @type {any} */ ({
         name: 'posts',
         _type: 'entry',
+        _file: { basePath: 'content/posts' },
         _i18n: {
           defaultLocale: 'en',
           i18nEnabled: true,
@@ -3132,6 +3457,7 @@ describe('assets/index', () => {
       const mockCollection = /** @type {any} */ ({
         name: 'posts',
         _type: 'entry',
+        _file: { basePath: 'content/posts' },
         _i18n: {
           defaultLocale: 'en',
           i18nEnabled: true,
