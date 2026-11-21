@@ -17,7 +17,6 @@
     TruncatedText,
   } from '@sveltia/ui';
   import { LocalStorage } from '@sveltia/utils/storage';
-  import { mount } from 'svelte';
 
   import BackButton from '$lib/components/common/page-toolbar/back-button.svelte';
   import ResetDialog from '$lib/components/contents/details/editor/reset-dialog.svelte';
@@ -56,6 +55,7 @@
   import { getEntrySummary } from '$lib/services/contents/entry/summary';
   import { getLocaleLabel } from '$lib/services/contents/i18n';
   import { getDraftI18nConfig } from '$lib/services/contents/i18n/config';
+  import { getNewsletterText, renderNewsletterContent } from '$lib/services/contents/newsletter';
   import { deployPollTimedOut } from '$lib/services/deployments';
   import { recheckDeployments, retainDeployPolling } from '$lib/services/deployments/poll';
   import { isSearchResultsPath } from '$lib/services/search/navigation';
@@ -73,8 +73,6 @@
   } from '$lib/services/workflow';
   import { getDiscardDialogStrings } from '$lib/services/workflow/dialogs';
   import { openAuthoring } from '$lib/services/workflow/open-authoring';
-
-  import NewsletterContent from '../../newsletter/NewsletterContent.svelte';
 
   /**
    * @import { EntryConflict } from '$lib/services/contents/draft/save/conflict';
@@ -758,11 +756,8 @@
       return;
     }
 
-    /* eslint-disable */
-    const elem = document.createElement('div');
-    mount(NewsletterContent, { target: elem, props: { newsletter, generateBlobSrc: false } });
-    const html = elem.innerHTML;
-    /* eslint-enable */
+    const html = renderNewsletterContent(newsletter);
+    const text = getNewsletterText(newsletter);
 
     const userCache =
       (await LocalStorage.get('sveltia-cms.user')) ||
@@ -781,7 +776,7 @@
           slug: originalEntry.slug,
           subject: entryDraft.current?.currentValues[defaultLocale].title,
           html,
-          text: newsletter.text,
+          text,
         },
       }),
       headers: {
