@@ -1,6 +1,6 @@
-import { flushSync, mount, unmount } from 'svelte';
+import { marked } from 'marked';
 
-import NewsletterContent from '$lib/components/newsletter/NewsletterContent.svelte';
+import { sanitizeRichTextHTML } from '$lib/services/contents/fields/rich-text/sanitize';
 
 /**
  * Render the newsletter content blocks to HTML before reading the mounted DOM.
@@ -9,23 +9,34 @@ import NewsletterContent from '$lib/components/newsletter/NewsletterContent.svel
  */
 export const renderNewsletterContent = (newsletter) => {
   const elem = document.createElement('div');
-  /** @type {ReturnType<typeof mount> | undefined} */
-  let component;
 
-  flushSync(() => {
-    component = mount(NewsletterContent, {
-      target: elem,
-      props: { newsletter, generateBlobSrc: false },
-    });
+  const content = (
+    Array.isArray(newsletter.content) ? newsletter.content : Object.values(newsletter.content ?? {})
+  ).filter((value) => value && typeof value === 'object');
+
+  content.forEach((value) => {
+    if (value.type === 'image') {
+      const image = document.createElement('img');
+
+      image.alt = '';
+      image.className = '';
+      image.src = value.image ?? '';
+      image.setAttribute('width', '100%');
+
+      elem.append(image);
+      elem.append(document.createElement('br'), document.createElement('br'));
+    } else if (value.type === 'text') {
+      const text = document.createElement('div');
+
+      text.innerHTML = sanitizeRichTextHTML(
+        String(marked.parse(typeof value.text === 'string' ? value.text : '')),
+        { ADD_TAGS: [] },
+      );
+      elem.append(...text.childNodes);
+    }
   });
 
-  const html = elem.innerHTML;
-
-  if (component) {
-    unmount(component);
-  }
-
-  return html;
+  return elem.innerHTML;
 };
 
 /**
@@ -34,17 +45,17 @@ export const renderNewsletterContent = (newsletter) => {
  * @returns {string} Plain-text newsletter content.
  */
 export const getNewsletterText = (newsletter) => {
-  if (newsletter.text) {
+  if (typeof newsletter.text === 'string' && newsletter.text) {
     return newsletter.text;
   }
 
-  if (!Array.isArray(newsletter.content)) {
-    return '';
-  }
+  const content = (
+    Array.isArray(newsletter.content) ? newsletter.content : Object.values(newsletter.content ?? {})
+  ).filter((value) => value && typeof value === 'object');
 
-  return newsletter.content
+  return content
     .filter((value) => value.type === 'text')
-    .map((value) => value.text ?? '')
+    .map((value) => (typeof value.text === 'string' ? value.text : ''))
     .filter(Boolean)
     .join('\n\n');
 };
