@@ -40,7 +40,11 @@
   import { getReferencedPendingEntrySet } from '$lib/services/contents/draft/pending-entries';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
   import { canResetEntry } from '$lib/services/contents/draft/update/reset';
-  import { activeInlineEditors, copyFromLocaleToast, listItemClipboardToast } from '$lib/services/contents/editor';
+  import {
+    activeInlineEditors,
+    copyFromLocaleToast,
+    listItemClipboardToast,
+  } from '$lib/services/contents/editor';
   import { fieldUpdatePending } from '$lib/services/contents/editor/pending';
   import { createResetMenuState } from '$lib/services/contents/editor/reset-menu.svelte';
   import { duplicateEntryDraft, saveEntryDraftFlow } from '$lib/services/contents/editor/save';
@@ -70,7 +74,6 @@
   } from '$lib/services/workflow';
   import { getDiscardDialogStrings } from '$lib/services/workflow/dialogs';
   import { openAuthoring } from '$lib/services/workflow/open-authoring';
-
 
   /**
    * @import { EntryConflict } from '$lib/services/contents/draft/save/conflict';
@@ -227,13 +230,13 @@
   // one in a collection whose review can’t be skipped would miss its review
   const directPublishBlocked = $derived(
     directPublish &&
-    !canSkipReviewAlong([
-      // A deselected entry isn’t saved at all
-      ...(entryDraft.current?.pendingEntries.length
-        ? getReferencedPendingEntrySet(entryDraft.current)
-        : []),
-      ...(unpublishedEntry?.workflow.companions ?? []),
-    ]),
+      !canSkipReviewAlong([
+        // A deselected entry isn’t saved at all
+        ...(entryDraft.current?.pendingEntries.length
+          ? getReferencedPendingEntrySet(entryDraft.current)
+          : []),
+        ...(unpublishedEntry?.workflow.companions ?? []),
+      ]),
   );
   // The review prompt hands the entry over for review, or marks it ready when there’s no review
   const reviewDialogLabel = $derived(
