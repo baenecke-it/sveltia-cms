@@ -7,7 +7,7 @@
 {#if newsletter && newsletter.content}
   {#each newsletter.content as value, i (i)}
     {#if value.type === 'image'}
-      <img alt="" class="" src={value.image} width="100%" />
+      <img alt="" class="" src="https://singtonic.net{value.image}" width="100%" />
       <br />
       <br />
     {:else if value.type === 'text'}
