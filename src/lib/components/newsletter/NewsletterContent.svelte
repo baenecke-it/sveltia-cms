@@ -2,6 +2,23 @@
   import { marked } from 'marked';
 
   const { newsletter } = $props();
+
+  marked.use({
+    renderer: {
+      /**
+       * Override the default link rendering to add custom styles.
+       * @param href
+       * @param title
+       * @param text
+       * @returns {string}
+       */
+      link(href, title, text) {
+        const link = marked.Renderer.prototype.link.call(this, href, title, text);
+
+        return link.replace('<a', '<a style=\'color:#cc2944;text-decoration:none;text-transform:none\'');
+      }
+    }
+  })
 </script>
 
 {#if newsletter && newsletter.content}
