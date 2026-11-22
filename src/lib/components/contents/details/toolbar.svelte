@@ -758,7 +758,11 @@
       return;
     }
 
-    const html = renderNewsletterContent(newsletter);
+    const html = renderNewsletterContent(newsletter, {
+      entry: originalEntry,
+      collectionName: selectedCollection?.current?.name,
+      locale: defaultLocale,
+    });
     const text = getNewsletterText(newsletter);
 
     const userCache =
