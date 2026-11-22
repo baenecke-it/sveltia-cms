@@ -2,7 +2,13 @@
 
 import { describe, expect, test } from 'vitest';
 
-import { getNewsletterText, renderNewsletterContent } from './newsletter';
+import { cmsConfig } from '$lib/services/config/state';
+
+import {
+  getNewsletterText,
+  renderNewsletterContent,
+  resolveNewsletterImageSrc,
+} from './newsletter';
 
 describe('newsletter', () => {
   test('renders text content blocks to HTML', () => {
@@ -11,6 +17,28 @@ describe('newsletter', () => {
     });
 
     expect(html).toContain('<strong>Hello</strong>');
+  });
+
+  test('renders image blocks with absolute public URLs', () => {
+    cmsConfig.current = /** @type {any} */ ({ _baseURL: 'https://example.com' });
+
+    const html = renderNewsletterContent({
+      content: [{ type: 'image', image: '/uploads/photo.jpg' }],
+    });
+
+    expect(html).toContain('src="https://example.com/uploads/photo.jpg"');
+  });
+
+  test('preserves external image URLs', () => {
+    expect(resolveNewsletterImageSrc('https://cdn.example.com/photo.jpg')).toBe(
+      'https://cdn.example.com/photo.jpg',
+    );
+  });
+
+  test('does not turn blob URLs into public URLs', () => {
+    expect(resolveNewsletterImageSrc('blob:http://localhost/image-id')).toBe(
+      'blob:http://localhost/image-id',
+    );
   });
 
   test('uses the configured text value', () => {
