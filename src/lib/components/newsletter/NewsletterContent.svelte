@@ -7,13 +7,11 @@
     renderer: {
       /**
        * Override the default link rendering to add custom styles.
-       * @param href
-       * @param title
-       * @param text
-       * @returns {string}
+       * @param {import('marked').Tokens.Link} token The link token.
+       * @returns {string} The HTML string for the link with custom styles.
        */
-      link(href, title, text) {
-        const link = marked.Renderer.prototype.link.call(this, href, title, text);
+      link(token) {
+        const link = marked.Renderer.prototype.link.call(this, token);
 
         return link.replace('<a', '<a style=\'color:#cc2944;text-decoration:none;text-transform:none\'');
       }
