@@ -17,7 +17,6 @@
     TruncatedText,
   } from '@sveltia/ui';
   import { LocalStorage } from '@sveltia/utils/storage';
-  import { mount } from 'svelte';
 
   import BackButton from '$lib/components/common/page-toolbar/back-button.svelte';
   import ResetDialog from '$lib/components/contents/details/editor/reset-dialog.svelte';
@@ -41,11 +40,7 @@
   import { getReferencedPendingEntrySet } from '$lib/services/contents/draft/pending-entries';
   import { getEntryDraftContext } from '$lib/services/contents/draft/state.svelte';
   import { canResetEntry } from '$lib/services/contents/draft/update/reset';
-  import {
-    activeInlineEditors,
-    copyFromLocaleToast,
-    listItemClipboardToast,
-  } from '$lib/services/contents/editor';
+  import { activeInlineEditors, copyFromLocaleToast, listItemClipboardToast } from '$lib/services/contents/editor';
   import { fieldUpdatePending } from '$lib/services/contents/editor/pending';
   import { createResetMenuState } from '$lib/services/contents/editor/reset-menu.svelte';
   import { duplicateEntryDraft, saveEntryDraftFlow } from '$lib/services/contents/editor/save';
@@ -56,11 +51,13 @@
   import { getEntrySummary } from '$lib/services/contents/entry/summary';
   import { getLocaleLabel } from '$lib/services/contents/i18n';
   import { getDraftI18nConfig } from '$lib/services/contents/i18n/config';
+  import { getNewsletterText, renderNewsletterContent } from '$lib/services/contents/newsletter.js';
   import { deployPollTimedOut } from '$lib/services/deployments';
   import { recheckDeployments, retainDeployPolling } from '$lib/services/deployments/poll';
   import { isSearchResultsPath } from '$lib/services/search/navigation';
   import { env } from '$lib/services/user/env.svelte';
   import { prefs } from '$lib/services/user/prefs.svelte';
+  import { unflattenKeys } from '$lib/services/utils/object.js';
   import {
     canSkipReviewAlong,
     checkPublishedVersion,
@@ -74,7 +71,6 @@
   import { getDiscardDialogStrings } from '$lib/services/workflow/dialogs';
   import { openAuthoring } from '$lib/services/workflow/open-authoring';
 
-  import NewsletterContent from '../../newsletter/NewsletterContent.svelte';
 
   /**
    * @import { EntryConflict } from '$lib/services/contents/draft/save/conflict';
@@ -231,13 +227,13 @@
   // one in a collection whose review can’t be skipped would miss its review
   const directPublishBlocked = $derived(
     directPublish &&
-      !canSkipReviewAlong([
-        // A deselected entry isn’t saved at all
-        ...(entryDraft.current?.pendingEntries.length
-          ? getReferencedPendingEntrySet(entryDraft.current)
-          : []),
-        ...(unpublishedEntry?.workflow.companions ?? []),
-      ]),
+    !canSkipReviewAlong([
+      // A deselected entry isn’t saved at all
+      ...(entryDraft.current?.pendingEntries.length
+        ? getReferencedPendingEntrySet(entryDraft.current)
+        : []),
+      ...(unpublishedEntry?.workflow.companions ?? []),
+    ]),
   );
   // The review prompt hands the entry over for review, or marks it ready when there’s no review
   const reviewDialogLabel = $derived(
@@ -751,18 +747,16 @@
   title={_('newsletter.send')}
   okLabel={_('newsletter.send')}
   onOk={async () => {
-    const newsletter = entryDraft.current?.currentValues[defaultLocale];
+    const flattenedNewsletter = entryDraft.current?.currentValues[defaultLocale];
+    const newsletter = flattenedNewsletter ? unflattenKeys(flattenedNewsletter) : undefined;
 
     if (!newsletter) {
       updateNewsletterSentStateErrorDialog = true;
       return;
     }
 
-    /* eslint-disable */
-    const elem = document.createElement('div');
-    mount(NewsletterContent, { target: elem, props: { newsletter, generateBlobSrc: false } });
-    const html = elem.innerHTML;
-    /* eslint-enable */
+    const html = renderNewsletterContent(newsletter);
+    const text = getNewsletterText(newsletter);
 
     const userCache =
       (await LocalStorage.get('sveltia-cms.user')) ||
@@ -781,7 +775,7 @@
           slug: originalEntry.slug,
           subject: entryDraft.current?.currentValues[defaultLocale].title,
           html,
-          text: newsletter.text,
+          text,
         },
       }),
       headers: {
