@@ -13,10 +13,13 @@
       link(token) {
         const link = marked.Renderer.prototype.link.call(this, token);
 
-        return link.replace('<a', '<a style=\'color:#cc2944;text-decoration:none;text-transform:none\'');
-      }
-    }
-  })
+        return link.replace(
+          '<a',
+          "<a style='color:#cc2944;text-decoration:none;text-transform:none'",
+        );
+      },
+    },
+  });
 </script>
 
 {#if newsletter && newsletter.content}
